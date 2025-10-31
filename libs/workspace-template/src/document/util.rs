@@ -1,7 +1,7 @@
 use crate::database::database_collab::create_database_collab;
 use crate::document::parser::JsonToDocumentParser;
 use crate::{TemplateData, TemplateObjectId};
-use collab::core::collab::{default_client_id, CollabOptions};
+use collab::core::collab::{CollabOptions, default_client_id};
 use collab::core::origin::CollabOrigin;
 use collab::preclude::Collab;
 use collab_database::entity::CreateDatabaseParams;

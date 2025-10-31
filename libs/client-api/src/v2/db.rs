@@ -18,7 +18,11 @@ use tracing::instrument;
 use uuid::Uuid;
 use yrs::block::ClientID;
 use yrs::updates::decoder::Decode;
-use yrs::{ReadTxn, StateVector, Transact, Update};
+use yrs::{ReadTxn, StateVector, Transact};
+
+// Empty update constants for checking if an update is empty
+const EMPTY_UPDATE_V1: &[u8] = &[0, 0];
+// const EMPTY_UPDATE_V2: &[u8] = &[0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
 
 #[derive(Clone)]
 pub(crate) struct Db {
@@ -114,8 +118,9 @@ impl Db {
     let instance = self.inner.get()?;
     let ops = instance.read_txn();
     let object_id = object_id.to_string();
-    let options = CollabOptions::new(object_id.to_string(), self.client_id);
-    let mut collab = Collab::new_with_options(CollabOrigin::Empty, options)?;
+    let options = CollabOptions::new(object_id.clone(), self.client_id);
+    let mut collab = Collab::new_with_options(CollabOrigin::Empty, options)
+      .map_err(|e| PersistenceError::Internal(anyhow!("Failed to create collab: {}", e)))?;
     let mut txn = collab.transact_mut();
     ops.load_doc_with_txn(
       self.uid,
@@ -138,8 +143,9 @@ impl Db {
     for object_id in object_ids {
       let get_state_vector = || -> Result<StateVector, PersistenceError> {
         let object_id_str = object_id.to_string();
-        let options = CollabOptions::new(object_id_str.to_string(), self.client_id);
-        let mut collab = Collab::new_with_options(CollabOrigin::Empty, options)?;
+        let options = CollabOptions::new(object_id_str.clone(), self.client_id);
+        let mut collab = Collab::new_with_options(CollabOrigin::Empty, options)
+          .map_err(|e| PersistenceError::Internal(anyhow!("Failed to create collab: {}", e)))?;
         let mut txn = collab.transact_mut();
 
         ops.load_doc_with_txn(
@@ -245,7 +251,7 @@ impl Db {
     update_v1: &[u8],
     action_source: ActionSource,
   ) -> Result<Option<StateVector>, PersistenceError> {
-    if update_v1 == Update::EMPTY_V1 {
+    if update_v1 == EMPTY_UPDATE_V1 {
       sync_trace!("skipping empty update {}", object_id);
       return Ok(None);
     }

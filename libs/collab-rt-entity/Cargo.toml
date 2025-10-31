@@ -18,6 +18,7 @@ bincode.workspace = true
 tokio-tungstenite = { version = "0.20.1", optional = true }
 prost.workspace = true
 database-entity.workspace = true
+# Use workspace yrs to match the version used by collab crate (from AppFlowy-Collab)
 yrs.workspace = true
 collab-rt-protocol.workspace = true
 serde_repr = "0.1"

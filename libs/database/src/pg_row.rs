@@ -189,6 +189,7 @@ pub struct AFUserProfileRow {
   pub updated_at: Option<DateTime<Utc>>,
   pub created_at: Option<DateTime<Utc>>,
   pub latest_workspace_id: Option<Uuid>,
+  pub password_set_by_user: Option<bool>,
 }
 
 impl TryFrom<AFUserProfileRow> for AFUserProfile {
@@ -215,6 +216,7 @@ impl TryFrom<AFUserProfileRow> for AFUserProfile {
       encryption_sign: value.encryption_sign,
       latest_workspace_id,
       updated_at: value.updated_at.map(|v| v.timestamp()).unwrap_or(0),
+      password_set_by_user: value.password_set_by_user.unwrap_or(false),
     })
   }
 }

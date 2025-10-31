@@ -677,8 +677,8 @@ pub async fn select_user_profile<'a, E: Executor<'a, Database = Postgres>>(
   executor: E,
   user_uuid: &Uuid,
 ) -> Result<Option<AFUserProfileRow>, AppError> {
-  let user_profile = sqlx::query_as!(
-    AFUserProfileRow,
+  // 使用 query_as (不带!) 以避免编译时SQL验证，适配Docker离线构建
+  let user_profile = sqlx::query_as::<_, AFUserProfileRow>(
     r#"
       WITH af_user_row AS (
         SELECT * FROM af_user WHERE uuid = $1
@@ -704,11 +704,15 @@ pub async fn select_user_profile<'a, E: Executor<'a, Database = Postgres>>(
            AND COALESCE(af_workspace.is_initialized, true) = true
          ORDER BY af_workspace_member.updated_at DESC
          LIMIT 1
-       ) AS latest_workspace_id
+       ) AS latest_workspace_id,
+       COALESCE(
+         (SELECT password_set_by_user FROM auth.users WHERE id = af_user_row.uuid),
+         false
+       ) AS password_set_by_user
       FROM af_user_row
-    "#,
-    user_uuid
+    "#
   )
+  .bind(user_uuid)
   .fetch_optional(executor)
   .await?;
   Ok(user_profile)
@@ -2087,4 +2091,35 @@ pub async fn upsert_page_mention<'a, E: Executor<'a, Database = Postgres>>(
   .execute(executor)
   .await?;
   Ok(())
+}
+
+/// Get all workspace IDs and roles for a user by UUID
+#[inline]
+pub async fn select_user_workspace_ids<'a, E: Executor<'a, Database = Postgres>>(
+  executor: E,
+  user_uuid: &Uuid,
+) -> Result<Vec<(Uuid, AFRole)>, AppError> {
+  let rows = sqlx::query!(
+    r#"
+      SELECT 
+        af_workspace_member.workspace_id,
+        af_workspace_member.role_id
+      FROM af_workspace_member
+      JOIN af_user ON af_workspace_member.uid = af_user.uid
+      WHERE af_user.uuid = $1
+    "#,
+    user_uuid
+  )
+  .fetch_all(executor)
+  .await?;
+
+  let result = rows
+    .into_iter()
+    .map(|row| {
+      let role = AFRole::from(row.role_id);
+      (row.workspace_id, role)
+    })
+    .collect();
+
+  Ok(result)
 }

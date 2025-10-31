@@ -178,52 +178,18 @@ services:
       # ai:
       #   condition: service_started
 
-  ai:
+  admin_frontend:
     restart: on-failure
-    image: appflowyinc/appflowy_ai:${APPFLOWY_AI_VERSION:-latest}
-    ports:
-      - "5001:5001"
+    image: appflowyinc/admin_frontend:${APPFLOWY_ADMIN_FRONTEND_VERSION:-latest}
     environment:
-      # 使用通义千问的API密钥，因为它是sk-格式，与OpenAI兼容
-      # JWT Configuration - 添加缺失的JWT配置
-      - JWT_SECRET=${GOTRUE_JWT_SECRET}
-      - APPFLOWY_GOTRUE_JWT_SECRET=${GOTRUE_JWT_SECRET}
-      - APPFLOWY_GOTRUE_JWT_EXP=${GOTRUE_JWT_EXP:-3600}
-      - APPFLOWY_GOTRUE_BASE_URL=${APPFLOWY_GOTRUE_BASE_URL:-http://gotrue:9999}
-      - OPENAI_API_KEY=${AI_QWEN_API_KEY}      # 使用通义千问的API base来兼容OpenAI格式
-      - OPENAI_API_BASE=${AI_QWEN_API_BASE}
-      - APPFLOWY_AI_SERVER_PORT=${AI_SERVER_PORT}
-      - APPFLOWY_AI_DATABASE_URL=${AI_DATABASE_URL}
-      - DATABASE_URL=${AI_DATABASE_URL}
-      - APPFLOWY_AI_REDIS_URL=${AI_REDIS_URL}
-      - AI_APPFLOWY_HOST=${AI_APPFLOWY_HOST}
-      - AI_USE_MINIO=${APPFLOWY_S3_USE_MINIO}
-      - AI_MINIO_URL=${AI_MINIO_URL}
-      - AI_AWS_ACCESS_KEY_ID=${APPFLOWY_S3_ACCESS_KEY}
-      - AI_AWS_SECRET_ACCESS_KEY=${APPFLOWY_S3_SECRET_KEY}
-      # DeepSeek R1 V3 Configuration
-      - DEEPSEEK_API_KEY=${AI_DEEPSEEK_API_KEY}
-      - DEEPSEEK_API_BASE=${AI_DEEPSEEK_API_BASE}
-      - DEEPSEEK_MODEL_NAME=${AI_DEEPSEEK_MODEL_NAME}
-      - ENABLE_DEEPSEEK=true
-      # 通义千问 Configuration
-      - QWEN_API_KEY=${AI_QWEN_API_KEY}
-      - QWEN_API_BASE=${AI_QWEN_API_BASE}
-      - QWEN_MODEL_NAME=${AI_QWEN_MODEL_NAME}
-      - ENABLE_QWEN=true
-      # 豆包 Configuration
-      - DOUBAO_API_KEY=${AI_DOUBAO_API_KEY}
-      - DOUBAO_API_BASE=${AI_DOUBAO_API_BASE}
-      - DOUBAO_MODEL_NAME=${AI_DOUBAO_MODEL_NAME}
-      - ENABLE_DOUBAO=true
-      - LOG_LEVEL=DEBUG
+      - APPFLOWY_GOTRUE_BASE_URL=${APPFLOWY_BASE_URL}/gotrue
+      - APPFLOWY_BASE_URL=${APPFLOWY_BASE_URL}
+      
     depends_on:
-      postgres:
+      gotrue:
         condition: service_healthy
-      redis:
+      appflowy_cloud:
         condition: service_started
-    networks:
-      - default
 
   nginx:
     restart: on-failure

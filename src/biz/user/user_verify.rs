@@ -76,6 +76,37 @@ pub async fn verify_token(access_token: &str, state: &AppState) -> Result<bool, 
     state.metrics.collab_metrics.observe_pg_tx(start.elapsed());
   } else {
     trace!("user already exists:{},{}", user.id, user.email);
+    // For existing users, ensure their workspace roles are cached in Casbin
+    // This is important after server restarts or when Casbin cache is cleared
+    use database::user::select_uid_from_uuid;
+    use database::workspace::select_user_workspace_ids;
+    
+    let uid = select_uid_from_uuid(txn.deref_mut(), &user_uuid).await?;
+    let workspace_ids = select_user_workspace_ids(txn.deref_mut(), &user_uuid).await?;
+    
+    // Commit the transaction before caching roles
+    txn
+      .commit()
+      .await
+      .context("fail to commit transaction to verify token")?;
+    
+    // Cache all workspace roles for this user
+    for (workspace_id, role) in workspace_ids {
+      if let Err(e) = state
+        .workspace_access_control
+        .insert_role(&uid, &workspace_id, role)
+        .await
+      {
+        // Log error but don't fail the login process
+        event!(
+          tracing::Level::WARN,
+          "Failed to cache role for user {} in workspace {}: {}",
+          uid,
+          workspace_id,
+          e
+        );
+      }
+    }
   }
 
   Ok(is_new)

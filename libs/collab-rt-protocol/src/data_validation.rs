@@ -14,8 +14,9 @@ pub async fn collab_from_encode_collab(object_id: &Uuid, data: &[u8]) -> Result<
 
   tokio::task::spawn_blocking(move || {
     let encoded_collab = EncodedCollab::decode_from_bytes(&data)?;
-    let options = CollabOptions::new(object_id.to_string(), default_client_id())
-      .with_data_source(DataSource::DocStateV1(encoded_collab.doc_state.to_vec()));
+    let data_source = DataSource::DocStateV1(encoded_collab.doc_state.to_vec());
+    let options = CollabOptions::new(object_id, default_client_id())
+      .with_data_source(data_source);
     let collab = Collab::new_with_options(CollabOrigin::Empty, options)?;
 
     Ok::<_, Error>(collab)

@@ -387,6 +387,27 @@ impl Client {
     Ok(response)
   }
 
+  /// Check user password status - no authentication required
+  ///
+  /// This endpoint checks if a user exists and whether they have actively set a password.
+  /// The email_or_phone parameter can be either an email address or a phone number.
+  ///
+  /// Returns CheckPasswordStatusResponse with:
+  /// - user_exists: whether the user account exists
+  /// - has_password: whether the user has any password (including auto-generated)
+  /// - password_set_by_user: whether the user actively set their password (not auto-generated)
+  #[instrument(level = "debug", skip_all, err)]
+  pub async fn check_password_status(
+    &self,
+    email_or_phone: &str,
+  ) -> Result<gotrue_entity::dto::CheckPasswordStatusResponse, AppResponseError> {
+    let response = self
+      .gotrue_client
+      .check_password_status(email_or_phone)
+      .await?;
+    Ok(response)
+  }
+
   /// Attempts to sign in using a URL, extracting refresh_token from the URL.
   /// It looks like, e.g., `appflowy-flutter://#access_token=...&expires_in=3600&provider_token=...&refresh_token=...&token_type=bearer`.
   ///

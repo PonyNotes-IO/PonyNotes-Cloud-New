@@ -304,6 +304,10 @@ pub fn workspace_scope() -> Scope {
       web::resource("/{workspace_id}/usage").route(web::get().to(get_workspace_usage_handler)),
     )
     .service(
+      web::resource("/{workspace_id}/usage-and-limit")
+        .route(web::get().to(get_workspace_usage_and_limit_handler)),
+    )
+    .service(
       web::resource("/published/{publish_namespace}")
         .route(web::get().to(get_default_published_collab_info_meta_handler)),
     )
@@ -2454,6 +2458,21 @@ async fn get_workspace_usage_handler(
     .await?;
   let res =
     biz::workspace::ops::get_workspace_document_total_bytes(&state.pg_pool, &workspace_id).await?;
+  Ok(Json(AppResponse::Ok().with_data(res)))
+}
+
+async fn get_workspace_usage_and_limit_handler(
+  user_uuid: UserUuid,
+  workspace_id: web::Path<Uuid>,
+  state: Data<AppState>,
+) -> Result<Json<AppResponse<shared_entity::dto::billing_dto::WorkspaceUsageAndLimit>>> {
+  let workspace_id = workspace_id.into_inner();
+  let uid = state.user_cache.get_user_uid(&user_uuid).await?;
+  state
+    .workspace_access_control
+    .enforce_role_weak(&uid, &workspace_id, AFRole::Owner)
+    .await?;
+  let res = biz::workspace::ops::get_workspace_usage_and_limit(&state.pg_pool, &workspace_id).await?;
   Ok(Json(AppResponse::Ok().with_data(res)))
 }
 

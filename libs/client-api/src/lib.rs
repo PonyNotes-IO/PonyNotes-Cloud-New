@@ -39,6 +39,7 @@ pub mod entity {
   pub use crate::http_chat::*;
   pub use appflowy_proto::WorkspaceNotification;
   pub use client_api_entity::*;
+  pub use gotrue_entity::dto::CheckPasswordStatusResponse;
 }
 
 #[cfg(feature = "template")]

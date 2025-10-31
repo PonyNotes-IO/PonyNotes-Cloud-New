@@ -2,12 +2,12 @@ use std::borrow::BorrowMut;
 use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
-use collab::core::awareness::{Awareness, AwarenessUpdate};
 use collab::core::collab::TransactionMutExt;
 use collab::core::origin::CollabOrigin;
 use collab::lock::RwLock;
 use collab::preclude::Collab;
 use tokio::task::spawn_blocking;
+use yrs::sync::awareness::{Awareness, AwarenessUpdate};
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::{Encode, Encoder};
 use yrs::{ReadTxn, StateVector, Transact, Update};
@@ -95,7 +95,7 @@ pub trait CollabSyncProtocol {
       Message::Auth(reason) => self.handle_auth(collab, reason).await,
       //FIXME: where is the QueryAwareness protocol?
       Message::Awareness(update) => {
-        let update = AwarenessUpdate::decode_v1(&update)?;
+        let update = Decode::decode_v1(&update)?;
         self
           .handle_awareness_update(message_origin, collab, update)
           .await
@@ -119,7 +119,8 @@ pub trait CollabSyncProtocol {
         .try_transact()
         .map_err(|e| RTProtocolError::YrsTransaction(e.to_string()))?
         .state_vector();
-      let awareness_update = awareness.update()?;
+      let awareness_update = awareness.update()
+        .map_err(|e| RTProtocolError::Internal(anyhow::anyhow!("Failed to get awareness update: {}", e)))?;
       (state_vector, awareness_update.encode_v1())
     };
 
@@ -151,9 +152,8 @@ pub trait CollabSyncProtocol {
     let update = {
       let lock = collab.read().await;
       let collab = lock.borrow();
-      let txn = collab.get_awareness().doc().try_transact().map_err(|err| {
-        RTProtocolError::YrsTransaction(format!("fail to handle sync step1. error: {}", err))
-      })?;
+      let txn = collab.get_awareness().doc().try_transact()
+        .map_err(|e| RTProtocolError::YrsTransaction(format!("Failed to acquire transaction: {}", e)))?;
       txn.encode_diff_v1(&sv)
     };
     Ok(Some(
