@@ -706,9 +706,9 @@ pub async fn select_user_profile<'a, E: Executor<'a, Database = Postgres>>(
          LIMIT 1
        ) AS latest_workspace_id,
        COALESCE(
-         (SELECT password_set_by_user FROM auth.users WHERE id = af_user_row.uuid),
+         (SELECT password_is_set FROM auth.users WHERE id = af_user_row.uuid),
          false
-       ) AS password_set_by_user
+       ) AS password_is_set
       FROM af_user_row
     "#
   )
