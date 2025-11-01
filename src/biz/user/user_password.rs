@@ -71,7 +71,7 @@ pub fn validate_password(password: &str) -> bool {
 
 /// 检查用户是否真正设置了密码
 /// 
-/// 使用 GoTrue 的 password_set_by_user 字段判断
+/// 使用 GoTrue 的 password_is_set 字段判断
 /// - true: 用户主动设置了密码，可以使用密码登录
 /// - false: 系统自动生成的密码（OTP/Magic Link 登录），用户不知道密码
 #[instrument(skip_all, err)]
@@ -80,12 +80,12 @@ pub async fn check_user_has_password(
   pg_pool: &PgPool,
 ) -> Result<bool, AppError> {
   // 使用 query_scalar (不带!) 以避免编译时SQL验证，适配Docker离线构建
-  let password_set_by_user: Option<bool> = sqlx::query_scalar(
-    "SELECT password_set_by_user FROM auth.users WHERE id = $1"
+  let password_is_set: Option<bool> = sqlx::query_scalar(
+    "SELECT password_is_set FROM auth.users WHERE id = $1"
   )
   .bind(user_uuid)
   .fetch_one(pg_pool)
   .await?;
   
-  Ok(password_set_by_user.unwrap_or(false))
+  Ok(password_is_set.unwrap_or(false))
 }

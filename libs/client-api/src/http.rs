@@ -395,7 +395,7 @@ impl Client {
   /// Returns CheckPasswordStatusResponse with:
   /// - user_exists: whether the user account exists
   /// - has_password: whether the user has any password (including auto-generated)
-  /// - password_set_by_user: whether the user actively set their password (not auto-generated)
+  /// - password_is_set: whether the user actively set their password (not auto-generated)
   #[instrument(level = "debug", skip_all, err)]
   pub async fn check_password_status(
     &self,

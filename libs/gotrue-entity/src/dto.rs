@@ -268,5 +268,5 @@ pub struct CheckPasswordStatusRequest {
 pub struct CheckPasswordStatusResponse {
   pub user_exists: bool,
   pub has_password: bool,
-  pub password_set_by_user: bool,
+  pub password_is_set: bool,
 }

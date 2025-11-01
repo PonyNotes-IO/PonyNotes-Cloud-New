@@ -680,7 +680,7 @@ pub struct AFUserProfile {
   pub encryption_sign: Option<String>,
   pub latest_workspace_id: Uuid,
   pub updated_at: i64,
-  pub password_set_by_user: bool,
+  pub password_is_set: bool,
 }
 
 #[derive(Serialize, Deserialize)]
