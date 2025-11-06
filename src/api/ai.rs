@@ -1,4 +1,6 @@
 use crate::api::util::ai_model_from_header;
+use crate::biz::authentication::jwt::UserUuid;
+use crate::biz::workspace::subscription_plan_limits::PlanLimits;
 use crate::state::AppState;
 
 use actix_web::web::{Data, Json};
@@ -11,11 +13,14 @@ use appflowy_ai_client::dto::{
 
 use futures_util::{stream, TryStreamExt};
 
+use database::ai_usage::{get_workspace_ai_usage_this_month, increment_ai_usage};
 use serde::Deserialize;
 use shared_entity::dto::ai_dto::{
   CompleteTextParams, SummarizeRowData, SummarizeRowParams, SummarizeRowResponse,
 };
+use shared_entity::dto::billing_dto::SubscriptionPlan;
 use shared_entity::response::AppResponse;
+use uuid::Uuid;
 
 use tracing::{error, instrument, trace};
 
@@ -33,12 +38,25 @@ pub fn ai_completion_scope() -> Scope {
 }
 
 async fn stream_complete_text_handler(
+  user_uuid: UserUuid,
+  workspace_id: web::Path<Uuid>,
   state: Data<AppState>,
   payload: Json<CompleteTextParams>,
   req: HttpRequest,
 ) -> actix_web::Result<HttpResponse> {
+  let workspace_id = workspace_id.into_inner();
   let ai_model = ai_model_from_header(&req);
   let params = payload.into_inner();
+  
+  // Check AI usage limits
+  if let Err(err) = check_ai_usage_limit(&state, &workspace_id).await {
+    return Ok(
+      HttpResponse::Ok()
+        .content_type("text/event-stream")
+        .streaming(stream::once(async move { Err(err) })),
+    );
+  }
+  
   state.metrics.ai_metrics.record_total_completion_count(1);
 
   if let Some(prompt_id) = params
@@ -57,11 +75,18 @@ async fn stream_complete_text_handler(
     .stream_completion_text(params, ai_model)
     .await
   {
-    Ok(stream) => Ok(
-      HttpResponse::Ok()
-        .content_type("text/event-stream")
-        .streaming(stream.map_err(AppError::from)),
-    ),
+    Ok(stream) => {
+      // Increment AI usage count after successful request
+      if let Err(e) = increment_ai_usage(&state.pg_pool, &workspace_id).await {
+        error!("Failed to increment AI usage: {:?}", e);
+      }
+      
+      Ok(
+        HttpResponse::Ok()
+          .content_type("text/event-stream")
+          .streaming(stream.map_err(AppError::from)),
+      )
+    },
     Err(err) => Ok(
       HttpResponse::Ok()
         .content_type("text/event-stream")
@@ -73,20 +98,40 @@ async fn stream_complete_text_handler(
 }
 
 async fn stream_complete_v2_handler(
+  user_uuid: UserUuid,
+  workspace_id: web::Path<Uuid>,
   state: Data<AppState>,
   payload: Json<CompleteTextParams>,
   req: HttpRequest,
 ) -> actix_web::Result<HttpResponse> {
+  let workspace_id = workspace_id.into_inner();
   let ai_model = ai_model_from_header(&req);
   let params = payload.into_inner();
+  
+  // Check AI usage limits
+  if let Err(err) = check_ai_usage_limit(&state, &workspace_id).await {
+    return Ok(
+      HttpResponse::Ok()
+        .content_type("text/event-stream")
+        .streaming(stream::once(async move { Err(err) })),
+    );
+  }
+  
   state.metrics.ai_metrics.record_total_completion_count(1);
 
   match state.ai_client.stream_completion_v2(params, ai_model).await {
-    Ok(stream) => Ok(
-      HttpResponse::Ok()
-        .content_type("text/event-stream")
-        .streaming(stream.map_err(AppError::from)),
-    ),
+    Ok(stream) => {
+      // Increment AI usage count after successful request
+      if let Err(e) = increment_ai_usage(&state.pg_pool, &workspace_id).await {
+        error!("Failed to increment AI usage: {:?}", e);
+      }
+      
+      Ok(
+        HttpResponse::Ok()
+          .content_type("text/event-stream")
+          .streaming(stream.map_err(AppError::from)),
+      )
+    },
     Err(err) => Ok(
       HttpResponse::Ok()
         .content_type("text/event-stream")
@@ -187,6 +232,34 @@ async fn local_ai_config_handler(
     .await
     .map_err(|err| AppError::AIServiceUnavailable(err.to_string()))?;
   Ok(AppResponse::Ok().with_data(config).into())
+}
+
+/// Helper function to check if AI usage is within limits
+async fn check_ai_usage_limit(state: &AppState, workspace_id: &Uuid) -> Result<(), AppError> {
+  // Get workspace subscription plan
+  let workspace = database::workspace::select_workspace(&state.pg_pool, workspace_id).await?;
+  let plan = SubscriptionPlan::try_from(workspace.workspace_type)
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid workspace type: {}", e)))?;
+  
+  let limits = PlanLimits::from_plan(&plan);
+  
+  // If AI is unlimited, no need to check
+  if limits.ai_unlimited {
+    return Ok(());
+  }
+  
+  // Get current AI usage this month
+  let current_usage = get_workspace_ai_usage_this_month(&state.pg_pool, workspace_id).await?;
+  
+  // Check if usage limit is exceeded
+  if !limits.can_use_ai(current_usage) {
+    return Err(AppError::PlanLimitExceeded(format!(
+      "AI response limit exceeded. Plan: {:?}, Current: {}, Limit: {}. Please upgrade your subscription.",
+      plan, current_usage, limits.ai_responses_limit
+    )));
+  }
+  
+  Ok(())
 }
 
 #[instrument(level = "debug", skip_all, err)]

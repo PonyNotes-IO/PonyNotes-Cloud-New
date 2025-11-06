@@ -3,6 +3,7 @@ use crate::biz::chat::ops::{
   create_chat, create_chat_message, delete_chat, generate_chat_message_answer,
   get_chat_messages_with_author_uuid, get_question_message, update_chat_message,
 };
+use crate::biz::workspace::subscription_plan_limits::PlanLimits;
 use crate::state::AppState;
 use actix_web::web::{Data, Json};
 use actix_web::{web, HttpRequest, HttpResponse, Scope};
@@ -15,8 +16,12 @@ use appflowy_ai_client::dto::{
   RepeatedRelatedQuestion,
 };
 
+use anyhow::anyhow;
 use bytes::Bytes;
+use database::ai_usage::{get_workspace_ai_image_usage_this_month, increment_ai_image_usage};
 use database::chat;
+use database::workspace::select_workspace;
+use shared_entity::dto::billing_dto::SubscriptionPlan;
 use futures::Stream;
 use futures_util::stream;
 use futures_util::{FutureExt, TryStreamExt};
@@ -341,14 +346,45 @@ async fn answer_stream_v3_handler(
   req: HttpRequest,
 ) -> actix_web::Result<HttpResponse> {
   let (workspace_id, _) = path.into_inner();
+  let workspace_uuid = Uuid::parse_str(&workspace_id)
+    .map_err(|e| AppError::InvalidRequest(format!("Invalid workspace_id: {}", e)))?;
   let payload = payload.into_inner();
   let (content, metadata) =
     chat::chat_ops::select_chat_message_content(&state.pg_pool, payload.question_id).await?;
   let rag_ids = chat::chat_ops::select_chat_rag_ids(&state.pg_pool, &payload.chat_id).await?;
   let ai_model = ai_model_from_header(&req);
   state.metrics.ai_metrics.record_total_stream_count(1);
+  
+  // Check AI image usage limit if this is an image generation request
   if payload.format.output_content.is_image() {
     state.metrics.ai_metrics.record_stream_image_count(1);
+    
+    // Get workspace and convert to subscription plan
+    let workspace = select_workspace(&state.pg_pool, &workspace_uuid).await?;
+    let plan = SubscriptionPlan::try_from(workspace.workspace_type)
+      .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid workspace type: {}", e)))?;
+    let limits = PlanLimits::from_plan(&plan);
+    
+    // Check if AI is unlimited for this plan
+    if !limits.ai_unlimited {
+      // Get current AI image usage for this month
+      let current_usage = get_workspace_ai_image_usage_this_month(&state.pg_pool, &workspace_uuid)
+        .await
+        .unwrap_or(0);
+      
+      // Check if adding one more would exceed the limit
+      // Note: We use the same limit as regular AI responses for now
+      // TODO: Consider having a separate limit for image generations
+      if !limits.can_use_ai(current_usage) {
+        return Err(AppError::PlanLimitExceeded(format!(
+          "AI image generation limit ({}) exceeded for this month",
+          limits.ai_responses_limit
+        )).into());
+      }
+    }
+    
+    // Increment AI image usage counter
+    increment_ai_image_usage(&state.pg_pool, &workspace_uuid).await?;
   }
 
   let question = ChatQuestion {

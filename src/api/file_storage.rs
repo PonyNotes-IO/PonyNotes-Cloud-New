@@ -22,6 +22,7 @@ use database_entity::file_dto::{
 
 use crate::biz::authentication::jwt::UserUuid;
 use crate::biz::data_import::LimitedPayload;
+use crate::biz::workspace::subscription_plan_limits::PlanLimits;
 use crate::state::AppState;
 use anyhow::anyhow;
 use appflowy_ai_client::client::AppFlowyAIClient;
@@ -29,6 +30,7 @@ use aws_sdk_s3::primitives::ByteStream;
 use collab_importer::util::FileId;
 use database::pg_row::{AFBlobSource, AFBlobStatus};
 use serde::Deserialize;
+use shared_entity::dto::billing_dto::SubscriptionPlan;
 use shared_entity::dto::file_dto::PutFileResponse;
 use shared_entity::dto::workspace_dto::{BlobMetadata, RepeatedBlobMetaData, WorkspaceSpaceUsage};
 use shared_entity::response::{AppResponse, AppResponseError, JsonAppResponse};
@@ -563,6 +565,39 @@ async fn put_blob_handler_v1(
 
   let content_length = content_length.into_inner().into_inner();
   let content_type = content_type.into_inner().to_string();
+
+  // Check subscription plan limits for file upload
+  let workspace = database::workspace::select_workspace(&state.pg_pool, &path.workspace_id).await?;
+  let plan = SubscriptionPlan::try_from(workspace.workspace_type)
+    .map_err(|e| AppError::Internal(anyhow!("Invalid workspace type: {}", e)))?;
+  let limits = PlanLimits::from_plan(&plan);
+
+  // Check single file upload size limit
+  if !limits.can_upload_file(content_length as i64) {
+    return Err(
+      AppError::PlanLimitExceeded(format!(
+        "File size {} bytes exceeds single upload limit {} bytes for {:?} plan. Please upgrade your subscription.",
+        content_length, limits.single_upload_limit, plan
+      ))
+      .into(),
+    );
+  }
+
+  // Check total storage limit
+  let current_usage = get_workspace_usage_size(&state.pg_pool, &path.workspace_id)
+    .await
+    .map(|v| v as i64)
+    .unwrap_or(0);
+
+  if !limits.can_add_storage(current_usage, content_length as i64) {
+    return Err(
+      AppError::PlanLimitExceeded(format!(
+        "Storage limit exceeded. Current: {} bytes, Limit: {} bytes, Trying to upload: {} bytes for {:?} plan. Please upgrade your subscription.",
+        current_usage, limits.storage_bytes_limit, content_length, plan
+      ))
+      .into(),
+    );
+  }
 
   let mut content = Vec::with_capacity(content_length);
   if content.try_reserve_exact(content_length).is_err() {

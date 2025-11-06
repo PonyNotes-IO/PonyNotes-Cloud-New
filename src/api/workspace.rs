@@ -10,6 +10,7 @@ use crate::biz::collab::ops::{
 use crate::biz::collab::utils::{collab_from_doc_state, DUMMY_UID};
 use crate::biz::workspace;
 use crate::biz::workspace::duplicate::duplicate_view_tree_and_collab;
+use crate::biz::workspace::subscription_plan_limits::PlanLimits;
 use crate::biz::workspace::invite::{
   delete_workspace_invite_code, generate_workspace_invite_token, get_invite_code_for_workspace,
   join_workspace_invite_by_code,
@@ -61,7 +62,9 @@ use collab_rt_entity::realtime_proto::HttpRealtimeMessage;
 use collab_rt_entity::user::RealtimeUser;
 use collab_rt_entity::RealtimeMessage;
 use collab_rt_protocol::collab_from_encode_collab;
+use database::ai_usage::{get_workspace_ai_image_usage_this_month, get_workspace_ai_usage_this_month};
 use database::user::select_uid_from_email;
+use database::resource_usage::get_workspace_usage_size;
 use database_entity::dto::PublishCollabItem;
 use database_entity::dto::PublishInfo;
 use database_entity::dto::*;
@@ -72,6 +75,7 @@ use rayon::prelude::*;
 
 use semver::Version;
 use sha2::{Digest, Sha256};
+use shared_entity::dto::billing_dto::{SubscriptionPlan, WorkspaceUsageAndLimit};
 use shared_entity::dto::publish_dto::DuplicatePublishedPageResponse;
 use shared_entity::dto::workspace_dto::*;
 use shared_entity::response::AppResponseError;
@@ -302,6 +306,10 @@ pub fn workspace_scope() -> Scope {
     )
     .service(
       web::resource("/{workspace_id}/usage").route(web::get().to(get_workspace_usage_handler)),
+    )
+    .service(
+      web::resource("/{workspace_id}/usage_and_limit")
+        .route(web::get().to(get_workspace_usage_and_limit_handler)),
     )
     .service(
       web::resource("/published/{publish_namespace}")
@@ -2455,6 +2463,74 @@ async fn get_workspace_usage_handler(
   let res =
     biz::workspace::ops::get_workspace_document_total_bytes(&state.pg_pool, &workspace_id).await?;
   Ok(Json(AppResponse::Ok().with_data(res)))
+}
+
+#[instrument(level = "debug", skip(state), err)]
+async fn get_workspace_usage_and_limit_handler(
+  user_uuid: UserUuid,
+  workspace_id: web::Path<Uuid>,
+  state: Data<AppState>,
+) -> Result<Json<AppResponse<WorkspaceUsageAndLimit>>> {
+  let workspace_id = workspace_id.into_inner();
+  let uid = state.user_cache.get_user_uid(&user_uuid).await?;
+  
+  // Ensure user has at least member access to the workspace
+  state
+    .workspace_access_control
+    .enforce_role_weak(&uid, &workspace_id, AFRole::Member)
+    .await?;
+  
+  // Get workspace information
+  let workspace = database::workspace::select_workspace(&state.pg_pool, &workspace_id).await?;
+  
+  // Get subscription plan from workspace_type
+  let plan = SubscriptionPlan::try_from(workspace.workspace_type)
+    .map_err(|e| AppError::Internal(anyhow!("Invalid workspace type: {}", e)))?;
+  
+  let limits = PlanLimits::from_plan(&plan);
+  
+  // Get current member count
+  let member_count = database::workspace::select_workspace_member_count_from_workspace_id(
+    &state.pg_pool,
+    &workspace_id,
+  )
+  .await?
+  .unwrap_or(0);
+  
+  // Get current storage usage
+  let storage_bytes = get_workspace_usage_size(&state.pg_pool, &workspace_id)
+    .await
+    .map(|v| v as i64)
+    .unwrap_or(0);
+  
+  // Get AI usage this month
+  let ai_responses_count = get_workspace_ai_usage_this_month(&state.pg_pool, &workspace_id)
+    .await
+    .unwrap_or(0);
+  
+  // Get AI image usage this month
+  let ai_image_responses_count = get_workspace_ai_image_usage_this_month(&state.pg_pool, &workspace_id)
+    .await
+    .unwrap_or(0);
+  
+  let usage_and_limit = WorkspaceUsageAndLimit {
+    member_count,
+    member_count_limit: limits.member_limit,
+    storage_bytes,
+    storage_bytes_limit: limits.storage_bytes_limit,
+    storage_bytes_unlimited: limits.storage_unlimited,
+    single_upload_limit: limits.single_upload_limit,
+    single_upload_unlimited: false,
+    ai_responses_count,
+    ai_responses_count_limit: limits.ai_responses_limit,
+    ai_image_responses_count,
+    // Use the same limit as regular AI responses for image generation
+    ai_image_responses_count_limit: limits.ai_responses_limit,
+    local_ai: matches!(plan, SubscriptionPlan::AiLocal),
+    ai_responses_unlimited: limits.ai_unlimited,
+  };
+  
+  Ok(Json(AppResponse::Ok().with_data(usage_and_limit)))
 }
 
 async fn get_workspace_folder_handler(
