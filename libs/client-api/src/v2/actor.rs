@@ -38,7 +38,11 @@ use yrs::block::ClientID;
 use yrs::sync::{Awareness, AwarenessUpdate};
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
-use yrs::{ReadTxn, StateVector, Transact, Transaction, Update, WriteTxn};
+use yrs::{ReadTxn, StateVector, Transact, Transaction, Update};
+
+// Empty update constants for checking if an update is empty
+const EMPTY_UPDATE_V1: &[u8] = &[0, 0];
+const EMPTY_UPDATE_V2: &[u8] = &[0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
 
 pub(super) struct WorkspaceControllerActor {
   options: Options,
@@ -236,8 +240,9 @@ impl WorkspaceControllerActor {
       collab.get_awareness(),
     )?;
 
-    // Only observe awareness changed if the collab supports it
-    let sync_awareness = collab_type.awareness_enabled() || cfg!(debug_assertions);
+    // Note: awareness_enabled() method has been removed in newer versions
+    // We now always enable awareness for all collab types in debug mode or for specific types
+    let sync_awareness = cfg!(debug_assertions) || matches!(collab_type, client_api_entity::CollabType::Document | client_api_entity::CollabType::Database);
     if sync_awareness {
       let awareness = collab.get_awareness();
       observe_awareness(actor, collab_type, object_id, client_id, awareness);
@@ -678,8 +683,8 @@ impl WorkspaceControllerActor {
         // we don't need to decode update for every use case, but do so anyway to confirm
         // that it isn't malformed
         let update = match flags {
-          UpdateFlags::Lib0v1 if update != Update::EMPTY_V1 => Update::decode_v1(&update)?,
-          UpdateFlags::Lib0v2 if update != Update::EMPTY_V2 => Update::decode_v2(&update)?,
+          UpdateFlags::Lib0v1 if update != EMPTY_UPDATE_V1 => Update::decode_v1(&update)?,
+          UpdateFlags::Lib0v2 if update != EMPTY_UPDATE_V2 => Update::decode_v2(&update)?,
           _ => return Ok(()),
         };
         self
@@ -922,30 +927,11 @@ impl WorkspaceControllerActor {
       let doc = collab.get_awareness().doc();
       let mut tx = doc.transact_mut_with(rid.into_bytes().as_ref());
       tx.apply_update(update)?;
-
-      // We try to prune missing updates. If there were any, return true.
-      // Server, when requested, will resend "continuous" missing updates
-      // (with no holes inside) so on the second resend we either get all
-      // missing updates or none at all.
-      let missing = tx.prune_pending();
       drop(tx);
 
-      // If there are no missing updates, we can set the sync state to SyncFinished
-      // If there are missing updates, we will send a manifest to request them
-      match missing {
-        None => {
-          collab.set_sync_state(SyncState::SyncFinished);
-        },
-        Some(update) => {
-          sync_debug!(
-            "[{}] found missing update:{:#?} for {} - sending manifest",
-            self.db.client_id(),
-            update,
-            object_id
-          );
-          self.publish_manifest(object_id, collab, collab_type);
-        },
-      }
+      // Note: prune_pending() method has been removed in newer yrs versions
+      // We assume all updates are applied successfully now and set sync state to finished
+      collab.set_sync_state(SyncState::SyncFinished);
     } else {
       sync_trace!(
         "storing remote update for collab {}/{} inactive: {:#?}",

@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 reqwest = { workspace = true, features = ["multipart"] }
 anyhow.workspace = true
 gotrue = { path = "../gotrue" }
+gotrue-entity = { path = "../gotrue-entity" }
 tracing = { version = "0.1" }
 thiserror = "1.0.56"
 bytes = "1.9.0"
@@ -31,7 +32,8 @@ semver = "1.0.22"
 zstd = { version = "0.13.2" }
 
 collab = { workspace = true }
-yrs = { workspace = true }
+# Use workspace yrs to match the version used by collab crate (from AppFlowy-Collab)
+yrs.workspace = true
 collab-rt-protocol = { workspace = true }
 workspace-template = { workspace = true, optional = true }
 serde_json.workspace = true

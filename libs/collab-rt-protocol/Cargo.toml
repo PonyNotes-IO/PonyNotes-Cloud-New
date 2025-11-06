@@ -8,6 +8,7 @@ edition = "2021"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+# Use workspace yrs to match the version used by collab crate (from AppFlowy-Collab)
 yrs.workspace = true
 thiserror = "1.0.56"
 serde.workspace = true

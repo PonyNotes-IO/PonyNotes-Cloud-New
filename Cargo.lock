@@ -1988,6 +1988,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.2.16",
  "gotrue",
+ "gotrue-entity",
  "infra",
  "lazy_static",
  "md5",

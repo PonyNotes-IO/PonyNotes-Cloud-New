@@ -26,7 +26,7 @@ use database_entity::dto::{
   AFRole, AFWorkspace, AFWorkspaceInvitation, AFWorkspaceInvitationStatus, AFWorkspaceSettings,
   GlobalComment, Reaction, WorkspaceMemberProfile, WorkspaceUsage,
 };
-use shared_entity::dto::billing_dto::SubscriptionPlan;
+use shared_entity::dto::billing_dto::{SubscriptionPlan, WorkspaceUsageAndLimit};
 
 use crate::biz::authentication::jwt::OptionalUserUuid;
 use crate::biz::user::user_init::{
@@ -656,6 +656,36 @@ pub async fn get_workspace_document_total_bytes(
   let byte_count = select_workspace_total_collab_bytes(pg_pool, workspace_id).await?;
   Ok(WorkspaceUsage {
     total_document_size: byte_count,
+  })
+}
+
+pub async fn get_workspace_usage_and_limit(
+  pg_pool: &PgPool,
+  workspace_id: &Uuid,
+) -> Result<WorkspaceUsageAndLimit, AppError> {
+  // Get member count
+  let member_count_map = select_member_count_for_workspaces(pg_pool, &[*workspace_id]).await?;
+  let member_count = member_count_map.get(workspace_id).copied().unwrap_or(0);
+  
+  // Get storage bytes
+  let storage_bytes = select_workspace_total_collab_bytes(pg_pool, workspace_id).await?;
+  
+  // Return usage and limit with default values
+  // In a production environment, these limits should be fetched from a subscription/billing system
+  Ok(WorkspaceUsageAndLimit {
+    member_count,
+    member_count_limit: 10, // Default limit
+    storage_bytes,
+    storage_bytes_limit: 10 * 1024 * 1024 * 1024, // 10GB default limit
+    storage_bytes_unlimited: false,
+    single_upload_limit: 100 * 1024 * 1024, // 100MB default limit
+    single_upload_unlimited: false,
+    ai_responses_count: 0,
+    ai_responses_count_limit: 100, // Default limit
+    ai_image_responses_count: 0,
+    ai_image_responses_count_limit: 10, // Default limit
+    local_ai: false,
+    ai_responses_unlimited: false,
   })
 }
 

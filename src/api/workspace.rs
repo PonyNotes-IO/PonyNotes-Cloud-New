@@ -308,7 +308,7 @@ pub fn workspace_scope() -> Scope {
       web::resource("/{workspace_id}/usage").route(web::get().to(get_workspace_usage_handler)),
     )
     .service(
-      web::resource("/{workspace_id}/usage_and_limit")
+      web::resource("/{workspace_id}/usage-and-limit")
         .route(web::get().to(get_workspace_usage_and_limit_handler)),
     )
     .service(
@@ -2465,72 +2465,19 @@ async fn get_workspace_usage_handler(
   Ok(Json(AppResponse::Ok().with_data(res)))
 }
 
-#[instrument(level = "debug", skip(state), err)]
 async fn get_workspace_usage_and_limit_handler(
   user_uuid: UserUuid,
   workspace_id: web::Path<Uuid>,
   state: Data<AppState>,
-) -> Result<Json<AppResponse<WorkspaceUsageAndLimit>>> {
+) -> Result<Json<AppResponse<shared_entity::dto::billing_dto::WorkspaceUsageAndLimit>>> {
   let workspace_id = workspace_id.into_inner();
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
-  
-  // Ensure user has at least member access to the workspace
   state
     .workspace_access_control
-    .enforce_role_weak(&uid, &workspace_id, AFRole::Member)
+    .enforce_role_weak(&uid, &workspace_id, AFRole::Owner)
     .await?;
-  
-  // Get workspace information
-  let workspace = database::workspace::select_workspace(&state.pg_pool, &workspace_id).await?;
-  
-  // Get subscription plan from workspace_type
-  let plan = SubscriptionPlan::try_from(workspace.workspace_type)
-    .map_err(|e| AppError::Internal(anyhow!("Invalid workspace type: {}", e)))?;
-  
-  let limits = PlanLimits::from_plan(&plan);
-  
-  // Get current member count
-  let member_count = database::workspace::select_workspace_member_count_from_workspace_id(
-    &state.pg_pool,
-    &workspace_id,
-  )
-  .await?
-  .unwrap_or(0);
-  
-  // Get current storage usage
-  let storage_bytes = get_workspace_usage_size(&state.pg_pool, &workspace_id)
-    .await
-    .map(|v| v as i64)
-    .unwrap_or(0);
-  
-  // Get AI usage this month
-  let ai_responses_count = get_workspace_ai_usage_this_month(&state.pg_pool, &workspace_id)
-    .await
-    .unwrap_or(0);
-  
-  // Get AI image usage this month
-  let ai_image_responses_count = get_workspace_ai_image_usage_this_month(&state.pg_pool, &workspace_id)
-    .await
-    .unwrap_or(0);
-  
-  let usage_and_limit = WorkspaceUsageAndLimit {
-    member_count,
-    member_count_limit: limits.member_limit,
-    storage_bytes,
-    storage_bytes_limit: limits.storage_bytes_limit,
-    storage_bytes_unlimited: limits.storage_unlimited,
-    single_upload_limit: limits.single_upload_limit,
-    single_upload_unlimited: false,
-    ai_responses_count,
-    ai_responses_count_limit: limits.ai_responses_limit,
-    ai_image_responses_count,
-    // Use the same limit as regular AI responses for image generation
-    ai_image_responses_count_limit: limits.ai_responses_limit,
-    local_ai: matches!(plan, SubscriptionPlan::AiLocal),
-    ai_responses_unlimited: limits.ai_unlimited,
-  };
-  
-  Ok(Json(AppResponse::Ok().with_data(usage_and_limit)))
+  let res = biz::workspace::ops::get_workspace_usage_and_limit(&state.pg_pool, &workspace_id).await?;
+  Ok(Json(AppResponse::Ok().with_data(res)))
 }
 
 async fn get_workspace_folder_handler(

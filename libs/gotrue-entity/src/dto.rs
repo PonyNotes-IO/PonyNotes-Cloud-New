@@ -253,3 +253,20 @@ impl UpdateGotrueUserParams {
     self
   }
 }
+
+/// Request parameters for checking password status
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CheckPasswordStatusRequest {
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub email: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub phone: Option<String>,
+}
+
+/// Response for password status check
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CheckPasswordStatusResponse {
+  pub user_exists: bool,
+  pub has_password: bool,
+  pub password_is_set: bool,
+}

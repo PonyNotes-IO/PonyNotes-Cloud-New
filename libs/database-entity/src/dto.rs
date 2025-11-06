@@ -4,7 +4,9 @@ use crate::error::EntityError::{DeserializationError, InvalidData};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use collab_entity::CollabType;
-use collab_entity::{proto, EncodedCollab};
+use collab_entity::EncodedCollab;
+// Re-export proto as proto for compatibility with older collab-entity versions
+use collab_entity::proto;
 use infra::validate::{validate_not_empty_payload, validate_not_empty_str};
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -678,6 +680,7 @@ pub struct AFUserProfile {
   pub encryption_sign: Option<String>,
   pub latest_workspace_id: Uuid,
   pub updated_at: i64,
+  pub password_is_set: bool,
 }
 
 #[derive(Serialize, Deserialize)]

@@ -8,12 +8,10 @@ use std::sync::Arc;
 pub async fn create_database_collab(
   params: CreateDatabaseParams,
 ) -> Result<EncodedDatabase, Error> {
-  let collab_service = Arc::new(NoPersistenceDatabaseCollabService::new(default_client_id()));
-  let context = DatabaseContext {
-    database_collab_service: collab_service.clone(),
-    notifier: Default::default(),
-    database_row_collab_service: collab_service,
-  };
+  let client_id = default_client_id();
+  let collab_service = Arc::new(NoPersistenceDatabaseCollabService::new(client_id));
+  let row_collab_service = Arc::new(NoPersistenceDatabaseCollabService::new(client_id));
+  let context = DatabaseContext::new(collab_service, row_collab_service);
   let database = Database::create_with_view(params, context).await?;
   database
     .encode_database_collabs()

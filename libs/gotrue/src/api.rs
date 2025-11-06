@@ -7,8 +7,8 @@ use crate::params::{
 };
 use anyhow::Context;
 use gotrue_entity::dto::{
-  AdminListUsersResponse, AuthProvider, GoTrueSettings, GotrueTokenResponse, SignUpResponse,
-  UpdateGotrueUserParams, User,
+  AdminListUsersResponse, AuthProvider, CheckPasswordStatusRequest, CheckPasswordStatusResponse,
+  GoTrueSettings, GotrueTokenResponse, SignUpResponse, UpdateGotrueUserParams, User,
 };
 use gotrue_entity::error::{GoTrueError, GoTrueErrorSerde, GotrueClientError};
 use gotrue_entity::sso::{SSOProvider, SSOProviders};
@@ -124,6 +124,34 @@ impl Client {
     } else {
       Err(anyhow::anyhow!("unexpected response status: {}", resp.status()).into())
     }
+  }
+
+  /// Check user password status - no authentication required
+  /// 
+  /// This endpoint checks if a user exists and whether they have set a password.
+  /// Either email or phone must be provided.
+  #[tracing::instrument(skip_all, err)]
+  pub async fn check_password_status(
+    &self,
+    email_or_phone: &str,
+  ) -> Result<CheckPasswordStatusResponse, GoTrueError> {
+    let url = format!("{}/check_password_status", self.base_url);
+    
+    // Detect if input is phone or email
+    let request = if email_or_phone.contains('@') {
+      CheckPasswordStatusRequest {
+        email: Some(email_or_phone.to_owned()),
+        phone: None,
+      }
+    } else {
+      CheckPasswordStatusRequest {
+        email: None,
+        phone: Some(email_or_phone.to_owned()),
+      }
+    };
+    
+    let resp = self.client.post(url).json(&request).send().await?;
+    to_gotrue_result(resp).await
   }
 
   #[tracing::instrument(skip_all, err)]
