@@ -393,7 +393,6 @@ pub async fn invite_workspace_members(
   let limits = PlanLimits::from_plan(&plan);
 
   // Check if adding new members would exceed the limit
-  let new_total = workspace_member_count + invitations.len() as i64;
   if !limits.can_add_members(workspace_member_count, invitations.len() as i64) {
     return Err(AppError::PlanLimitExceeded(format!(
       "Member limit exceeded. Plan: {:?}, Current: {}, Limit: {}, Trying to add: {}. Please upgrade your subscription plan.",

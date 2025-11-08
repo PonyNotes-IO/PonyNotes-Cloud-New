@@ -368,6 +368,13 @@ pub async fn init_state(config: &Config) -> Result<AppState, Error> {
   );
   let ws_server = WsServer::new(manager).start();
 
+  // Initialize ChatClient for third-party AI providers
+  let chat_client = Arc::new(
+    appflowy_ai_client::chat_client::ChatClient::from_env()
+      .expect("Failed to initialize ChatClient"),
+  );
+  info!("ChatClient initialized");
+
   info!("Application state initialized");
   Ok(AppState {
     pg_pool,
@@ -391,6 +398,7 @@ pub async fn init_state(config: &Config) -> Result<AppState, Error> {
     gotrue_admin,
     mailer,
     ai_client: appflowy_ai_client,
+    chat_client,
     indexer_scheduler,
     ws_server,
   })
