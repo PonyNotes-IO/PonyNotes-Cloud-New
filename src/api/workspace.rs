@@ -72,6 +72,7 @@ use rayon::prelude::*;
 
 use semver::Version;
 use sha2::{Digest, Sha256};
+use shared_entity::dto::billing_dto::SubscriptionPlan;
 use shared_entity::dto::publish_dto::DuplicatePublishedPageResponse;
 use shared_entity::dto::workspace_dto::*;
 use shared_entity::response::AppResponseError;

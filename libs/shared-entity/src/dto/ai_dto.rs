@@ -1,4 +1,3 @@
-use crate::dto::chat_dto::ChatMessage;
 pub use appflowy_ai_client::dto::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -26,13 +25,8 @@ pub enum SummarizeRowData {
   Content(Map<String, Value>),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SummarizeRowResponse {
-  pub text: String,
-}
-
 #[derive(Debug)]
 pub enum StringOrMessage {
   Left(String),
-  Right(ChatMessage),
+  Right(crate::dto::chat_dto::ChatMessage),
 }

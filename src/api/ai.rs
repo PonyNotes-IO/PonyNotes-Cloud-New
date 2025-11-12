@@ -1,4 +1,6 @@
 use crate::api::util::ai_model_from_header;
+use crate::biz::authentication::jwt::UserUuid;
+use crate::biz::workspace::subscription_plan_limits::PlanLimits;
 use crate::state::AppState;
 
 use actix_web::web::{Data, Json};
@@ -8,14 +10,18 @@ use appflowy_ai_client::dto::{
   CalculateSimilarityParams, LocalAIConfig, ModelList, SimilarityResponse, TranslateRowParams,
   TranslateRowResponse,
 };
+use appflowy_ai_client::{AIModel, AIModelInfo, AvailableModelsResponse, ChatRequestParams};
 
-use futures_util::{stream, TryStreamExt};
+use futures_util::{stream, StreamExt, TryStreamExt};
 
+use database::ai_usage::{get_workspace_ai_usage_this_month, increment_ai_usage};
 use serde::Deserialize;
 use shared_entity::dto::ai_dto::{
   CompleteTextParams, SummarizeRowData, SummarizeRowParams, SummarizeRowResponse,
 };
+use shared_entity::dto::billing_dto::SubscriptionPlan;
 use shared_entity::response::AppResponse;
+use uuid::Uuid;
 
 use tracing::{error, instrument, trace};
 
@@ -23,6 +29,8 @@ pub fn ai_completion_scope() -> Scope {
   web::scope("/api/ai/{workspace_id}")
     .service(web::resource("/complete/stream").route(web::post().to(stream_complete_text_handler)))
     .service(web::resource("/v2/complete/stream").route(web::post().to(stream_complete_v2_handler)))
+    .service(web::resource("/chat/stream").route(web::post().to(stream_chat_handler)))
+    .service(web::resource("/chat/models").route(web::get().to(list_chat_models_handler)))
     .service(web::resource("/summarize_row").route(web::post().to(summarize_row_handler)))
     .service(web::resource("/translate_row").route(web::post().to(translate_row_handler)))
     .service(web::resource("/local/config").route(web::get().to(local_ai_config_handler)))
@@ -33,12 +41,25 @@ pub fn ai_completion_scope() -> Scope {
 }
 
 async fn stream_complete_text_handler(
+  _user_uuid: UserUuid,
+  workspace_id: web::Path<Uuid>,
   state: Data<AppState>,
   payload: Json<CompleteTextParams>,
   req: HttpRequest,
 ) -> actix_web::Result<HttpResponse> {
+  let workspace_id = workspace_id.into_inner();
   let ai_model = ai_model_from_header(&req);
   let params = payload.into_inner();
+  
+  // Check AI usage limits
+  if let Err(err) = check_ai_usage_limit(&state, &workspace_id).await {
+    return Ok(
+      HttpResponse::Ok()
+        .content_type("text/event-stream")
+        .streaming(stream::once(async move { Err(err) })),
+    );
+  }
+  
   state.metrics.ai_metrics.record_total_completion_count(1);
 
   if let Some(prompt_id) = params
@@ -57,11 +78,18 @@ async fn stream_complete_text_handler(
     .stream_completion_text(params, ai_model)
     .await
   {
-    Ok(stream) => Ok(
-      HttpResponse::Ok()
-        .content_type("text/event-stream")
-        .streaming(stream.map_err(AppError::from)),
-    ),
+    Ok(stream) => {
+      // Increment AI usage count after successful request
+      if let Err(e) = increment_ai_usage(&state.pg_pool, &workspace_id).await {
+        error!("Failed to increment AI usage: {:?}", e);
+      }
+      
+      Ok(
+        HttpResponse::Ok()
+          .content_type("text/event-stream")
+          .streaming(stream.map_err(AppError::from)),
+      )
+    },
     Err(err) => Ok(
       HttpResponse::Ok()
         .content_type("text/event-stream")
@@ -73,20 +101,40 @@ async fn stream_complete_text_handler(
 }
 
 async fn stream_complete_v2_handler(
+  _user_uuid: UserUuid,
+  workspace_id: web::Path<Uuid>,
   state: Data<AppState>,
   payload: Json<CompleteTextParams>,
   req: HttpRequest,
 ) -> actix_web::Result<HttpResponse> {
+  let workspace_id = workspace_id.into_inner();
   let ai_model = ai_model_from_header(&req);
   let params = payload.into_inner();
+  
+  // Check AI usage limits
+  if let Err(err) = check_ai_usage_limit(&state, &workspace_id).await {
+    return Ok(
+      HttpResponse::Ok()
+        .content_type("text/event-stream")
+        .streaming(stream::once(async move { Err(err) })),
+    );
+  }
+  
   state.metrics.ai_metrics.record_total_completion_count(1);
 
   match state.ai_client.stream_completion_v2(params, ai_model).await {
-    Ok(stream) => Ok(
-      HttpResponse::Ok()
-        .content_type("text/event-stream")
-        .streaming(stream.map_err(AppError::from)),
-    ),
+    Ok(stream) => {
+      // Increment AI usage count after successful request
+      if let Err(e) = increment_ai_usage(&state.pg_pool, &workspace_id).await {
+        error!("Failed to increment AI usage: {:?}", e);
+      }
+      
+      Ok(
+        HttpResponse::Ok()
+          .content_type("text/event-stream")
+          .streaming(stream.map_err(AppError::from)),
+      )
+    },
     Err(err) => Ok(
       HttpResponse::Ok()
         .content_type("text/event-stream")
@@ -189,6 +237,34 @@ async fn local_ai_config_handler(
   Ok(AppResponse::Ok().with_data(config).into())
 }
 
+/// Helper function to check if AI usage is within limits
+async fn check_ai_usage_limit(state: &AppState, workspace_id: &Uuid) -> Result<(), AppError> {
+  // Get workspace subscription plan
+  let workspace = database::workspace::select_workspace(&state.pg_pool, workspace_id).await?;
+  let plan = SubscriptionPlan::try_from(workspace.workspace_type)
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid workspace type: {}", e)))?;
+  
+  let limits = PlanLimits::from_plan(&plan);
+  
+  // If AI is unlimited, no need to check
+  if limits.ai_unlimited {
+    return Ok(());
+  }
+  
+  // Get current AI usage this month
+  let current_usage = get_workspace_ai_usage_this_month(&state.pg_pool, workspace_id).await?;
+  
+  // Check if usage limit is exceeded
+  if !limits.can_use_ai(current_usage) {
+    return Err(AppError::PlanLimitExceeded(format!(
+      "AI response limit exceeded. Plan: {:?}, Current: {}, Limit: {}. Please upgrade your subscription.",
+      plan, current_usage, limits.ai_responses_limit
+    )));
+  }
+  
+  Ok(())
+}
+
 #[instrument(level = "debug", skip_all, err)]
 async fn calculate_similarity_handler(
   state: web::Data<AppState>,
@@ -214,4 +290,197 @@ async fn model_list_handler(
     .await
     .map_err(|err| AppError::AIServiceUnavailable(err.to_string()))?;
   Ok(AppResponse::Ok().with_data(model_list).into())
+}
+
+/// 流式AI聊天接口 (使用第三方AI提供商)
+#[instrument(level = "debug", skip(state, payload), err)]
+async fn stream_chat_handler(
+  user_uuid: UserUuid,
+  workspace_id: web::Path<Uuid>,
+  state: Data<AppState>,
+  payload: Json<ChatRequestParams>,
+) -> actix_web::Result<HttpResponse> {
+  let workspace_id = workspace_id.into_inner();
+  let params = payload.into_inner();
+  
+  trace!(
+    "Chat request from user {} for workspace {}, message length: {}", 
+    *user_uuid,
+    workspace_id,
+    params.message.len()
+  );
+  
+  // 1. 检查 AI 使用限额
+  if let Err(err) = check_ai_usage_limit(&state, &workspace_id).await {
+    error!("AI usage limit exceeded for workspace {}: {:?}", workspace_id, err);
+    return Ok(
+      HttpResponse::PaymentRequired()
+        .json(serde_json::json!({
+          "code": "AI_LIMIT_EXCEEDED",
+          "message": err.to_string(),
+        }))
+    );
+  }
+  
+  // 2. 确定使用的模型
+  let model = if let Some(model_id) = &params.preferred_model {
+    AIModel::from_str(model_id).unwrap_or(AIModel::DeepSeek)
+  } else {
+    // 根据订阅计划选择默认模型
+    let workspace = database::workspace::select_workspace(&state.pg_pool, &workspace_id).await?;
+    let plan = SubscriptionPlan::try_from(workspace.workspace_type)
+      .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid workspace type: {}", e)))?;
+    
+    match plan {
+      SubscriptionPlan::Free | SubscriptionPlan::Basic => AIModel::DeepSeek,
+      SubscriptionPlan::Pro => AIModel::QwenTurbo,
+      SubscriptionPlan::Team | SubscriptionPlan::AiMax => AIModel::QwenMax,
+      _ => AIModel::DeepSeek,
+    }
+  };
+  
+  trace!("Using AI model: {:?}", model);
+  
+  // 3. 检查模型是否可用
+  if !state.chat_client.is_model_available(model) {
+    error!("AI model {:?} is not available (API key not configured)", model);
+    return Ok(
+      HttpResponse::ServiceUnavailable()
+        .json(serde_json::json!({
+          "code": "MODEL_UNAVAILABLE",
+          "message": format!("AI model {:?} is not available", model),
+        }))
+    );
+  }
+  
+  // 4. 调用 ChatClient 进行流式聊天
+  match state.chat_client.stream_chat(&params, model).await {
+    Ok(stream) => {
+      // 5. 异步增加 AI 使用量
+      let pg_pool = state.pg_pool.clone();
+      let ws_id = workspace_id;
+      tokio::spawn(async move {
+        if let Err(e) = increment_ai_usage(&pg_pool, &ws_id).await {
+          error!("Failed to increment AI usage: {:?}", e);
+        }
+      });
+      
+      // 6. 返回流式响应
+      Ok(
+        HttpResponse::Ok()
+          .content_type("text/event-stream")
+          .streaming(stream.map(|result| {
+            result.map_err(|e| actix_web::error::ErrorInternalServerError(e))
+          }))
+      )
+    },
+    Err(err) => {
+      error!("AI chat service error: {:?}", err);
+      Ok(
+        HttpResponse::InternalServerError()
+          .json(serde_json::json!({
+            "code": "AI_SERVICE_ERROR",
+            "message": format!("AI service error: {}", err),
+          }))
+      )
+    },
+  }
+}
+
+/// 获取可用的AI模型列表
+#[instrument(level = "debug", skip(state), err)]
+async fn list_chat_models_handler(
+  user_uuid: UserUuid,
+  workspace_id: web::Path<Uuid>,
+  state: Data<AppState>,
+) -> actix_web::Result<Json<AppResponse<AvailableModelsResponse>>> {
+  let workspace_id = workspace_id.into_inner();
+  
+  trace!("List chat models for workspace {}", workspace_id);
+  
+  // 获取订阅计划
+  let workspace = database::workspace::select_workspace(&state.pg_pool, &workspace_id).await?;
+  let plan = SubscriptionPlan::try_from(workspace.workspace_type)
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid workspace type: {}", e)))?;
+  
+  // 根据计划和实际配置返回可用模型
+  let available_models = state.chat_client.get_available_models();
+  
+  let models = match plan {
+    SubscriptionPlan::Free => {
+      // 免费版只能使用 DeepSeek
+      if available_models.contains(&AIModel::DeepSeek) {
+        vec![AIModelInfo {
+          id: "deepseek-chat".to_string(),
+          name: "DeepSeek".to_string(),
+          description: "高性能对话模型".to_string(),
+          is_default: true,
+        }]
+      } else {
+        vec![]
+      }
+    },
+    SubscriptionPlan::Basic | SubscriptionPlan::Pro => {
+      let mut models = vec![];
+      if available_models.contains(&AIModel::DeepSeek) {
+        models.push(AIModelInfo {
+          id: "deepseek-chat".to_string(),
+          name: "DeepSeek".to_string(),
+          description: "高性能对话模型".to_string(),
+          is_default: true,
+        });
+      }
+      if available_models.contains(&AIModel::QwenTurbo) {
+        models.push(AIModelInfo {
+          id: "qwen-turbo".to_string(),
+          name: "通义千问 Turbo".to_string(),
+          description: "阿里云通义千问快速版".to_string(),
+          is_default: false,
+        });
+      }
+      models
+    },
+    SubscriptionPlan::Team | SubscriptionPlan::AiMax => {
+      let mut models = vec![];
+      if available_models.contains(&AIModel::DeepSeek) {
+        models.push(AIModelInfo {
+          id: "deepseek-chat".to_string(),
+          name: "DeepSeek".to_string(),
+          description: "高性能对话模型".to_string(),
+          is_default: false,
+        });
+      }
+      if available_models.contains(&AIModel::QwenTurbo) {
+        models.push(AIModelInfo {
+          id: "qwen-turbo".to_string(),
+          name: "通义千问 Turbo".to_string(),
+          description: "快速响应".to_string(),
+          is_default: false,
+        });
+      }
+      if available_models.contains(&AIModel::QwenMax) {
+        models.push(AIModelInfo {
+          id: "qwen-max".to_string(),
+          name: "通义千问 Max".to_string(),
+          description: "旗舰模型 (推荐)".to_string(),
+          is_default: true,
+        });
+      }
+      if available_models.contains(&AIModel::Doubao) {
+        models.push(AIModelInfo {
+          id: "doubao".to_string(),
+          name: "豆包".to_string(),
+          description: "字节跳动豆包".to_string(),
+          is_default: false,
+        });
+      }
+      models
+    },
+    _ => vec![],
+  };
+  
+  Ok(AppResponse::Ok().with_data(AvailableModelsResponse {
+    models,
+    current_plan: format!("{:?}", plan),
+  }).into())
 }

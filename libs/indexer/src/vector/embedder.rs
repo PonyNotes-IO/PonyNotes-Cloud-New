@@ -49,7 +49,16 @@ pub fn get_open_ai_config() -> (Option<OpenAIConfig>, Option<AzureConfig>) {
 }
 
 fn open_ai_config() -> Option<OpenAIConfig> {
-  get_env_var_opt("AI_OPENAI_API_KEY").map(|v| OpenAIConfig::default().with_api_key(v))
+  let api_key = get_env_var_opt("AI_OPENAI_API_KEY")?;
+  let mut config = OpenAIConfig::default().with_api_key(api_key);
+  
+  // Support custom OpenAI API base URL for compatible services
+  if let Some(api_base) = get_env_var_opt("AI_OPENAI_API_BASE") {
+    info!("Using custom OpenAI API base: {}", api_base);
+    config = config.with_api_base(api_base);
+  }
+  
+  Some(config)
 }
 
 fn azure_open_ai_config() -> Option<AzureConfig> {

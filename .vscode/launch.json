@@ -1,0 +1,110 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "🚀 重新编译并启动",
+            "type": "node",
+            "request": "launch",
+            "runtimeExecutable": "powershell.exe",
+            "runtimeArgs": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "Write-Host '检查 SQLx 缓存...' -ForegroundColor Cyan; if (-not (Test-Path '.sqlx')) { Write-Host '[警告] SQLx 缓存不存在！' -ForegroundColor Yellow; Write-Host '首次构建需要先生成 SQLx 缓存，请选择: 📦 重新生成 SQLx 缓存' -ForegroundColor Yellow; exit 1 } else { Write-Host '[OK] SQLx 缓存已存在' -ForegroundColor Green }; Write-Host '停止旧容器...' -ForegroundColor Cyan; docker compose -f docker-compose-dev.yml --env-file .env down; Write-Host '重新编译并启动所有服务...' -ForegroundColor Cyan; Write-Host '注意: 首次编译可能需要 10-30 分钟' -ForegroundColor Yellow; docker compose -f docker-compose-dev.yml --env-file .env up -d --build; if ($LASTEXITCODE -eq 0) { Write-Host '服务启动成功！' -ForegroundColor Green; Write-Host '访问: http://localhost:8000/health' -ForegroundColor Cyan } else { Write-Host '启动失败，查看日志: docker compose -f docker-compose-dev.yml logs' -ForegroundColor Red }"
+            ],
+            "console": "integratedTerminal",
+            "internalConsoleOptions": "neverOpen"
+        },
+        {
+            "name": "🔄 仅重启服务（不重新编译）",
+            "type": "node",
+            "request": "launch",
+            "runtimeExecutable": "powershell.exe",
+            "runtimeArgs": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "Write-Host '停止服务...' -ForegroundColor Cyan; docker compose -f docker-compose-dev.yml --env-file .env down; Write-Host '启动所有服务...' -ForegroundColor Cyan; docker compose -f docker-compose-dev.yml --env-file .env up -d; if ($LASTEXITCODE -eq 0) { Write-Host '服务启动成功！' -ForegroundColor Green; Write-Host '访问: http://localhost:8000/health' -ForegroundColor Cyan } else { Write-Host '启动失败，查看日志: docker compose -f docker-compose-dev.yml logs' -ForegroundColor Red }"
+            ],
+            "console": "integratedTerminal",
+            "internalConsoleOptions": "neverOpen"
+        },
+        {
+            "name": "🗑️ 清空并重新编译",
+            "type": "node",
+            "request": "launch",
+            "runtimeExecutable": "powershell.exe",
+            "runtimeArgs": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "Write-Host '检查 SQLx 缓存...' -ForegroundColor Cyan; if (-not (Test-Path '.sqlx')) { Write-Host '[警告] SQLx 缓存不存在！' -ForegroundColor Yellow; Write-Host '首次构建需要先生成 SQLx 缓存，请选择: 📦 重新生成 SQLx 缓存' -ForegroundColor Yellow; exit 1 } else { Write-Host '[OK] SQLx 缓存已存在' -ForegroundColor Green }; Write-Host '清空所有数据和容器...' -ForegroundColor Yellow; docker compose -f docker-compose-dev.yml --env-file .env down -v; Write-Host '重新编译并启动所有服务...' -ForegroundColor Cyan; docker compose -f docker-compose-dev.yml --env-file .env up -d --build; if ($LASTEXITCODE -eq 0) { Write-Host '服务启动成功！' -ForegroundColor Green; Write-Host '访问: http://localhost:8000/health' -ForegroundColor Cyan } else { Write-Host '启动失败，查看日志: docker compose -f docker-compose-dev.yml logs' -ForegroundColor Red }"
+            ],
+            "console": "integratedTerminal",
+            "internalConsoleOptions": "neverOpen"
+        },
+        {
+            "name": "📦 重新生成 SQLx 缓存",
+            "type": "node",
+            "request": "launch",
+            "runtimeExecutable": "powershell.exe",
+            "runtimeArgs": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "$ErrorActionPreference = 'Continue'; Write-Host '======================================' -ForegroundColor Cyan; Write-Host '  重新生成 SQLx 缓存' -ForegroundColor Cyan; Write-Host '======================================' -ForegroundColor Cyan; Write-Host ''; Write-Host '检查 Rust/Cargo...' -ForegroundColor Cyan; try { $rustVersion = cargo --version; if ($LASTEXITCODE -ne 0) { throw 'Cargo not found' }; Write-Host \"[OK] $rustVersion\" -ForegroundColor Green } catch { Write-Host '[错误] 未找到 Rust/Cargo' -ForegroundColor Red; Write-Host '请安装 Rust: https://rustup.rs/' -ForegroundColor Yellow; exit 1 }; Write-Host ''; Write-Host '检查 sqlx-cli...' -ForegroundColor Cyan; try { $null = cargo sqlx --version 2>&1; if ($LASTEXITCODE -ne 0) { throw } } catch { Write-Host '[提示] 正在安装 sqlx-cli...' -ForegroundColor Yellow; cargo install sqlx-cli --no-default-features --features postgres; if ($LASTEXITCODE -ne 0) { Write-Host '[错误] sqlx-cli 安装失败' -ForegroundColor Red; exit 1 } }; Write-Host '[OK] sqlx-cli 已就绪' -ForegroundColor Green; Write-Host ''; Write-Host '启动 PostgreSQL...' -ForegroundColor Cyan; docker compose -f docker-compose-dev.yml up -d postgres; Write-Host '等待 PostgreSQL 就绪...' -ForegroundColor Yellow; Start-Sleep -Seconds 3; Write-Host ''; Write-Host '创建 auth schema...' -ForegroundColor Cyan; $oldErrorPref = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; docker exec ponynotes-cloud-new-postgres-1 psql -U postgres -d postgres -tAc 'CREATE SCHEMA IF NOT EXISTS auth' 2>&1 | Out-Null; $ErrorActionPreference = $oldErrorPref; Write-Host '[OK] auth schema 已创建' -ForegroundColor Green; Write-Host ''; Write-Host '启动 GoTrue...' -ForegroundColor Cyan; docker compose -f docker-compose-dev.yml up -d gotrue; Write-Host '等待 GoTrue 初始化...' -ForegroundColor Yellow; $maxRetries = 15; $retryCount = 0; $gotrueReady = 0; while ($retryCount -lt $maxRetries -and $gotrueReady -eq 0) { Start-Sleep -Seconds 2; $retryCount++; Write-Host \"检查 GoTrue ($retryCount/$maxRetries)...\" -ForegroundColor Gray; $containerStatus = docker ps --filter name=ponynotes-cloud-new-gotrue-1 --filter status=running --format '{{.Status}}' 2>&1 | Out-String; if ($containerStatus -match 'Up') { $gotrueReady = 1; Write-Host '[OK] GoTrue 已启动' -ForegroundColor Green } }; if ($gotrueReady -eq 0) { Write-Host '[警告] GoTrue 启动超时，继续执行...' -ForegroundColor Yellow }; Write-Host ''; Write-Host '加载环境变量...' -ForegroundColor Cyan; if (Test-Path 'dev.env') { Get-Content 'dev.env' | ForEach-Object { if ($_ -match '^([^#][^=]+)=(.*)$') { $name = $matches[1].Trim(); $value = $matches[2].Trim(); [Environment]::SetEnvironmentVariable($name, $value) } } } else { [Environment]::SetEnvironmentVariable('DATABASE_URL', 'postgres://postgres:password@localhost:5432/postgres') }; Write-Host ''; Write-Host '运行数据库迁移...' -ForegroundColor Cyan; cargo sqlx migrate run; if ($LASTEXITCODE -ne 0) { Write-Host '[错误] 数据库迁移失败' -ForegroundColor Red; exit 1 }; Write-Host '[OK] 迁移完成' -ForegroundColor Green; Write-Host ''; Write-Host '生成 SQLx 缓存文件...' -ForegroundColor Cyan; Write-Host '(这可能需要几分钟...)' -ForegroundColor Yellow; cargo sqlx prepare --workspace; if ($LASTEXITCODE -ne 0) { Write-Host '[错误] SQLx 缓存生成失败' -ForegroundColor Red; exit 1 }; Write-Host ''; Write-Host '======================================' -ForegroundColor Green; Write-Host '  SQLx 缓存生成成功！' -ForegroundColor Green; Write-Host '======================================' -ForegroundColor Green; Write-Host ''; Write-Host '现在可以运行: 🚀 重新编译并启动' -ForegroundColor Cyan; Write-Host ''"
+            ],
+            "console": "integratedTerminal",
+            "internalConsoleOptions": "neverOpen"
+        },
+        {
+            "name": "📋 查看服务日志",
+            "type": "node",
+            "request": "launch",
+            "runtimeExecutable": "powershell.exe",
+            "runtimeArgs": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "Write-Host '查看所有服务日志 (Ctrl+C 退出)...' -ForegroundColor Cyan; Write-Host ''; docker compose -f docker-compose-dev.yml --env-file .env logs -f"
+            ],
+            "console": "integratedTerminal",
+            "internalConsoleOptions": "neverOpen"
+        },
+        {
+            "name": "🛑 停止所有服务",
+            "type": "node",
+            "request": "launch",
+            "runtimeExecutable": "powershell.exe",
+            "runtimeArgs": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "Write-Host '停止所有服务...' -ForegroundColor Cyan; docker compose -f docker-compose-dev.yml --env-file .env down; if ($LASTEXITCODE -eq 0) { Write-Host '[OK] 所有服务已停止' -ForegroundColor Green } else { Write-Host '[错误] 停止失败' -ForegroundColor Red }"
+            ],
+            "console": "integratedTerminal",
+            "internalConsoleOptions": "neverOpen"
+        },
+        {
+            "name": "📊 查看服务状态",
+            "type": "node",
+            "request": "launch",
+            "runtimeExecutable": "powershell.exe",
+            "runtimeArgs": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "Write-Host 'Docker 服务状态:' -ForegroundColor Cyan; Write-Host ''; docker compose -f docker-compose-dev.yml --env-file .env ps; Write-Host ''; Write-Host '健康检查:' -ForegroundColor Cyan; try { $response = Invoke-WebRequest -Uri 'http://localhost:8000/health' -UseBasicParsing -TimeoutSec 3; Write-Host '[OK] AppFlowy Cloud: 运行中' -ForegroundColor Green } catch { Write-Host '[X] AppFlowy Cloud: 未响应' -ForegroundColor Red }; try { $response = Invoke-WebRequest -Uri 'http://localhost:9999/health' -UseBasicParsing -TimeoutSec 3; Write-Host '[OK] GoTrue: 运行中' -ForegroundColor Green } catch { Write-Host '[X] GoTrue: 未响应' -ForegroundColor Red }"
+            ],
+            "console": "integratedTerminal",
+            "internalConsoleOptions": "neverOpen"
+        }
+    ]
+}

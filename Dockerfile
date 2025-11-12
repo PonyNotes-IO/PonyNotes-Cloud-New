@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # Using cargo-chef to manage Rust build cache effectively
 FROM lukemathwalker/cargo-chef:latest-rust-1.86 as chef
 
@@ -18,6 +17,8 @@ RUN apt update && apt install -y protobuf-compiler lld clang
 # Specify a default value for FEATURES; it could be an empty string if no features are enabled by default
 ARG FEATURES=""
 ARG PROFILE="release"
+ARG DATABASE_URL=postgres://postgres:password@postgres:5432/postgres
+ENV DATABASE_URL=$DATABASE_URL
 
 COPY --from=planner /app/recipe.json recipe.json
 ENV CARGO_BUILD_JOBS=4
@@ -32,7 +33,8 @@ RUN if [ "$PROFILE" = "release" ]; then \
     fi
 
 COPY . .
-ENV SQLX_OFFLINE true
+# Enable SQLX_OFFLINE to use pre-generated sqlx-data.json and avoid database connection during build
+ENV SQLX_OFFLINE=true
 
 # Build the project
 RUN echo "Building with profile: ${PROFILE}, features: ${FEATURES}, "

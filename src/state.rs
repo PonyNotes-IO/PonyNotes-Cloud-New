@@ -14,6 +14,7 @@ use uuid::Uuid;
 use access_control::metrics::AccessControlMetrics;
 use app_error::AppError;
 use appflowy_ai_client::client::AppFlowyAIClient;
+use appflowy_ai_client::chat_client::ChatClient;
 use appflowy_collaborate::collab::cache::CollabCache;
 use appflowy_collaborate::metrics::CollabMetrics;
 use appflowy_collaborate::ws2::WsServer;
@@ -59,6 +60,7 @@ pub struct AppState {
   pub gotrue_admin: GoTrueAdmin,
   pub mailer: AFCloudMailer,
   pub ai_client: AppFlowyAIClient,
+  pub chat_client: Arc<ChatClient>,
   pub indexer_scheduler: Arc<IndexerScheduler>,
   pub ws_server: Addr<WsServer>,
 }

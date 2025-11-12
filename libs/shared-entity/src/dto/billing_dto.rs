@@ -35,11 +35,12 @@ impl TryFrom<i16> for RecurringInterval {
 #[repr(i16)]
 pub enum SubscriptionPlan {
   Free = 0,
-  Pro = 1,
-  Team = 2,
+  Basic = 1,
+  Pro = 2,
+  Team = 3,
 
-  AiMax = 3,
-  AiLocal = 4,
+  AiMax = 4,
+  AiLocal = 5,
 }
 
 impl TryFrom<i16> for SubscriptionPlan {
@@ -48,10 +49,27 @@ impl TryFrom<i16> for SubscriptionPlan {
   fn try_from(value: i16) -> Result<Self, Self::Error> {
     match value {
       0 => Ok(SubscriptionPlan::Free),
-      1 => Ok(SubscriptionPlan::Pro),
-      2 => Ok(SubscriptionPlan::Team),
-      3 => Ok(SubscriptionPlan::AiMax),
-      4 => Ok(SubscriptionPlan::AiLocal),
+      1 => Ok(SubscriptionPlan::Basic),
+      2 => Ok(SubscriptionPlan::Pro),
+      3 => Ok(SubscriptionPlan::Team),
+      4 => Ok(SubscriptionPlan::AiMax),
+      5 => Ok(SubscriptionPlan::AiLocal),
+      _ => Err(format!("Invalid SubscriptionPlan value: {}", value)),
+    }
+  }
+}
+
+impl TryFrom<i32> for SubscriptionPlan {
+  type Error = String;
+
+  fn try_from(value: i32) -> Result<Self, Self::Error> {
+    match value {
+      0 => Ok(SubscriptionPlan::Free),
+      1 => Ok(SubscriptionPlan::Basic),
+      2 => Ok(SubscriptionPlan::Pro),
+      3 => Ok(SubscriptionPlan::Team),
+      4 => Ok(SubscriptionPlan::AiMax),
+      5 => Ok(SubscriptionPlan::AiLocal),
       _ => Err(format!("Invalid SubscriptionPlan value: {}", value)),
     }
   }
@@ -61,6 +79,7 @@ impl AsRef<str> for SubscriptionPlan {
   fn as_ref(&self) -> &str {
     match self {
       SubscriptionPlan::Free => "free",
+      SubscriptionPlan::Basic => "basic",
       SubscriptionPlan::Pro => "pro",
       SubscriptionPlan::Team => "team",
       SubscriptionPlan::AiMax => "ai_max",
@@ -75,6 +94,7 @@ impl TryFrom<&str> for SubscriptionPlan {
   fn try_from(value: &str) -> Result<Self, Self::Error> {
     match value {
       "free" => Ok(SubscriptionPlan::Free),
+      "basic" => Ok(SubscriptionPlan::Basic),
       "pro" => Ok(SubscriptionPlan::Pro),
       "team" => Ok(SubscriptionPlan::Team),
       "ai_max" => Ok(SubscriptionPlan::AiMax),

@@ -26,13 +26,14 @@ use database_entity::dto::{
   AFRole, AFWorkspace, AFWorkspaceInvitation, AFWorkspaceInvitationStatus, AFWorkspaceSettings,
   GlobalComment, Reaction, WorkspaceMemberProfile, WorkspaceUsage,
 };
-use shared_entity::dto::billing_dto::WorkspaceUsageAndLimit;
+use shared_entity::dto::billing_dto::{SubscriptionPlan, WorkspaceUsageAndLimit};
 
 use crate::biz::authentication::jwt::OptionalUserUuid;
 use crate::biz::user::user_init::{
   create_user_awareness, create_workspace_collab, create_workspace_database_collab,
   initialize_workspace_for_user,
 };
+use crate::biz::workspace::subscription_plan_limits::PlanLimits;
 use crate::mailer::{AFCloudMailer, WorkspaceInviteMailerParam};
 use crate::state::RedisConnectionManager;
 use shared_entity::dto::workspace_dto::{
@@ -384,6 +385,20 @@ pub async fn invite_workspace_members(
       .collect();
   let pending_invitations =
     database::workspace::select_workspace_pending_invitations(pg_pool, workspace_id).await?;
+
+  // Check subscription plan limits
+  let workspace = database::workspace::select_workspace(pg_pool, workspace_id).await?;
+  let plan = SubscriptionPlan::try_from(workspace.workspace_type)
+    .map_err(|e| AppError::Internal(anyhow!("Invalid workspace type: {}", e)))?;
+  let limits = PlanLimits::from_plan(&plan);
+
+  // Check if adding new members would exceed the limit
+  if !limits.can_add_members(workspace_member_count, invitations.len() as i64) {
+    return Err(AppError::PlanLimitExceeded(format!(
+      "Member limit exceeded. Plan: {:?}, Current: {}, Limit: {}, Trying to add: {}. Please upgrade your subscription plan.",
+      plan, workspace_member_count, limits.member_limit, invitations.len()
+    )));
+  }
 
   // check if any of the invited users are already members of the workspace
   for invitation in &invitations {

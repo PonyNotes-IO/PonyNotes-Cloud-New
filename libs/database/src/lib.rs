@@ -1,4 +1,5 @@
 pub mod access_request;
+pub mod ai_usage;
 pub mod chat;
 pub mod collab;
 pub mod file;

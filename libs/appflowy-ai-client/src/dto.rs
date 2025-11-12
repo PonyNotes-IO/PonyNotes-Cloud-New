@@ -11,6 +11,79 @@ pub const STREAM_IMAGE_KEY: &str = "2";
 pub const STREAM_KEEP_ALIVE_KEY: &str = "3";
 pub const STREAM_COMMENT_KEY: &str = "4";
 
+/// 聊天请求参数
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatRequestParams {
+  /// 用户消息
+  pub message: String,
+  /// 可选的对话历史 (用于上下文对话)
+  #[serde(default)]
+  pub history: Vec<ChatMessage>,
+  /// 用户偏好的模型 ID (如果为空则使用默认模型)
+  pub preferred_model: Option<String>,
+  /// 是否包含图片 (多模态)
+  #[serde(default)]
+  pub has_images: bool,
+  /// 图片数据 (base64 编码)
+  pub images: Option<Vec<String>>,
+}
+
+/// 聊天消息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+  pub role: String, // "user" or "assistant"
+  pub content: String,
+  pub timestamp: i64,
+}
+
+/// AI 模型信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AIModelInfo {
+  pub id: String,
+  pub name: String,
+  pub description: String,
+  pub is_default: bool,
+}
+
+/// 可用模型响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AvailableModelsResponse {
+  pub models: Vec<AIModelInfo>,
+  pub current_plan: String,
+}
+
+/// AI 模型枚举
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AIModel {
+  DeepSeek,
+  QwenTurbo,
+  QwenMax,
+  Doubao,
+}
+
+impl AIModel {
+  pub fn from_str(s: &str) -> Option<Self> {
+    match s {
+      "deepseek-chat" | "deepseek" => Some(AIModel::DeepSeek),
+      "qwen-turbo" => Some(AIModel::QwenTurbo),
+      "qwen-max" => Some(AIModel::QwenMax),
+      "doubao" | "doubao-pro" => Some(AIModel::Doubao),
+      _ => None,
+    }
+  }
+
+  pub fn to_str(&self) -> &'static str {
+    match self {
+      AIModel::DeepSeek => "deepseek-chat",
+      AIModel::QwenTurbo => "qwen-turbo",
+      AIModel::QwenMax => "qwen-max",
+      AIModel::Doubao => "doubao",
+    }
+  }
+}
+
+// ===== 以下是原始 AppFlowy AI Client DTO =====
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SummarizeRowResponse {
   pub text: String,
@@ -430,9 +503,7 @@ pub struct CompletionMetadata {
   /// When completion type is 'CustomPrompt', this field should be provided.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub custom_prompt: Option<CustomPrompt>,
-  /// The id of the prompt used for the completion
-  #[serde(default)]
-  #[serde(skip_serializing_if = "Option::is_none")]
+  #[serde(default, skip_serializing_if = "Option::is_none")]
   pub prompt_id: Option<String>,
 }
 

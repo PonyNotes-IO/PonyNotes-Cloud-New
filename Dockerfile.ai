@@ -1,0 +1,9 @@
+# Extend the official AppFlowy AI image to add missing PostgreSQL driver dependencies
+FROM appflowyinc/appflowy_ai:latest
+
+# Install asyncpg for async PostgreSQL connectivity (required by LangChain's async PGVector)
+# Also install psycopg[binary] as a fallback for sync operations
+RUN pip install --no-cache-dir asyncpg "psycopg[binary]"
+
+# Keep the original entrypoint and command
+
