@@ -80,7 +80,9 @@ sqlx = { workspace = true, default-features = false, features = [
   "uuid",
   "chrono",
   "migrate",
+  "rust_decimal",
 ] }
+rust_decimal = "1.36.0"
 async-trait.workspace = true
 prometheus-client.workspace = true
 itertools = "0.11"

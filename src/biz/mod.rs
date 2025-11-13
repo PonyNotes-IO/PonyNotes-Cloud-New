@@ -6,6 +6,7 @@ pub mod data_import;
 pub mod notification;
 pub mod pg_listener;
 pub mod search;
+pub mod subscription;
 pub mod template;
 pub mod user;
 pub mod workspace;

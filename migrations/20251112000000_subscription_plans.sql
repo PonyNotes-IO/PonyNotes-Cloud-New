@@ -37,6 +37,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trigger_update_af_subscription_plans_updated_at ON af_subscription_plans;
 CREATE TRIGGER trigger_update_af_subscription_plans_updated_at
     BEFORE UPDATE ON af_subscription_plans
     FOR EACH ROW
@@ -110,6 +111,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trigger_update_af_user_subscriptions_updated_at ON af_user_subscriptions;
 CREATE TRIGGER trigger_update_af_user_subscriptions_updated_at
     BEFORE UPDATE ON af_user_subscriptions
     FOR EACH ROW
@@ -147,6 +149,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trigger_update_af_subscription_addons_updated_at ON af_subscription_addons;
 CREATE TRIGGER trigger_update_af_subscription_addons_updated_at
     BEFORE UPDATE ON af_subscription_addons
     FOR EACH ROW
@@ -188,6 +191,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trigger_update_af_user_addons_updated_at ON af_user_addons;
 CREATE TRIGGER trigger_update_af_user_addons_updated_at
     BEFORE UPDATE ON af_user_addons
     FOR EACH ROW

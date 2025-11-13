@@ -674,6 +674,7 @@ dependencies = [
  "rayon",
  "redis 0.29.5",
  "reqwest",
+ "rust_decimal",
  "sanitize-filename",
  "secrecy 0.8.0",
  "semver",

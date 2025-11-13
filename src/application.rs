@@ -61,6 +61,7 @@ use crate::api::invite_code::invite_code_scope;
 use crate::api::metrics::metrics_scope;
 use crate::api::search::search_scope;
 use crate::api::server_info::server_info_scope;
+use crate::api::subscription::subscription_scope;
 use crate::api::template::template_scope;
 use crate::api::user::user_scope;
 use crate::api::workspace::{collab_scope, workspace_scope};
@@ -163,6 +164,7 @@ pub async fn run_actix_server(
       .service(metrics_scope())
       .service(search_scope())
       .service(template_scope())
+      .service(subscription_scope())
       .service(data_import_scope())
       .service(access_request_scope())
       .service(sharing_scope())
