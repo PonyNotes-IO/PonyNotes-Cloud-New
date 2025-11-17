@@ -24,7 +24,7 @@ impl PlanLimits {
       SubscriptionPlan::Free => PlanLimits {
         member_limit: i64::MAX, // Local use: unlimited members
         storage_bytes_limit: 0,
-        ai_responses_limit: 0,
+        ai_responses_limit: 10, // Free users: 10 AI responses per month
         single_upload_limit: 0,
         storage_unlimited: true,
         ai_unlimited: false,

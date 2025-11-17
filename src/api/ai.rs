@@ -26,18 +26,23 @@ use uuid::Uuid;
 use tracing::{error, instrument, trace};
 
 pub fn ai_completion_scope() -> Scope {
-  web::scope("/api/ai/{workspace_id}")
-    .service(web::resource("/complete/stream").route(web::post().to(stream_complete_text_handler)))
-    .service(web::resource("/v2/complete/stream").route(web::post().to(stream_complete_v2_handler)))
-    .service(web::resource("/chat/stream").route(web::post().to(stream_chat_handler)))
+  web::scope("/api/ai")
+    // 公开接口（无需认证，无需workspace_id）
     .service(web::resource("/chat/models").route(web::get().to(list_chat_models_handler)))
-    .service(web::resource("/summarize_row").route(web::post().to(summarize_row_handler)))
-    .service(web::resource("/translate_row").route(web::post().to(translate_row_handler)))
-    .service(web::resource("/local/config").route(web::get().to(local_ai_config_handler)))
-    .service(
-      web::resource("/calculate_similarity").route(web::post().to(calculate_similarity_handler)),
+    .service(web::resource("/chat/session").route(web::post().to(public_chat_session_handler)))
+    // workspace相关接口
+    .service(web::scope("/{workspace_id}")
+      .service(web::resource("/complete/stream").route(web::post().to(stream_complete_text_handler)))
+      .service(web::resource("/v2/complete/stream").route(web::post().to(stream_complete_v2_handler)))
+      .service(web::resource("/chat/stream").route(web::post().to(stream_chat_handler)))
+      .service(web::resource("/summarize_row").route(web::post().to(summarize_row_handler)))
+      .service(web::resource("/translate_row").route(web::post().to(translate_row_handler)))
+      .service(web::resource("/local/config").route(web::get().to(local_ai_config_handler)))
+      .service(
+        web::resource("/calculate_similarity").route(web::post().to(calculate_similarity_handler)),
+      )
+      .service(web::resource("/model/list").route(web::get().to(model_list_handler)))
     )
-    .service(web::resource("/model/list").route(web::get().to(model_list_handler)))
 }
 
 async fn stream_complete_text_handler(
@@ -387,100 +392,119 @@ async fn stream_chat_handler(
   }
 }
 
-/// 获取可用的AI模型列表
+/// 获取可用的AI模型列表 (公开接口，无需认证，无需参数)
 #[instrument(level = "debug", skip(state), err)]
 async fn list_chat_models_handler(
-  user_uuid: UserUuid,
-  workspace_id: web::Path<Uuid>,
   state: Data<AppState>,
 ) -> actix_web::Result<Json<AppResponse<AvailableModelsResponse>>> {
-  let workspace_id = workspace_id.into_inner();
+  trace!("List all available chat models (public endpoint, no auth required)");
   
-  trace!("List chat models for workspace {}", workspace_id);
-  
-  // 获取订阅计划
-  let workspace = database::workspace::select_workspace(&state.pg_pool, &workspace_id).await?;
-  let plan = SubscriptionPlan::try_from(workspace.workspace_type)
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid workspace type: {}", e)))?;
-  
-  // 根据计划和实际配置返回可用模型
+  // 获取所有实际配置的可用模型
   let available_models = state.chat_client.get_available_models();
   
-  let models = match plan {
-    SubscriptionPlan::Free => {
-      // 免费版只能使用 DeepSeek
-      if available_models.contains(&AIModel::DeepSeek) {
-        vec![AIModelInfo {
-          id: "deepseek-chat".to_string(),
-          name: "DeepSeek".to_string(),
-          description: "高性能对话模型".to_string(),
-          is_default: true,
-        }]
-      } else {
-        vec![]
-      }
-    },
-    SubscriptionPlan::Basic | SubscriptionPlan::Pro => {
-      let mut models = vec![];
-      if available_models.contains(&AIModel::DeepSeek) {
-        models.push(AIModelInfo {
-          id: "deepseek-chat".to_string(),
-          name: "DeepSeek".to_string(),
-          description: "高性能对话模型".to_string(),
-          is_default: true,
-        });
-      }
-      if available_models.contains(&AIModel::QwenTurbo) {
-        models.push(AIModelInfo {
-          id: "qwen-turbo".to_string(),
-          name: "通义千问 Turbo".to_string(),
-          description: "阿里云通义千问快速版".to_string(),
-          is_default: false,
-        });
-      }
-      models
-    },
-    SubscriptionPlan::Team | SubscriptionPlan::AiMax => {
-      let mut models = vec![];
-      if available_models.contains(&AIModel::DeepSeek) {
-        models.push(AIModelInfo {
-          id: "deepseek-chat".to_string(),
-          name: "DeepSeek".to_string(),
-          description: "高性能对话模型".to_string(),
-          is_default: false,
-        });
-      }
-      if available_models.contains(&AIModel::QwenTurbo) {
-        models.push(AIModelInfo {
-          id: "qwen-turbo".to_string(),
-          name: "通义千问 Turbo".to_string(),
-          description: "快速响应".to_string(),
-          is_default: false,
-        });
-      }
-      if available_models.contains(&AIModel::QwenMax) {
-        models.push(AIModelInfo {
-          id: "qwen-max".to_string(),
-          name: "通义千问 Max".to_string(),
-          description: "旗舰模型 (推荐)".to_string(),
-          is_default: true,
-        });
-      }
-      if available_models.contains(&AIModel::Doubao) {
-        models.push(AIModelInfo {
-          id: "doubao".to_string(),
-          name: "豆包".to_string(),
-          description: "字节跳动豆包".to_string(),
-          is_default: false,
-        });
-      }
-      models
-    },
-    _ => vec![],
-  };
+  trace!("Available models from ChatClient: {:?}", available_models);
+  
+  // 返回所有配置好的模型，不基于订阅计划
+  let mut models = vec![];
+  
+  if available_models.contains(&AIModel::DeepSeek) {
+    models.push(AIModelInfo {
+      id: "deepseek-chat".to_string(),
+      name: "DeepSeek".to_string(),
+      description: "高性能对话模型".to_string(),
+      is_default: true,
+    });
+  }
+  
+  if available_models.contains(&AIModel::QwenTurbo) {
+    models.push(AIModelInfo {
+      id: "qwen-turbo".to_string(),
+      name: "通义千问 Turbo".to_string(),
+      description: "阿里云通义千问快速版".to_string(),
+      is_default: false,
+    });
+  }
+  
+  if available_models.contains(&AIModel::QwenMax) {
+    models.push(AIModelInfo {
+      id: "qwen-max".to_string(),
+      name: "通义千问 Max".to_string(),
+      description: "阿里云通义千问旗舰版".to_string(),
+      is_default: false,
+    });
+  }
+  
+  if available_models.contains(&AIModel::Doubao) {
+    models.push(AIModelInfo {
+      id: "doubao".to_string(),
+      name: "豆包".to_string(),
+      description: "字节跳动豆包".to_string(),
+      is_default: false,
+    });
+  }
   
   Ok(AppResponse::Ok().with_data(AvailableModelsResponse {
     models,
-    current_plan: format!("{:?}", plan),
+    current_plan: "public".to_string(), // 公开接口，无订阅计划
   }).into())
+}
+
+/// 公开的聊天会话接口 (无需认证，无需workspace_id，无使用限额)
+#[instrument(level = "debug", skip(state, payload), err)]
+async fn public_chat_session_handler(
+  state: Data<AppState>,
+  payload: Json<ChatRequestParams>,
+) -> actix_web::Result<HttpResponse> {
+  let params = payload.into_inner();
+  
+  trace!(
+    "Public chat request, message length: {}, model: {:?}", 
+    params.message.len(),
+    params.preferred_model
+  );
+  
+  // 1. 确定使用的模型（必须指定，或使用默认的 DeepSeek）
+  let model = if let Some(model_id) = &params.preferred_model {
+    AIModel::from_str(model_id).unwrap_or(AIModel::DeepSeek)
+  } else {
+    AIModel::DeepSeek // 公开接口默认使用 DeepSeek
+  };
+  
+  trace!("Using AI model: {:?}", model);
+  
+  // 2. 检查模型是否可用
+  if !state.chat_client.is_model_available(model) {
+    error!("AI model {:?} is not available (API key not configured)", model);
+    return Ok(
+      HttpResponse::ServiceUnavailable()
+        .json(serde_json::json!({
+          "code": "MODEL_UNAVAILABLE",
+          "message": format!("AI model {:?} is not available", model),
+        }))
+    );
+  }
+  
+  // 3. 调用 ChatClient 进行流式聊天
+  match state.chat_client.stream_chat(&params, model).await {
+    Ok(stream) => {
+      // 4. 返回流式响应
+      Ok(
+        HttpResponse::Ok()
+          .content_type("text/event-stream")
+          .streaming(stream.map(|result| {
+            result.map_err(|e| actix_web::error::ErrorInternalServerError(e))
+          }))
+      )
+    },
+    Err(err) => {
+      error!("AI chat service error: {:?}", err);
+      Ok(
+        HttpResponse::InternalServerError()
+          .json(serde_json::json!({
+            "code": "AI_SERVICE_ERROR",
+            "message": format!("AI service error: {}", err),
+          }))
+      )
+    },
+  }
 }

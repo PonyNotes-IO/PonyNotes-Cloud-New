@@ -29,17 +29,34 @@ pub struct ChatClient {
 
 impl ChatClient {
   pub fn from_env() -> Result<Self> {
+    // 读取环境变量
+    let deepseek_api_key = std::env::var("AI_CHAT_DEEPSEEK_API_KEY")
+      .unwrap_or_else(|_| String::new());
+    let qwen_api_key = std::env::var("AI_CHAT_QWEN_API_KEY")
+      .unwrap_or_else(|_| String::new());
+    let doubao_api_key = std::env::var("AI_CHAT_DOUBAO_API_KEY")
+      .unwrap_or_else(|_| String::new());
+    
+    // 详细日志：环境变量加载情况
+    info!("ChatClient initialization:");
+    info!("  - DeepSeek API Key: {} bytes", if deepseek_api_key.is_empty() { 0 } else { deepseek_api_key.len() });
+    info!("  - Qwen API Key: {} bytes", if qwen_api_key.is_empty() { 0 } else { qwen_api_key.len() });
+    info!("  - Doubao API Key: {} bytes", if doubao_api_key.is_empty() { 0 } else { doubao_api_key.len() });
+    
+    if deepseek_api_key.is_empty() && qwen_api_key.is_empty() && doubao_api_key.is_empty() {
+      error!("WARNING: All AI provider API keys are empty! Chat functionality will not work.");
+    }
+    
     Ok(Self {
       http_client: Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()?,
-      deepseek_api_key: std::env::var("AI_CHAT_DEEPSEEK_API_KEY")
-        .unwrap_or_else(|_| String::new()),
+      deepseek_api_key,
       deepseek_api_base: std::env::var("AI_CHAT_DEEPSEEK_API_BASE")
         .unwrap_or_else(|_| "https://ark.cn-beijing.volces.com/api/v3".to_string()),
       deepseek_model: std::env::var("AI_CHAT_DEEPSEEK_MODEL")
         .unwrap_or_else(|_| "deepseek-v3-250324".to_string()),
-      qwen_api_key: std::env::var("AI_CHAT_QWEN_API_KEY").unwrap_or_else(|_| String::new()),
+      qwen_api_key,
       qwen_api_base: std::env::var("AI_CHAT_QWEN_API_BASE").unwrap_or_else(|_| {
         "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()
       }),
@@ -47,7 +64,7 @@ impl ChatClient {
         .unwrap_or_else(|_| "qwen-turbo".to_string()),
       qwen_max_model: std::env::var("AI_CHAT_QWEN_MAX_MODEL")
         .unwrap_or_else(|_| "qwen-max".to_string()),
-      doubao_api_key: std::env::var("AI_CHAT_DOUBAO_API_KEY").unwrap_or_else(|_| String::new()),
+      doubao_api_key,
       doubao_api_base: std::env::var("AI_CHAT_DOUBAO_API_BASE")
         .unwrap_or_else(|_| "https://ark.cn-beijing.volces.com/api/v3".to_string()),
       doubao_model: std::env::var("AI_CHAT_DOUBAO_MODEL")

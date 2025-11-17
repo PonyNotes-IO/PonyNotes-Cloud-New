@@ -169,6 +169,17 @@ services:
       - SMS_CODE_LENGTH=${SMS_CODE_LENGTH:-6}
       - SMS_CODE_EXPIRE_MINUTES=${SMS_CODE_EXPIRE_MINUTES:-5}
       - SMS_RATE_LIMIT_MINUTES=${SMS_RATE_LIMIT_MINUTES:-1}
+      # 中国AI提供商配置 (用于Chat API)
+      - AI_CHAT_DEEPSEEK_API_KEY=${AI_CHAT_DEEPSEEK_API_KEY}
+      - AI_CHAT_DEEPSEEK_API_BASE=${AI_CHAT_DEEPSEEK_API_BASE}
+      - AI_CHAT_DEEPSEEK_MODEL=${AI_CHAT_DEEPSEEK_MODEL}
+      - AI_CHAT_QWEN_API_KEY=${AI_CHAT_QWEN_API_KEY}
+      - AI_CHAT_QWEN_API_BASE=${AI_CHAT_QWEN_API_BASE}
+      - AI_CHAT_QWEN_TURBO_MODEL=${AI_CHAT_QWEN_TURBO_MODEL}
+      - AI_CHAT_QWEN_MAX_MODEL=${AI_CHAT_QWEN_MAX_MODEL}
+      - AI_CHAT_DOUBAO_API_KEY=${AI_CHAT_DOUBAO_API_KEY}
+      - AI_CHAT_DOUBAO_API_BASE=${AI_CHAT_DOUBAO_API_BASE}
+      - AI_CHAT_DOUBAO_MODEL=${AI_CHAT_DOUBAO_MODEL}
       # 禁用代理以避免干扰阿里云SMS服务连接
       - HTTP_PROXY=
       - HTTPS_PROXY=
@@ -188,10 +199,7 @@ services:
 
   ai:
     restart: on-failure
-    build:
-      context: .
-      dockerfile: Dockerfile.ai
-    image: appflowyinc/appflowy_ai:custom
+    image: appflowyinc/appflowy_ai:latest
     ports:
       - "5001:5001"
     environment:
@@ -206,8 +214,8 @@ services:
       - APPFLOWY_S3_SECRET_KEY=${APPFLOWY_S3_SECRET_KEY:-minioadmin}
       - APPFLOWY_S3_BUCKET=${APPFLOWY_S3_BUCKET:-appflowy}
       - APPFLOWY_S3_REGION=${APPFLOWY_S3_REGION:-us-east-1}
-      - DATABASE_URL=postgresql+psycopg://postgres:password@postgres:5432/postgres
-      - AI_DATABASE_URL=postgresql+psycopg://postgres:password@postgres:5432/postgres
+      - DATABASE_URL=${AI_DATABASE_URL}
+      - AI_DATABASE_URL=${AI_DATABASE_URL}
       - AI_REDIS_URL=${APPFLOWY_REDIS_URI:-redis://redis:6379}
       - AI_USE_MINIO=${APPFLOWY_S3_USE_MINIO:-true}
       - AI_MINIO_URL=${APPFLOWY_S3_MINIO_URL:-http://minio:9000}
@@ -225,7 +233,7 @@ services:
       - AI_CHAT_DOUBAO_API_BASE=${AI_CHAT_DOUBAO_API_BASE}
       - AI_CHAT_DOUBAO_MODEL=${AI_CHAT_DOUBAO_MODEL}
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001/health').read()"]
+      test: ["CMD-SHELL", "curl -f http://localhost:5001/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
