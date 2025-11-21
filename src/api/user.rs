@@ -3,7 +3,7 @@ use crate::biz::authentication::jwt::{Authorization, UserUuid};
 use crate::biz::user::image_asset::{get_user_image_asset, upload_user_image_asset};
 use crate::biz::user::user_delete::delete_user;
 use crate::biz::user::user_info::{get_profile, get_user_workspace_info, update_user};
-use crate::biz::user::user_verify::verify_token;
+use crate::biz::user::user_verify::{verify_and_bind_phone, verify_token};
 use crate::state::AppState;
 use actix_http::StatusCode;
 use actix_multipart::form::bytes::Bytes;
@@ -13,7 +13,7 @@ use actix_web::{web, HttpResponse, Scope};
 use actix_web::{HttpRequest, Result};
 use database_entity::dto::{AFUserProfile, AFUserWorkspaceInfo, UserImageAssetSource};
 use semver::Version;
-use shared_entity::dto::auth_dto::{DeleteUserQuery, SignInTokenResponse, UpdateUserParams};
+use shared_entity::dto::auth_dto::{DeleteUserQuery, SignInTokenResponse, UpdateUserParams, VerifyAndBindPhoneParams};
 use shared_entity::response::AppResponseError;
 use shared_entity::response::{AppResponse, JsonAppResponse};
 use uuid::Uuid;
@@ -22,6 +22,7 @@ pub fn user_scope() -> Scope {
   web::scope("/api/user")
     .service(web::resource("/verify/{access_token}").route(web::get().to(verify_user_handler)))
     .service(web::resource("/update").route(web::post().to(update_user_handler)))
+    .service(web::resource("/verify-phone").route(web::post().to(verify_and_bind_phone_handler)))
     .service(web::resource("/profile").route(web::get().to(get_user_profile_handler)))
     .service(web::resource("/workspace").route(web::get().to(get_user_workspace_info_handler)))
     .service(web::resource("/asset/image").route(web::post().to(post_user_image_asset_handler)))
@@ -81,6 +82,20 @@ async fn update_user_handler(
 ) -> Result<JsonAppResponse<()>> {
   let params = payload.into_inner();
   update_user(&state.pg_pool, auth.uuid()?, params).await?;
+  Ok(AppResponse::Ok().into())
+}
+
+#[tracing::instrument(skip(state, auth, payload), err)]
+async fn verify_and_bind_phone_handler(
+  auth: Authorization,
+  payload: Json<VerifyAndBindPhoneParams>,
+  state: Data<AppState>,
+) -> Result<JsonAppResponse<()>> {
+  let user_uuid = auth.uuid()?;
+  let params = payload.into_inner();
+  
+  verify_and_bind_phone(&user_uuid, &params.phone, &params.otp, state.as_ref()).await?;
+  
   Ok(AppResponse::Ok().into())
 }
 

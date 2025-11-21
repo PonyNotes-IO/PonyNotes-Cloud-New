@@ -122,3 +122,68 @@ fn name_from_user_metadata(value: &serde_json::Value) -> String {
     .map(str::to_string)
     .unwrap_or_default()
 }
+
+/// Verify phone OTP and bind phone number to user
+/// 
+/// This function:
+/// 1. Calls GoTrue's verify endpoint to validate the OTP
+/// 2. If validation succeeds, updates the user's phone number in the database
+#[instrument(skip(state), err)]
+pub async fn verify_and_bind_phone(
+  user_uuid: &uuid::Uuid,
+  phone: &str,
+  otp: &str,
+  state: &AppState,
+) -> Result<(), AppError> {
+  use database::user::update_user;
+  use gotrue::params::VerifyParams;
+  
+  // Step 1: Verify the OTP using GoTrue's verify endpoint
+  // This validates that the user has access to this phone number
+  let verify_params = VerifyParams {
+    phone: phone.to_string(),
+    token: otp.to_string(),
+    ..Default::default()
+  };
+  
+  let verify_result = state
+    .gotrue_client
+    .verify(&verify_params)
+    .await;
+  
+  match verify_result {
+    Ok(_token_response) => {
+      event!(
+        tracing::Level::INFO,
+        "Phone OTP verified successfully for user: {}, phone: {}",
+        user_uuid,
+        phone
+      );
+      
+      // Step 2: Update the user's phone number in the database
+      update_user(&state.pg_pool, user_uuid, None, None, Some(phone.to_string()), None).await?;
+      
+      event!(
+        tracing::Level::INFO,
+        "Phone number bound successfully for user: {}, phone: {}",
+        user_uuid,
+        phone
+      );
+      
+      Ok(())
+    }
+    Err(e) => {
+      event!(
+        tracing::Level::WARN,
+        "Phone OTP verification failed for user: {}, phone: {}, error: {}",
+        user_uuid,
+        phone,
+        e
+      );
+      Err(AppError::InvalidRequest(format!(
+        "验证码错误或已过期: {}",
+        e
+      )))
+    }
+  }
+}
