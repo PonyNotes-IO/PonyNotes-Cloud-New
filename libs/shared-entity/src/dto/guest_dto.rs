@@ -81,3 +81,17 @@ pub struct ShareViewWithGuestRequest {
 pub struct RevokeSharedViewAccessRequest {
   pub emails: Vec<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListSharedViewResponse {
+  pub shared_views: Vec<SharedViewInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedViewInfo {
+  pub view_id: Uuid,
+  pub view_name: String,
+  pub shared_users: Vec<SharedUser>,
+  pub created_at: DateTime<Utc>,
+  pub last_modified: DateTime<Utc>,
+}

@@ -7,6 +7,7 @@ use collab_entity::CollabType;
 use collab_entity::EncodedCollab;
 // Re-export proto as proto for compatibility with older collab-entity versions
 use collab_entity::proto;
+use collab_entity::proto::collab::EmbeddingContentType as ProtoEmbeddingContentType;
 use infra::validate::{validate_not_empty_payload, validate_not_empty_str};
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -168,8 +169,8 @@ impl CreateCollabData {
     }
   }
 
-  pub fn to_proto(&self) -> proto::CollabParams {
-    proto::CollabParams {
+  pub fn to_proto(&self) -> proto::collab::CollabParams {
+    proto::collab::CollabParams {
       object_id: self.object_id.to_string(),
       encoded_collab: self.encoded_collab_v1.to_vec(),
       collab_type: self.collab_type.to_proto() as i32,
@@ -182,7 +183,7 @@ impl CreateCollabData {
   }
 
   pub fn from_protobuf_bytes(bytes: &[u8]) -> Result<Self, EntityError> {
-    match proto::CollabParams::decode(bytes) {
+    match proto::collab::CollabParams::decode(bytes) {
       Ok(proto) => Self::try_from(proto),
       Err(err) => Err(DeserializationError(err.to_string())),
     }
@@ -210,15 +211,16 @@ impl From<CreateCollabData> for CollabParams {
   }
 }
 
-impl TryFrom<proto::CollabParams> for CreateCollabData {
+impl TryFrom<proto::collab::CollabParams> for CreateCollabData {
   type Error = EntityError;
 
-  fn try_from(proto: proto::CollabParams) -> Result<Self, Self::Error> {
-    let collab_type_proto = proto::CollabType::try_from(proto.collab_type).unwrap();
+  fn try_from(proto: proto::collab::CollabParams) -> Result<Self, Self::Error> {
+    let object_id = Uuid::from_str(&proto.object_id)
+      .map_err(|e| EntityError::DeserializationError(e.to_string()))?;
+    let collab_type_proto = proto::collab::CollabType::try_from(proto.collab_type).unwrap();
     let collab_type = CollabType::from_proto(&collab_type_proto);
     Ok(Self {
-      object_id: Uuid::from_str(&proto.object_id)
-        .map_err(|e| EntityError::DeserializationError(e.to_string()))?,
+      object_id,
       encoded_collab_v1: Bytes::from(proto.encoded_collab),
       collab_type,
     })
@@ -843,19 +845,19 @@ pub enum EmbeddingContentType {
 }
 
 impl EmbeddingContentType {
-  pub fn from_proto(proto: proto::EmbeddingContentType) -> Result<Self, EntityError> {
+  pub fn from_proto(proto: ProtoEmbeddingContentType) -> Result<Self, EntityError> {
     match proto {
-      proto::EmbeddingContentType::PlainText => Ok(EmbeddingContentType::PlainText),
-      proto::EmbeddingContentType::Unknown => Err(InvalidData(format!(
+      ProtoEmbeddingContentType::PlainText => Ok(EmbeddingContentType::PlainText),
+      ProtoEmbeddingContentType::Unknown => Err(InvalidData(format!(
         "{} is not a supported embedding type",
         proto.as_str_name()
       ))),
     }
   }
 
-  pub fn to_proto(&self) -> proto::EmbeddingContentType {
+  pub fn to_proto(&self) -> ProtoEmbeddingContentType {
     match self {
-      EmbeddingContentType::PlainText => proto::EmbeddingContentType::PlainText,
+      EmbeddingContentType::PlainText => ProtoEmbeddingContentType::PlainText,
     }
   }
 }
