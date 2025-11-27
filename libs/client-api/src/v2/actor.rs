@@ -34,11 +34,11 @@ use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, instrument};
 use uuid::Uuid;
-use yrs::block::ClientID;
-use yrs::sync::{Awareness, AwarenessUpdate};
-use yrs::updates::decoder::Decode;
-use yrs::updates::encoder::Encode;
-use yrs::{ReadTxn, StateVector, Transact, Transaction, Update};
+use crate::yrs::block::ClientID;
+use crate::yrs::sync::{Awareness, AwarenessUpdate};
+use crate::yrs::updates::decoder::Decode;
+use crate::yrs::updates::encoder::Encode;
+use crate::yrs::{ReadTxn, StateVector, Transact, Transaction, Update};
 
 // Empty update constants for checking if an update is empty
 const EMPTY_UPDATE_V1: &[u8] = &[0, 0];

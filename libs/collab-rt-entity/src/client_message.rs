@@ -1,5 +1,8 @@
 use crate::message::RealtimeMessage;
 use crate::server_message::ServerInit;
+use crate::yrs::merge_updates_v1;
+use crate::yrs::updates::decoder::DecoderV1;
+use crate::yrs::updates::encoder::{Encode, Encoder, EncoderV1};
 use crate::{CollabMessage, MessageByObjectId, MsgId};
 use anyhow::{anyhow, Error};
 use bytes::Bytes;
@@ -10,9 +13,6 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
-use yrs::merge_updates_v1;
-use yrs::updates::decoder::DecoderV1;
-use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
 
 pub trait SinkMessage: Clone + Send + Sync + 'static + Ord + Display {
   fn payload_size(&self) -> usize;

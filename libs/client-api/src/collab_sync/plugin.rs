@@ -16,7 +16,7 @@ use tokio_retry::{Action, Condition, RetryIf};
 use tokio_stream::StreamExt;
 use tracing::{error, trace};
 use uuid::Uuid;
-use yrs::updates::encoder::Encode;
+use crate::yrs::updates::encoder::Encode;
 
 use client_api_entity::{CollabObject, CollabType};
 use collab_rt_entity::{ClientCollabMessage, ServerCollabMessage, UpdateSync};

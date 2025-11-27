@@ -9,11 +9,14 @@ edition = "2021"
 collab-entity = { workspace = true }
 gotrue-entity = { workspace = true }
 shared-entity = { workspace = true }
-collab-rt-entity = { workspace = true }
+collab-rt-entity = { workspace = true, default-features = false }
 database-entity.workspace = true
 uuid.workspace = true
 
 infra = { workspace = true, optional = true }
 
 [features]
+default = ["legacy_collab_api"]
 file_util = ["infra/file_util"]
+legacy_collab_api = ["collab-rt-entity/legacy_collab_api"]
+modern_collab_api = ["collab-rt-entity/modern_collab_api"]

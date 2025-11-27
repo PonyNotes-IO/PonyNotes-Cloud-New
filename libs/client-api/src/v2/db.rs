@@ -5,6 +5,10 @@ use anyhow::anyhow;
 use appflowy_proto::Rid;
 use client_api_entity::CollabType;
 use collab::core::origin::CollabOrigin;
+#[cfg(all(not(feature = "modern_collab_api"), feature = "legacy_collab_api"))]
+use collab::core::collab::{default_client_id, CollabOptions};
+#[cfg(feature = "modern_collab_api")]
+use collab::core::collab_plugin::CollabPlugin;
 use collab::core::transaction::DocTransactionExtension;
 use collab::preclude::Collab;
 use collab_plugins::local_storage::kv::doc::CollabKVAction;
@@ -15,9 +19,10 @@ use std::str::FromStr;
 use std::sync::{Arc, Weak};
 use tracing::instrument;
 use uuid::Uuid;
-use yrs::block::ClientID;
-use yrs::updates::decoder::Decode;
-use yrs::{ReadTxn, StateVector, Transact};
+use crate::yrs;
+use crate::yrs::block::ClientID;
+use crate::yrs::updates::decoder::Decode;
+use crate::yrs::{ReadTxn, StateVector, Transact};
 
 // Empty update constants for checking if an update is empty
 const EMPTY_UPDATE_V1: &[u8] = &[0, 0];
@@ -117,12 +122,7 @@ impl Db {
     let instance = self.inner.get()?;
       let ops = instance.read_txn();
       let object_id = object_id.to_string();
-      let mut collab = Collab::new_with_origin(
-        CollabOrigin::Empty,
-        object_id.clone(),
-        vec![],
-        false,
-      );
+      let mut collab = create_empty_collab(object_id.clone());
       let mut txn = collab.transact_mut();
     ops.load_doc_with_txn(
       self.uid,
@@ -145,12 +145,7 @@ impl Db {
     for object_id in object_ids {
         let get_state_vector = || -> Result<StateVector, PersistenceError> {
           let object_id_str = object_id.to_string();
-          let mut collab = Collab::new_with_origin(
-            CollabOrigin::Empty,
-            object_id_str.clone(),
-            vec![],
-            false,
-          );
+          let mut collab = create_empty_collab(object_id_str.clone());
           let mut txn = collab.transact_mut();
 
         ops.load_doc_with_txn(
@@ -297,6 +292,25 @@ impl Db {
     }
     ops.commit_transaction()?;
     Ok(missing)
+  }
+}
+
+fn create_empty_collab(object_id: String) -> Collab {
+  #[cfg(feature = "modern_collab_api")]
+  {
+    return Collab::new_with_origin(
+      CollabOrigin::Empty,
+      object_id,
+      Vec::<Box<dyn CollabPlugin>>::new(),
+      false,
+    );
+  }
+
+  #[cfg(all(not(feature = "modern_collab_api"), feature = "legacy_collab_api"))]
+  {
+    let options = CollabOptions::new(object_id, default_client_id());
+    return Collab::new_with_options(CollabOrigin::Empty, options)
+      .expect("Collab::new_with_options should not fail for empty doc state");
   }
 }
 

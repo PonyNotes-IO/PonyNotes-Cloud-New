@@ -2,9 +2,10 @@ use std::fmt::{Debug, Display, Formatter};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use yrs::updates::decoder::{Decode, Decoder};
-use yrs::updates::encoder::{Encode, Encoder};
-use yrs::StateVector;
+
+use crate::yrs::updates::decoder::{Decode, Decoder};
+use crate::yrs::updates::encoder::{Encode, Encoder};
+use crate::yrs::StateVector;
 
 /// Tag id for [Message::Sync].
 pub const MSG_SYNC: u8 = 0;
@@ -54,7 +55,7 @@ impl Encode for Message {
 }
 
 impl Decode for Message {
-  fn decode<D: Decoder>(decoder: &mut D) -> Result<Self, yrs::encoding::read::Error> {
+  fn decode<D: Decoder>(decoder: &mut D) -> Result<Self, crate::yrs::encoding::read::Error> {
     let tag: u8 = decoder.read_var()?;
     match tag {
       MSG_SYNC => {
@@ -77,7 +78,7 @@ impl Decode for Message {
         let msg = CustomMessage::decode(decoder)?;
         Ok(Message::Custom(msg))
       },
-      _ => Err(yrs::encoding::read::Error::UnexpectedValue),
+      _ => Err(crate::yrs::encoding::read::Error::UnexpectedValue),
     }
   }
 }
@@ -120,7 +121,7 @@ impl Encode for CustomMessage {
 }
 
 impl Decode for CustomMessage {
-  fn decode<D: Decoder>(decoder: &mut D) -> Result<Self, yrs::encoding::read::Error> {
+  fn decode<D: Decoder>(decoder: &mut D) -> Result<Self, crate::yrs::encoding::read::Error> {
     let tag: u8 = decoder.read_var()?;
     match tag {
       MSG_CUSTOM_START_SYNC => {
@@ -128,7 +129,7 @@ impl Decode for CustomMessage {
         let meta = SyncMeta::from_vec(buf)?;
         Ok(CustomMessage::SyncCheck(meta))
       },
-      _ => Err(yrs::encoding::read::Error::UnexpectedValue),
+      _ => Err(crate::yrs::encoding::read::Error::UnexpectedValue),
     }
   }
 }
@@ -143,9 +144,9 @@ impl SyncMeta {
     bincode::serialize(self).unwrap()
   }
 
-  pub fn from_vec(data: &[u8]) -> Result<Self, yrs::encoding::read::Error> {
+  pub fn from_vec(data: &[u8]) -> Result<Self, crate::yrs::encoding::read::Error> {
     let meta =
-      bincode::deserialize(data).map_err(|_| yrs::encoding::read::Error::UnexpectedValue)?;
+      bincode::deserialize(data).map_err(|_| crate::yrs::encoding::read::Error::UnexpectedValue)?;
     Ok(meta)
   }
 }
@@ -203,7 +204,7 @@ impl Encode for SyncMessage {
 }
 
 impl Decode for SyncMessage {
-  fn decode<D: Decoder>(decoder: &mut D) -> Result<Self, yrs::encoding::read::Error> {
+  fn decode<D: Decoder>(decoder: &mut D) -> Result<Self, crate::yrs::encoding::read::Error> {
     let tag: u8 = decoder.read_var()?;
     match tag {
       MSG_SYNC_STEP_1 => {
@@ -219,7 +220,7 @@ impl Decode for SyncMessage {
         let buf = decoder.read_buf()?;
         Ok(SyncMessage::Update(buf.into()))
       },
-      _ => Err(yrs::encoding::read::Error::UnexpectedValue),
+      _ => Err(crate::yrs::encoding::read::Error::UnexpectedValue),
     }
   }
 }
@@ -228,7 +229,7 @@ impl Decode for SyncMessage {
 pub enum RTProtocolError {
   /// Incoming Y-protocol message couldn't be deserialized.
   #[error("failed to deserialize message: {0}")]
-  DecodingError(#[from] yrs::encoding::read::Error),
+  DecodingError(#[from] crate::yrs::encoding::read::Error),
 
   /// Applying incoming Y-protocol awareness update has failed.
   #[error("failed to process awareness update: {0}")]
@@ -287,12 +288,12 @@ impl<'a, D: Decoder> MessageReader<'a, D> {
 }
 
 impl<D: Decoder> Iterator for MessageReader<'_, D> {
-  type Item = Result<Message, yrs::encoding::read::Error>;
+  type Item = Result<Message, crate::yrs::encoding::read::Error>;
 
   fn next(&mut self) -> Option<Self::Item> {
     match Message::decode(self.0) {
       Ok(msg) => Some(Ok(msg)),
-      Err(yrs::encoding::read::Error::EndOfBuffer(_)) => None,
+      Err(crate::yrs::encoding::read::Error::EndOfBuffer(_)) => None,
       Err(error) => Some(Err(error)),
     }
   }

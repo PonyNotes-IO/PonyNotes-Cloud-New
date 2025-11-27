@@ -2,15 +2,16 @@ use std::borrow::BorrowMut;
 use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
+use collab::core::awareness::{Awareness, AwarenessUpdate};
 use collab::core::collab::TransactionMutExt;
 use collab::core::origin::CollabOrigin;
 use collab::lock::RwLock;
 use collab::preclude::Collab;
 use tokio::task::spawn_blocking;
-use yrs::sync::awareness::{Awareness, AwarenessUpdate};
-use yrs::updates::decoder::Decode;
-use yrs::updates::encoder::{Encode, Encoder};
-use yrs::{ReadTxn, StateVector, Transact, Update};
+
+use crate::yrs::updates::decoder::Decode;
+use crate::yrs::updates::encoder::{Encode, Encoder};
+use crate::yrs::{ReadTxn, StateVector, TransactionMut, Transact, Update};
 
 use crate::message::{CustomMessage, Message, RTProtocolError, SyncMessage, SyncMeta};
 
@@ -37,13 +38,7 @@ impl CollabSyncProtocol for ClientSyncProtocol {
     let update = decode_update(update).await?;
     let mut lock = collab.write().await;
     let collab = (*lock).borrow_mut();
-    let mut txn = collab
-      .get_awareness()
-      .doc()
-      .try_transact_mut_with(origin.clone())
-      .map_err(|err| {
-        RTProtocolError::YrsTransaction(format!("sync step2 transaction acquire: {}", err))
-      })?;
+    let mut txn = acquire_mut_txn(collab, origin)?;
     txn.try_apply_update(update).map_err(|err| {
       RTProtocolError::YrsApplyUpdate(format!("sync step2 apply update: {} ", err))
     })?;
@@ -152,7 +147,10 @@ pub trait CollabSyncProtocol {
     let update = {
       let lock = collab.read().await;
       let collab = lock.borrow();
-      let txn = collab.get_awareness().doc().try_transact()
+      let txn = collab
+        .get_awareness()
+        .doc()
+        .try_transact()
         .map_err(|e| RTProtocolError::YrsTransaction(format!("Failed to acquire transaction: {}", e)))?;
       txn.encode_diff_v1(&sv)
     };
@@ -219,13 +217,39 @@ pub trait CollabSyncProtocol {
 pub const LARGE_UPDATE_THRESHOLD: usize = 1024 * 1024; // 1MB
 
 #[inline]
-pub async fn decode_update(update: Vec<u8>) -> Result<Update, yrs::encoding::read::Error> {
+pub async fn decode_update(update: Vec<u8>) -> Result<Update, crate::yrs::encoding::read::Error> {
   let update = if update.len() > LARGE_UPDATE_THRESHOLD {
     spawn_blocking(move || Update::decode_v1(&update))
       .await
-      .map_err(|err| yrs::encoding::read::Error::Custom(err.to_string()))?
+      .map_err(|err| crate::yrs::encoding::read::Error::Custom(err.to_string()))?
   } else {
     Update::decode_v1(&update)
   }?;
   Ok(update)
+}
+
+#[cfg(all(not(feature = "modern_collab_api"), feature = "legacy_collab_api"))]
+fn acquire_mut_txn<'a>(
+  collab: &'a mut Collab,
+  origin: &CollabOrigin,
+) -> Result<TransactionMut<'a>, RTProtocolError> {
+  collab
+    .get_awareness()
+    .doc()
+    .try_transact_mut_with(origin.clone())
+    .map_err(|err| {
+      RTProtocolError::YrsTransaction(format!("sync step2 transaction acquire: {}", err))
+    })
+}
+
+#[cfg(feature = "modern_collab_api")]
+fn acquire_mut_txn<'a>(
+  collab: &'a mut Collab,
+  _origin: &CollabOrigin,
+) -> Result<TransactionMut<'a>, RTProtocolError> {
+  collab
+    .get_awareness()
+    .doc()
+    .try_transact_mut()
+    .map_err(|err| RTProtocolError::YrsTransaction(format!("sync step2 transaction acquire: {}", err)))
 }

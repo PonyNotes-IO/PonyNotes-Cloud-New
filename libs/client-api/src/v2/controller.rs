@@ -22,7 +22,7 @@ use tokio_tungstenite::tungstenite::error::ProtocolError;
 use tokio_tungstenite::tungstenite::{Error, Message};
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
-use yrs::block::ClientID;
+use crate::yrs::block::ClientID;
 
 #[derive(Clone)]
 pub struct WorkspaceController {

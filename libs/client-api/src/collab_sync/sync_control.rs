@@ -9,9 +9,9 @@ use collab::preclude::Collab;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{broadcast, watch};
 use tracing::{error, info, instrument, trace};
-use yrs::updates::decoder::Decode;
-use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
-use yrs::{ReadTxn, StateVector};
+use crate::yrs::updates::decoder::Decode;
+use crate::yrs::updates::encoder::{Encode, Encoder, EncoderV1};
+use crate::yrs::{ReadTxn, StateVector};
 
 use collab_rt_entity::{ClientCollabMessage, InitSync, ServerCollabMessage, UpdateSync};
 use collab_rt_protocol::{ClientSyncProtocol, CollabSyncProtocol, Message, SyncMessage};

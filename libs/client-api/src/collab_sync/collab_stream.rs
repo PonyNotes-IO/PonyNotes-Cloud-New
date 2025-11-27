@@ -13,10 +13,10 @@ use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, instrument, trace, warn};
 use uuid::Uuid;
-use yrs::encoding::read::Cursor;
-use yrs::updates::decoder::DecoderV1;
-use yrs::updates::encoder::Encode;
-use yrs::ReadTxn;
+use crate::yrs::encoding::read::Cursor;
+use crate::yrs::updates::decoder::DecoderV1;
+use crate::yrs::updates::encoder::Encode;
+use crate::yrs::ReadTxn;
 
 use client_api_entity::{validate_data_for_folder, CollabType};
 use collab_rt_entity::{AckCode, ClientCollabMessage, ServerCollabMessage, ServerInit, UpdateSync};

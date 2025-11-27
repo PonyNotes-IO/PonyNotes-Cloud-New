@@ -5,8 +5,9 @@ use appflowy_proto::{ClientMessage, UpdateFlags};
 use client_api_entity::CollabType;
 use smallvec::{smallvec, SmallVec};
 use tokio::sync::mpsc::UnboundedReceiver;
-use yrs::updates::decoder::Decode;
-use yrs::updates::encoder::Encode;
+use crate::yrs;
+use crate::yrs::updates::decoder::Decode;
+use crate::yrs::updates::encoder::Encode;
 
 pub(super) struct ChannelReceiverCompactor {
   receiver: UnboundedReceiver<WorkspaceAction>,
@@ -165,8 +166,9 @@ mod test {
   use std::sync::Arc;
   use tokio::sync::mpsc::unbounded_channel;
   use uuid::Uuid;
-  use yrs::updates::decoder::Decode;
-  use yrs::Update;
+  use crate::yrs;
+  use crate::yrs::updates::decoder::Decode;
+  use crate::yrs::Update;
 
   #[tokio::test]
   async fn update_compaction() {

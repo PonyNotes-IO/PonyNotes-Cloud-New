@@ -210,8 +210,8 @@ members = [
 
 [workspace.dependencies]
 indexer = { path = "libs/indexer" }
-collab-rt-entity = { path = "libs/collab-rt-entity" }
-collab-rt-protocol = { path = "libs/collab-rt-protocol" }
+collab-rt-entity = { path = "libs/collab-rt-entity", default-features = false }
+collab-rt-protocol = { path = "libs/collab-rt-protocol", default-features = false }
 database = { path = "libs/database" }
 database-entity = { path = "libs/database-entity" }
 shared-entity = { path = "libs/shared-entity" }

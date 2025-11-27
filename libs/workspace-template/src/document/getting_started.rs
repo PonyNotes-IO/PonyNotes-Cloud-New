@@ -310,7 +310,10 @@ impl WorkspaceTemplate for DocumentTemplate {
   }
 
   async fn create(&self, object_id: String) -> anyhow::Result<Vec<TemplateData>> {
-    let options = collab::core::collab::CollabOptions::new(object_id.clone(), collab::core::collab::default_client_id());
+    let options = collab::core::collab::CollabOptions::new(
+      object_id.clone(),
+      collab::core::collab::default_client_id(),
+    );
     let collab = Collab::new_with_options(CollabOrigin::Empty, options)?;
     let document = Document::create_with_data(collab, self.0.clone())?;
     let data = document.encode_collab()?;

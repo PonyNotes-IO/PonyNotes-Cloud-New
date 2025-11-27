@@ -32,9 +32,9 @@ semver = "1.0.22"
 zstd = { version = "0.13.2" }
 
 collab = { workspace = true }
-# Use workspace yrs to match the version used by collab crate (from AppFlowy-Collab)
-yrs.workspace = true
-collab-rt-protocol = { workspace = true }
+yrs-legacy = { package = "yrs", version = "0.23.5", features = ["sync"], optional = true }
+yrs-modern = { package = "yrs", version = "0.24.0", features = ["sync"], optional = true }
+collab-rt-protocol = { path = "../collab-rt-protocol", default-features = false }
 workspace-template = { workspace = true, optional = true }
 serde_json.workspace = true
 serde.workspace = true
@@ -89,7 +89,7 @@ tokio = { workspace = true, features = ["sync"] }
 again = { version = "0.1.2" }
 
 [features]
-default = ["verbose_log"]
+default = ["verbose_log", "legacy_collab_api"]
 test_util = ["scraper"]
 template = ["workspace-template"]
 sync_verbose_log = ["collab-rt-protocol/verbose_log"]
@@ -97,3 +97,15 @@ test_fast_sync = []
 enable_brotli = ["brotli"]
 verbose_log = []
 collab-sync = []
+legacy_collab_api = [
+  "collab-rt-protocol/legacy_collab_api",
+  "collab-rt-entity/legacy_collab_api",
+  "client-api-entity/legacy_collab_api",
+  "yrs-legacy",
+]
+modern_collab_api = [
+  "collab-rt-protocol/modern_collab_api",
+  "collab-rt-entity/modern_collab_api",
+  "client-api-entity/modern_collab_api",
+  "yrs-modern",
+]

@@ -10,7 +10,7 @@ pub enum SyncError {
   YAwareness(#[from] collab::core::awareness::Error),
 
   #[error("failed to deserialize message: {0}")]
-  DecodingError(#[from] yrs::encoding::read::Error),
+  DecodingError(#[from] crate::yrs::encoding::read::Error),
 
   #[error("Can not apply update for object:{0}")]
   YrsApplyUpdate(String),

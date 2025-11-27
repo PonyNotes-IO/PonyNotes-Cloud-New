@@ -18,9 +18,10 @@ bincode.workspace = true
 tokio-tungstenite = { version = "0.20.1", optional = true }
 prost.workspace = true
 database-entity.workspace = true
-# Use workspace yrs to match the version used by collab crate (from AppFlowy-Collab)
-yrs.workspace = true
-collab-rt-protocol.workspace = true
+# Use selectable yrs versions to match collab runtime
+yrs-legacy = { package = "yrs", version = "0.23.5", features = ["sync"], optional = true }
+yrs-modern = { package = "yrs", version = "0.24.0", features = ["sync"], optional = true }
+collab-rt-protocol = { workspace = true, default-features = false }
 serde_repr = "0.1"
 chrono = "0.4"
 
@@ -29,5 +30,14 @@ protoc-bin-vendored = { version = "3.0" }
 prost-build = "0.12.3"
 
 [features]
+default = ["legacy_collab_api"]
 actix_message = ["actix"]
 tungstenite = ["tokio-tungstenite"]
+legacy_collab_api = [
+  "collab-rt-protocol/legacy_collab_api",
+  "yrs-legacy",
+]
+modern_collab_api = [
+  "collab-rt-protocol/modern_collab_api",
+  "yrs-modern",
+]
