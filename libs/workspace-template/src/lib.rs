@@ -133,10 +133,11 @@ impl WorkspaceTemplateBuilder {
       last_edited_by: Some(self.uid),
     };
 
-    let workspace_id = self.workspace_id.clone();
     let uid = self.uid;
+    let workspace_id = self.workspace_id.clone();
     let folder_template = tokio::task::spawn_blocking(move || {
       let folder_data = FolderData {
+        uid,
         workspace,
         current_view: default_current_view_id,
         views: FlattedViews::flatten_views(views),
@@ -146,8 +147,9 @@ impl WorkspaceTemplateBuilder {
         private: Default::default(),
       };
 
-      let collab = Collab::new_with_origin(CollabOrigin::Empty, &workspace_id, vec![], false);
-      let folder = Folder::create(uid, collab, None, folder_data);
+      let options = collab::core::collab::CollabOptions::new(workspace_id.clone(), collab::core::collab::default_client_id());
+      let collab = Collab::new_with_options(CollabOrigin::Empty, options)?;
+      let folder = Folder::create(collab, None, folder_data);
       let data = folder.encode_collab()?;
       Ok::<_, anyhow::Error>(TemplateData {
         template_id: TemplateObjectId::Folder(workspace_id),

@@ -7,11 +7,10 @@ use collab::core::origin::CollabOrigin;
 use collab::lock::RwLock;
 use collab::preclude::Collab;
 use tokio::task::spawn_blocking;
-// Import from collab to ensure version consistency
-use collab::preclude::{Transact, ReadTxn, StateVector, Update};
-use collab::preclude::sync::{Awareness, AwarenessUpdate};
-use collab::preclude::updates::decoder::Decode;
-use collab::preclude::updates::encoder::{Encode, Encoder};
+use yrs::sync::awareness::{Awareness, AwarenessUpdate};
+use yrs::updates::decoder::Decode;
+use yrs::updates::encoder::{Encode, Encoder};
+use yrs::{ReadTxn, StateVector, Transact, Update};
 
 use crate::message::{CustomMessage, Message, RTProtocolError, SyncMessage, SyncMeta};
 
@@ -220,11 +219,11 @@ pub trait CollabSyncProtocol {
 pub const LARGE_UPDATE_THRESHOLD: usize = 1024 * 1024; // 1MB
 
 #[inline]
-pub async fn decode_update(update: Vec<u8>) -> Result<Update, collab::preclude::encoding::read::Error> {
+pub async fn decode_update(update: Vec<u8>) -> Result<Update, yrs::encoding::read::Error> {
   let update = if update.len() > LARGE_UPDATE_THRESHOLD {
     spawn_blocking(move || Update::decode_v1(&update))
       .await
-      .map_err(|err| collab::preclude::encoding::read::Error::Custom(err.to_string()))?
+      .map_err(|err| yrs::encoding::read::Error::Custom(err.to_string()))?
   } else {
     Update::decode_v1(&update)
   }?;
