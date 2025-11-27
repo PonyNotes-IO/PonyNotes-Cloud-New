@@ -1554,7 +1554,7 @@ dependencies = [
  "bitflags 2.9.0",
  "cexpr",
  "clang-sys",
- "itertools 0.12.1",
+ "itertools 0.11.0",
  "lazy_static",
  "lazycell",
  "log",
@@ -1577,7 +1577,7 @@ dependencies = [
  "bitflags 2.9.0",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "regex",
@@ -2102,7 +2102,7 @@ dependencies = [
 [[package]]
 name = "collab"
 version = "0.2.0"
-source = "git+https://github.com/AppFlowy-IO/AppFlowy-Collab?rev=e59260e524f33104b0ddcd6bb8f6218cad0f7e18#e59260e524f33104b0ddcd6bb8f6218cad0f7e18"
+source = "git+https://github.com/PonyNotes-IO/AppFlowy-Collab?branch=stable-for-cloud#746eb5ebf2da4954320f774f17214ea8e2ddf593"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2128,7 +2128,7 @@ dependencies = [
 [[package]]
 name = "collab-database"
 version = "0.2.0"
-source = "git+https://github.com/AppFlowy-IO/AppFlowy-Collab?rev=e59260e524f33104b0ddcd6bb8f6218cad0f7e18#e59260e524f33104b0ddcd6bb8f6218cad0f7e18"
+source = "git+https://github.com/PonyNotes-IO/AppFlowy-Collab?branch=stable-for-cloud#746eb5ebf2da4954320f774f17214ea8e2ddf593"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2168,7 +2168,7 @@ dependencies = [
 [[package]]
 name = "collab-document"
 version = "0.2.0"
-source = "git+https://github.com/AppFlowy-IO/AppFlowy-Collab?rev=e59260e524f33104b0ddcd6bb8f6218cad0f7e18#e59260e524f33104b0ddcd6bb8f6218cad0f7e18"
+source = "git+https://github.com/PonyNotes-IO/AppFlowy-Collab?branch=stable-for-cloud#746eb5ebf2da4954320f774f17214ea8e2ddf593"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2189,7 +2189,7 @@ dependencies = [
 [[package]]
 name = "collab-entity"
 version = "0.2.0"
-source = "git+https://github.com/AppFlowy-IO/AppFlowy-Collab?rev=e59260e524f33104b0ddcd6bb8f6218cad0f7e18#e59260e524f33104b0ddcd6bb8f6218cad0f7e18"
+source = "git+https://github.com/PonyNotes-IO/AppFlowy-Collab?branch=stable-for-cloud#746eb5ebf2da4954320f774f17214ea8e2ddf593"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2209,7 +2209,7 @@ dependencies = [
 [[package]]
 name = "collab-folder"
 version = "0.2.0"
-source = "git+https://github.com/AppFlowy-IO/AppFlowy-Collab?rev=e59260e524f33104b0ddcd6bb8f6218cad0f7e18#e59260e524f33104b0ddcd6bb8f6218cad0f7e18"
+source = "git+https://github.com/PonyNotes-IO/AppFlowy-Collab?branch=stable-for-cloud#746eb5ebf2da4954320f774f17214ea8e2ddf593"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2231,7 +2231,7 @@ dependencies = [
 [[package]]
 name = "collab-importer"
 version = "0.1.0"
-source = "git+https://github.com/AppFlowy-IO/AppFlowy-Collab?rev=e59260e524f33104b0ddcd6bb8f6218cad0f7e18#e59260e524f33104b0ddcd6bb8f6218cad0f7e18"
+source = "git+https://github.com/PonyNotes-IO/AppFlowy-Collab?branch=stable-for-cloud#746eb5ebf2da4954320f774f17214ea8e2ddf593"
 dependencies = [
  "anyhow",
  "async-recursion",
@@ -2270,7 +2270,7 @@ dependencies = [
 [[package]]
 name = "collab-plugins"
 version = "0.2.0"
-source = "git+https://github.com/AppFlowy-IO/AppFlowy-Collab?rev=e59260e524f33104b0ddcd6bb8f6218cad0f7e18#e59260e524f33104b0ddcd6bb8f6218cad0f7e18"
+source = "git+https://github.com/PonyNotes-IO/AppFlowy-Collab?branch=stable-for-cloud#746eb5ebf2da4954320f774f17214ea8e2ddf593"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2377,7 +2377,7 @@ dependencies = [
 [[package]]
 name = "collab-user"
 version = "0.2.0"
-source = "git+https://github.com/AppFlowy-IO/AppFlowy-Collab?rev=e59260e524f33104b0ddcd6bb8f6218cad0f7e18#e59260e524f33104b0ddcd6bb8f6218cad0f7e18"
+source = "git+https://github.com/PonyNotes-IO/AppFlowy-Collab?branch=stable-for-cloud#746eb5ebf2da4954320f774f17214ea8e2ddf593"
 dependencies = [
  "anyhow",
  "collab",
@@ -2710,7 +2710,7 @@ dependencies = [
  "cssparser-macros",
  "dtoa-short",
  "itoa",
- "phf 0.11.3",
+ "phf 0.10.1",
  "smallvec",
 ]
 
@@ -4371,15 +4371,6 @@ dependencies = [
 
 [[package]]
 name = "itertools"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
@@ -4504,7 +4495,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a793df0d7afeac54f95b471d3af7f0d4fb975699f972341a4b76988d49cdf0c"
 dependencies = [
  "cfg-if",
- "windows-targets 0.53.0",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -5321,7 +5312,9 @@ version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fabbf1ead8a5bcbc20f5f8b939ee3f5b0f6f281b6ad3468b84656b658b455259"
 dependencies = [
+ "phf_macros",
  "phf_shared 0.10.0",
+ "proc-macro-hack",
 ]
 
 [[package]]
@@ -5330,7 +5323,6 @@ version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd6780a80ae0c52cc120a26a1a42c1ae51b247a253e4e06113d23d2c2edd078"
 dependencies = [
- "phf_macros",
  "phf_shared 0.11.3",
 ]
 
@@ -5376,15 +5368,16 @@ dependencies = [
 
 [[package]]
 name = "phf_macros"
-version = "0.11.3"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f84ac04429c13a7ff43785d75ad27569f2951ce0ffd30a3321230db2fc727216"
+checksum = "58fdf3184dd560f160dd73922bea2d5cd6e8f064bf4b13110abd81b03697b4e0"
 dependencies = [
- "phf_generator 0.11.3",
- "phf_shared 0.11.3",
+ "phf_generator 0.10.0",
+ "phf_shared 0.10.0",
+ "proc-macro-hack",
  "proc-macro2",
  "quote",
- "syn 2.0.101",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -5564,6 +5557,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "proc-macro-hack"
+version = "0.5.20+deprecated"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc375e1527247fe1a97d8b7156678dfe7c1af2fc075c9a4db3690ecd2a148068"
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.95"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5623,7 +5622,7 @@ checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
 dependencies = [
  "bytes",
  "heck 0.5.0",
- "itertools 0.12.1",
+ "itertools 0.11.0",
  "log",
  "multimap",
  "once_cell",
@@ -5643,7 +5642,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck 0.5.0",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "log",
  "multimap",
  "once_cell",
@@ -5663,7 +5662,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81bddcdb20abf9501610992b6759a4c888aef7d1a7247ef75e2404275ac24af1"
 dependencies = [
  "anyhow",
- "itertools 0.12.1",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn 2.0.101",
@@ -5676,7 +5675,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn 2.0.101",
@@ -8630,7 +8629,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

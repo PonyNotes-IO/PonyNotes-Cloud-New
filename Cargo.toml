@@ -309,15 +309,16 @@ lto = false
 [patch.crates-io]
 # It's diffcult to resovle different version with the same crate used in AppFlowy Frontend and the Client-API crate.
 # So using patch to workaround this issue.
-# 锁定到 e59260e 版本（服务器当前运行的稳定版本，2025-11-23部署）
-collab = { git = "https://github.com/AppFlowy-IO/AppFlowy-Collab", rev = "e59260e524f33104b0ddcd6bb8f6218cad0f7e18" }
-collab-entity = { git = "https://github.com/AppFlowy-IO/AppFlowy-Collab", rev = "e59260e524f33104b0ddcd6bb8f6218cad0f7e18" }
-collab-folder = { git = "https://github.com/AppFlowy-IO/AppFlowy-Collab", rev = "e59260e524f33104b0ddcd6bb8f6218cad0f7e18" }
-collab-document = { git = "https://github.com/AppFlowy-IO/AppFlowy-Collab", rev = "e59260e524f33104b0ddcd6bb8f6218cad0f7e18" }
-collab-user = { git = "https://github.com/AppFlowy-IO/AppFlowy-Collab", rev = "e59260e524f33104b0ddcd6bb8f6218cad0f7e18" }
-collab-database = { git = "https://github.com/AppFlowy-IO/AppFlowy-Collab", rev = "e59260e524f33104b0ddcd6bb8f6218cad0f7e18" }
-collab-importer = { git = "https://github.com/AppFlowy-IO/AppFlowy-Collab", rev = "e59260e524f33104b0ddcd6bb8f6218cad0f7e18" }
-collab-plugins = { git = "https://github.com/AppFlowy-IO/AppFlowy-Collab", rev = "e59260e524f33104b0ddcd6bb8f6218cad0f7e18" }
+# 使用 PonyNotes-IO fork 的 stable-for-cloud 分支
+# 该分支基于官方e59260e，包含我们的定制修改，兼容旧API（yrs 0.23.5）
+collab = { git = "https://github.com/PonyNotes-IO/AppFlowy-Collab", branch = "stable-for-cloud" }
+collab-entity = { git = "https://github.com/PonyNotes-IO/AppFlowy-Collab", branch = "stable-for-cloud" }
+collab-folder = { git = "https://github.com/PonyNotes-IO/AppFlowy-Collab", branch = "stable-for-cloud" }
+collab-document = { git = "https://github.com/PonyNotes-IO/AppFlowy-Collab", branch = "stable-for-cloud" }
+collab-user = { git = "https://github.com/PonyNotes-IO/AppFlowy-Collab", branch = "stable-for-cloud" }
+collab-database = { git = "https://github.com/PonyNotes-IO/AppFlowy-Collab", branch = "stable-for-cloud" }
+collab-importer = { git = "https://github.com/PonyNotes-IO/AppFlowy-Collab", branch = "stable-for-cloud" }
+collab-plugins = { git = "https://github.com/PonyNotes-IO/AppFlowy-Collab", branch = "stable-for-cloud" }
 
 [features]
 history = []
