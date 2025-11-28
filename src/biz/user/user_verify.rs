@@ -187,3 +187,49 @@ pub async fn verify_and_bind_phone(
     }
   }
 }
+
+/// Send phone OTP using GoTrue's magic link endpoint
+/// 
+/// This function sends a verification code to the specified phone number
+#[instrument(skip(state), err)]
+pub async fn send_phone_otp(
+  phone: &str,
+  state: &AppState,
+) -> Result<(), AppError> {
+  use gotrue::params::MagicLinkParams;
+  
+  // Create magic link parameters for phone
+  let magic_link_params = MagicLinkParams {
+    phone: phone.to_string(),
+    ..Default::default()
+  };
+  
+  // Send OTP using GoTrue client's magic_link method
+  let result = state
+    .gotrue_client
+    .magic_link(&magic_link_params, None)
+    .await;
+  
+  match result {
+    Ok(_) => {
+      event!(
+        tracing::Level::INFO,
+        "Phone OTP sent successfully to: {}",
+        phone
+      );
+      Ok(())
+    }
+    Err(e) => {
+      event!(
+        tracing::Level::WARN,
+        "Failed to send phone OTP to: {}, error: {}",
+        phone,
+        e
+      );
+      Err(AppError::InvalidRequest(format!(
+        "发送验证码失败: {}",
+        e
+      )))
+    }
+  }
+}

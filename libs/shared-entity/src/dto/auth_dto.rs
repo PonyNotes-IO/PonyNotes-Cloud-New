@@ -82,3 +82,8 @@ pub struct VerifyAndBindPhoneParams {
   pub phone: String,
   pub otp: String,
 }
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct SendPhoneOtpParams {
+  pub phone: String,
+}
