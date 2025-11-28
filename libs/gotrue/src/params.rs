@@ -136,6 +136,8 @@ pub enum VerifyType {
   Recovery,
   #[default]
   MagicLink,
+  #[serde(rename = "sms")]
+  Sms,
 }
 
 #[derive(Default, Deserialize, Serialize)]

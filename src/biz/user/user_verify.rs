@@ -140,10 +140,12 @@ pub async fn verify_and_bind_phone(
   
   // Step 1: Verify the OTP using GoTrue's verify endpoint
   // This validates that the user has access to this phone number
+  // Use SMS type for phone OTP verification
   let verify_params = VerifyParams {
+    type_: gotrue::params::VerifyType::Sms,
     phone: phone.to_string(),
     token: otp.to_string(),
-    ..Default::default()
+    email: String::new(),
   };
   
   let verify_result = state
