@@ -1,7 +1,10 @@
 use crate::api::util::ai_model_from_header;
 use crate::biz::authentication::jwt::UserUuid;
+use crate::biz::subscription::ops::{fetch_current_subscription, record_usage};
 use crate::biz::workspace::subscription_plan_limits::PlanLimits;
 use crate::state::AppState;
+use shared_entity::dto::subscription_dto::UsageRecordRequest;
+use shared_entity::dto::subscription_dto::UsageType;
 
 use actix_web::web::{Data, Json};
 use actix_web::{web, HttpRequest, HttpResponse, Scope};
@@ -449,30 +452,113 @@ async fn list_chat_models_handler(
   }).into())
 }
 
-/// 公开的聊天会话接口 (无需认证，无需workspace_id，无使用限额)
-#[instrument(level = "debug", skip(state, payload), err)]
+/// 检查用户剩余AI调用次数
+async fn check_user_ai_remaining(
+  state: &AppState,
+  user_uuid: &UserUuid,
+) -> Result<i64, AppError> {
+  // 1. 获取用户 uid
+  let uid = state.user_cache.get_user_uid(user_uuid).await?;
+  
+  // 2. 获取用户当前订阅信息
+  let subscription_response = fetch_current_subscription(&state.pg_pool, uid).await?;
+  
+  // 3. 获取剩余次数
+  let remaining = subscription_response.usage.ai_chat_remaining_this_month;
+  
+  // 4. 如果为 None，表示无限制，返回最大值；否则返回剩余次数
+  match remaining {
+    Some(count) => Ok(count),
+    None => Ok(i64::MAX), // 无限制
+  }
+}
+
+/// 记录AI聊天使用情况
+async fn record_ai_chat_usage(
+  state: &AppState,
+  user_uuid: &UserUuid,
+) -> Result<(), AppError> {
+  let uid = state.user_cache.get_user_uid(user_uuid).await?;
+  
+  record_usage(
+    &state.pg_pool,
+    uid,
+    UsageRecordRequest {
+      usage_type: UsageType::AiChat,
+      usage_count: 1,
+      usage_date: None, // 使用当前日期
+    },
+  )
+  .await?;
+  
+  Ok(())
+}
+
+/// 聊天会话接口 (需要JWT认证，根据订阅计划限制使用次数)
+#[instrument(level = "debug", skip(state, payload, user_uuid), err)]
 async fn public_chat_session_handler(
+  user_uuid: UserUuid,
   state: Data<AppState>,
   payload: Json<ChatRequestParams>,
 ) -> actix_web::Result<HttpResponse> {
   let params = payload.into_inner();
   
   trace!(
-    "Public chat request, message length: {}, model: {:?}", 
+    "Chat session request from user {}, message length: {}, model: {:?}", 
+    *user_uuid,
     params.message.len(),
     params.preferred_model
   );
   
-  // 1. 确定使用的模型（必须指定，或使用默认的 DeepSeek）
+  // 1. 检查用户剩余AI调用次数
+  let remaining = match check_user_ai_remaining(&state, &user_uuid).await {
+    Ok(count) => count,
+    Err(AppError::RecordNotFound(_)) => {
+      error!("User {} has no active subscription", *user_uuid);
+      return Ok(
+        HttpResponse::NotFound()
+          .json(serde_json::json!({
+            "code": "SUBSCRIPTION_NOT_FOUND",
+            "message": "用户未订阅任何计划，请先订阅后再使用AI功能",
+          }))
+      );
+    },
+    Err(err) => {
+      error!("Failed to check AI remaining for user {}: {:?}", *user_uuid, err);
+      return Ok(
+        HttpResponse::InternalServerError()
+          .json(serde_json::json!({
+            "code": "INTERNAL_ERROR",
+            "message": format!("检查订阅信息失败: {}", err),
+          }))
+      );
+    },
+  };
+  
+  // 2. 检查剩余次数是否足够（>= 1）
+  if remaining < 1 {
+    error!("User {} AI limit exceeded, remaining: {}", *user_uuid, remaining);
+    return Ok(
+      HttpResponse::PaymentRequired()
+        .json(serde_json::json!({
+          "code": "AI_LIMIT_EXCEEDED",
+          "message": format!("AI调用次数已用完，剩余次数：{}，请升级订阅或购买补充包", remaining),
+        }))
+    );
+  }
+  
+  trace!("User {} has {} remaining AI calls", *user_uuid, remaining);
+  
+  // 3. 确定使用的模型（必须指定，或使用默认的 DeepSeek）
   let model = if let Some(model_id) = &params.preferred_model {
     AIModel::from_str(model_id).unwrap_or(AIModel::DeepSeek)
   } else {
-    AIModel::DeepSeek // 公开接口默认使用 DeepSeek
+    AIModel::DeepSeek // 默认使用 DeepSeek
   };
   
   trace!("Using AI model: {:?}", model);
   
-  // 2. 检查模型是否可用
+  // 4. 检查模型是否可用
   if !state.chat_client.is_model_available(model) {
     error!("AI model {:?} is not available (API key not configured)", model);
     return Ok(
@@ -484,10 +570,19 @@ async fn public_chat_session_handler(
     );
   }
   
-  // 3. 调用 ChatClient 进行流式聊天
+  // 5. 调用 ChatClient 进行流式聊天
   match state.chat_client.stream_chat(&params, model).await {
     Ok(stream) => {
-      // 4. 返回流式响应
+      // 6. 异步记录使用情况（不阻塞响应）
+      let state_clone = state.clone();
+      let user_uuid_clone = user_uuid.clone();
+      tokio::spawn(async move {
+        if let Err(e) = record_ai_chat_usage(&state_clone, &user_uuid_clone).await {
+          error!("Failed to record AI chat usage for user {}: {:?}", *user_uuid_clone, e);
+        }
+      });
+      
+      // 7. 返回流式响应
       Ok(
         HttpResponse::Ok()
           .content_type("text/event-stream")
