@@ -22,7 +22,6 @@ use database::file::s3_client_impl::S3BucketStorage;
 use database::pg_row::AFWorkspaceMemberRow;
 use database::user::select_uid_from_email;
 use database::workspace::*;
-use database::ai_usage::{get_workspace_ai_usage_this_month, get_workspace_ai_image_usage_this_month};
 use database::subscription::aggregate_user_usage;
 use database_entity::dto::{
   AFRole, AFWorkspace, AFWorkspaceInvitation, AFWorkspaceInvitationStatus, AFWorkspaceSettings,
@@ -683,7 +682,10 @@ pub async fn get_workspace_usage_and_limit(
   
   // Get real AI usage from af_user_subscription_usage table (by owner_uid)
   // 从 af_user_subscription_usage 表获取真实的使用数据（按 owner_uid）
-  let owner_uid = workspace.owner_uid;
+  let owner_uid = workspace.owner_uid.ok_or_else(|| {
+    AppError::Internal(anyhow::anyhow!("Workspace owner_uid is missing"))
+  })?;
+  
   let now = Utc::now();
   let year = now.year();
   let month = now.month();
