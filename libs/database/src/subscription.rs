@@ -490,7 +490,7 @@ pub async fn aggregate_user_usage(
 ) -> Result<Vec<UsageAggregateRow>, AppError> {
   let rows = sqlx::query(
     r#"
-    SELECT usage_type, SUM(usage_count) as total
+    SELECT usage_type, SUM(usage_count)::BIGINT as total
     FROM af_user_subscription_usage
     WHERE uid = $1 AND usage_date >= $2 AND usage_date <= $3
     GROUP BY usage_type

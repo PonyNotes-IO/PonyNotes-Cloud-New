@@ -16,7 +16,6 @@ use appflowy_ai_client::dto::{
   RepeatedRelatedQuestion,
 };
 
-use anyhow::anyhow;
 use bytes::Bytes;
 use database::ai_usage::{get_workspace_ai_image_usage_this_month, increment_ai_image_usage};
 use database::chat;
