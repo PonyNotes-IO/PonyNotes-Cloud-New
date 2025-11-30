@@ -123,11 +123,15 @@ fn name_from_user_metadata(value: &serde_json::Value) -> String {
     .unwrap_or_default()
 }
 
-/// Verify phone OTP and bind phone number to user
+/// Verify phone OTP and bind/change phone number for user
 /// 
-/// This function:
-/// 1. Calls GoTrue's verify endpoint to validate the OTP
-/// 2. If validation succeeds, updates the user's phone number in the database
+/// This function is used for phone number binding and changing:
+/// 1. Verifies the OTP sent to the new phone number
+/// 2. Updates GoTrue's auth.users table (login credentials) - CRITICAL for preventing old phone login
+/// 3. Updates the business database (af_user table)
+/// 
+/// IMPORTANT: If GoTrue update fails, the entire operation fails to ensure data consistency
+/// between login credentials and business data.
 #[instrument(skip(state), err)]
 pub async fn verify_and_bind_phone(
   user_uuid: &uuid::Uuid,
@@ -154,7 +158,7 @@ pub async fn verify_and_bind_phone(
     .await;
   
   match verify_result {
-    Ok(_token_response) => {
+    Ok(token_response) => {
       event!(
         tracing::Level::INFO,
         "Phone OTP verified successfully for user: {}, phone: {}",
@@ -162,7 +166,50 @@ pub async fn verify_and_bind_phone(
         phone
       );
       
-      // Step 2: Update the user's phone number in the database
+      // Step 2: Update GoTrue's auth.users table to change login credentials
+      // This is CRITICAL - if this fails, the user will still be able to login with old phone
+      // We only set the phone field, other fields remain empty strings
+      // GoTrue should ignore empty string fields and only update the phone
+      let mut update_params = gotrue_entity::dto::UpdateGotrueUserParams::new();
+      update_params.phone = phone.to_string();
+      
+      event!(
+        tracing::Level::INFO,
+        "Attempting to update GoTrue user phone for user: {}, phone: {}",
+        user_uuid,
+        phone
+      );
+      
+      let gotrue_update_result = state
+        .gotrue_client
+        .update_user(&token_response.access_token, &update_params)
+        .await;
+      
+      // If GoTrue update fails, we should NOT update the business database
+      // to avoid data inconsistency (user can login with old phone but sees new phone)
+      if let Err(e) = gotrue_update_result {
+        event!(
+          tracing::Level::ERROR,
+          "Failed to update GoTrue user phone for user: {}, phone: {}, error: {}",
+          user_uuid,
+          phone,
+          e
+        );
+        return Err(AppError::Internal(anyhow::anyhow!(
+          "更新登录凭证失败，请稍后重试: {}",
+          e
+        )));
+      }
+      
+      event!(
+        tracing::Level::INFO,
+        "GoTrue user phone updated successfully for user: {}, phone: {}",
+        user_uuid,
+        phone
+      );
+      
+      // Step 3: Update the user's phone number in the business database
+      // Only do this after GoTrue update succeeds to ensure data consistency
       update_user(&state.pg_pool, user_uuid, None, None, Some(phone.to_string()), None).await?;
       
       event!(
