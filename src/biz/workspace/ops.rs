@@ -22,18 +22,22 @@ use database::file::s3_client_impl::S3BucketStorage;
 use database::pg_row::AFWorkspaceMemberRow;
 use database::user::select_uid_from_email;
 use database::workspace::*;
+use database::ai_usage::{get_workspace_ai_usage_this_month, get_workspace_ai_image_usage_this_month};
+use database::subscription::aggregate_user_usage;
 use database_entity::dto::{
   AFRole, AFWorkspace, AFWorkspaceInvitation, AFWorkspaceInvitationStatus, AFWorkspaceSettings,
   GlobalComment, Reaction, WorkspaceMemberProfile, WorkspaceUsage,
 };
 use shared_entity::dto::billing_dto::{SubscriptionPlan, WorkspaceUsageAndLimit};
+use crate::biz::workspace::subscription_plan_limits::PlanLimits;
+use crate::biz::subscription::ops::fetch_current_subscription;
+use chrono::{Datelike, Utc};
 
 use crate::biz::authentication::jwt::OptionalUserUuid;
 use crate::biz::user::user_init::{
   create_user_awareness, create_workspace_collab, create_workspace_database_collab,
   initialize_workspace_for_user,
 };
-use crate::biz::workspace::subscription_plan_limits::PlanLimits;
 use crate::mailer::{AFCloudMailer, WorkspaceInviteMailerParam};
 use crate::state::RedisConnectionManager;
 use shared_entity::dto::workspace_dto::{
@@ -669,22 +673,91 @@ pub async fn get_workspace_usage_and_limit(
   // Get storage bytes
   let storage_bytes = select_workspace_total_collab_bytes(pg_pool, workspace_id).await?;
   
-  // Return usage and limit with default values
-  // In a production environment, these limits should be fetched from a subscription/billing system
+  // Get workspace to determine subscription plan and owner
+  let workspace = select_workspace(pg_pool, workspace_id).await?;
+  let plan = SubscriptionPlan::try_from(workspace.workspace_type)
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid workspace type: {}", e)))?;
+  
+  // Get plan limits
+  let limits = PlanLimits::from_plan(&plan);
+  
+  // Get real AI usage from af_user_subscription_usage table (by owner_uid)
+  // 从 af_user_subscription_usage 表获取真实的使用数据（按 owner_uid）
+  let owner_uid = workspace.owner_uid;
+  let now = Utc::now();
+  let year = now.year();
+  let month = now.month();
+  
+  // Calculate first and last day of current month
+  let first_day = chrono::NaiveDate::from_ymd_opt(year, month, 1)
+    .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Invalid date")))?;
+  
+  let last_day = if month == 12 {
+    chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1)
+      .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Invalid date")))?
+  } else {
+    chrono::NaiveDate::from_ymd_opt(year, month + 1, 1)
+      .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Invalid date")))?
+  };
+  
+  // Get user usage from af_user_subscription_usage table
+  let usage_aggregate = aggregate_user_usage(pg_pool, owner_uid, first_day, last_day).await?;
+  
+  // Extract AI chat and image usage
+  let ai_responses_count = usage_aggregate
+    .iter()
+    .find(|u| u.usage_type == "ai_chat")
+    .map(|u| u.total)
+    .unwrap_or(0);
+  
+  let ai_image_responses_count = usage_aggregate
+    .iter()
+    .find(|u| u.usage_type == "ai_image")
+    .map(|u| u.total)
+    .unwrap_or(0);
+  
+  // Try to get subscription limits from user's actual subscription
+  // 尝试从用户的实际订阅获取限制（更准确）
+  let (ai_responses_count_limit, ai_image_responses_count_limit, ai_responses_unlimited) = 
+    match fetch_current_subscription(pg_pool, owner_uid).await {
+      Ok(subscription_response) => {
+        // Use actual subscription limits
+        let plan_details = &subscription_response.plan_details;
+        let ai_chat_limit = if plan_details.ai_chat_count_per_month == -1 {
+          // Unlimited
+          (i64::MAX, true)
+        } else {
+          (plan_details.ai_chat_count_per_month as i64, false)
+        };
+        
+        let ai_image_limit = if plan_details.ai_image_generation_per_month == -1 {
+          i64::MAX
+        } else {
+          plan_details.ai_image_generation_per_month as i64
+        };
+        
+        (ai_chat_limit.0, ai_image_limit, ai_chat_limit.1)
+      },
+      Err(_) => {
+        // Fallback to workspace type plan limits if subscription not found
+        (limits.ai_responses_limit, 10, limits.ai_unlimited)
+      }
+    };
+  
   Ok(WorkspaceUsageAndLimit {
     member_count,
-    member_count_limit: 10, // Default limit
+    member_count_limit: limits.member_limit,
     storage_bytes,
-    storage_bytes_limit: 10 * 1024 * 1024 * 1024, // 10GB default limit
-    storage_bytes_unlimited: false,
-    single_upload_limit: 100 * 1024 * 1024, // 100MB default limit
-    single_upload_unlimited: false,
-    ai_responses_count: 0,
-    ai_responses_count_limit: 100, // Default limit
-    ai_image_responses_count: 0,
-    ai_image_responses_count_limit: 10, // Default limit
-    local_ai: false,
-    ai_responses_unlimited: false,
+    storage_bytes_limit: limits.storage_bytes_limit,
+    storage_bytes_unlimited: limits.storage_unlimited,
+    single_upload_limit: limits.single_upload_limit,
+    single_upload_unlimited: false, // TODO: Add to PlanLimits if needed
+    ai_responses_count,
+    ai_responses_count_limit,
+    ai_image_responses_count,
+    ai_image_responses_count_limit,
+    local_ai: matches!(plan, SubscriptionPlan::AiLocal),
+    ai_responses_unlimited,
   })
 }
 
