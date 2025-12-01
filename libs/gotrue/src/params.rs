@@ -138,6 +138,8 @@ pub enum VerifyType {
   MagicLink,
   #[serde(rename = "sms")]
   Sms,
+  #[serde(rename = "phone_change")]
+  PhoneChange,
 }
 
 #[derive(Default, Deserialize, Serialize)]

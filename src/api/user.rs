@@ -107,9 +107,8 @@ async fn send_phone_otp_handler(
   state: Data<AppState>,
 ) -> Result<JsonAppResponse<()>> {
   let params = payload.into_inner();
-  let access_token = auth.access_token()?;
   
-  send_phone_otp(access_token, &params.phone, state.as_ref()).await?;
+  send_phone_otp(&auth.token, &params.phone, state.as_ref()).await?;
   
   Ok(AppResponse::Ok().into())
 }
