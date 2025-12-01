@@ -519,7 +519,7 @@ async fn public_chat_session_handler(
         HttpResponse::NotFound()
           .json(serde_json::json!({
             "code": "SUBSCRIPTION_NOT_FOUND",
-            "message": "用户未订阅任何计划，请先订阅后再使用AI功能",
+            "message": "抱歉，您还未开启订阅计划，问AI功能暂时不可用。",
           }))
       );
     },

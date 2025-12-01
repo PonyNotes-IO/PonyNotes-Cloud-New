@@ -740,8 +740,12 @@ pub async fn get_workspace_usage_and_limit(
         
         (ai_chat_limit.0, ai_image_limit, ai_chat_limit.1)
       },
+      Err(AppError::RecordNotFound(_)) => {
+        // 用户未订阅：返回 -1 表示未订阅状态
+        (-1, -1, false)
+      },
       Err(_) => {
-        // Fallback to workspace type plan limits if subscription not found
+        // 其他错误：回退到 workspace type plan limits
         (limits.ai_responses_limit, 10, limits.ai_unlimited)
       }
     };
