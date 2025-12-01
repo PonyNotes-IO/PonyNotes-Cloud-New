@@ -100,14 +100,16 @@ async fn verify_and_bind_phone_handler(
   Ok(AppResponse::Ok().into())
 }
 
-#[tracing::instrument(skip(state, payload), err)]
+#[tracing::instrument(skip(state, auth, payload), err)]
 async fn send_phone_otp_handler(
+  auth: Authorization,
   payload: Json<SendPhoneOtpParams>,
   state: Data<AppState>,
 ) -> Result<JsonAppResponse<()>> {
   let params = payload.into_inner();
+  let access_token = auth.access_token()?;
   
-  send_phone_otp(&params.phone, state.as_ref()).await?;
+  send_phone_otp(access_token, &params.phone, state.as_ref()).await?;
   
   Ok(AppResponse::Ok().into())
 }

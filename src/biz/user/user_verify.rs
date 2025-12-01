@@ -123,15 +123,17 @@ fn name_from_user_metadata(value: &serde_json::Value) -> String {
     .unwrap_or_default()
 }
 
-/// Verify phone OTP and bind/change phone number for user
+/// Verify phone OTP and complete phone number change
 /// 
-/// This function is used for phone number binding and changing:
-/// 1. Verifies the OTP sent to the new phone number
-/// 2. Updates GoTrue's auth.users table (login credentials) - CRITICAL for preventing old phone login
-/// 3. Updates the business database (af_user table)
+/// This function follows GoTrue's standard phone change flow:
+/// 1. User calls send_phone_otp which triggers GoTrue's update_user (sends OTP)
+/// 2. User receives OTP and calls this function to verify
+/// 3. This function verifies with type=PhoneChange
+/// 4. GoTrue automatically updates auth.users.phone upon successful verification
+/// 5. We sync the change to our business database (af_user table)
 /// 
-/// IMPORTANT: If GoTrue update fails, the entire operation fails to ensure data consistency
-/// between login credentials and business data.
+/// IMPORTANT: GoTrue handles the phone update automatically when verifying with PhoneChange type.
+/// We don't need to manually call update_user after verification.
 #[instrument(skip(state), err)]
 pub async fn verify_and_bind_phone(
   user_uuid: &uuid::Uuid,
@@ -142,15 +144,21 @@ pub async fn verify_and_bind_phone(
   use database::user::update_user;
   use gotrue::params::VerifyParams;
   
-  // Step 1: Verify the OTP using GoTrue's verify endpoint
-  // This validates that the user has access to this phone number
-  // Use SMS type for phone OTP verification
+  // Use PhoneChange type - this tells GoTrue to complete the phone number change
+  // that was initiated by the update_user call in send_phone_otp
   let verify_params = VerifyParams {
-    type_: gotrue::params::VerifyType::Sms,
+    type_: gotrue::params::VerifyType::PhoneChange,
     phone: phone.to_string(),
     token: otp.to_string(),
     email: String::new(),
   };
+  
+  event!(
+    tracing::Level::INFO,
+    "Verifying phone change OTP for user: {}, phone: {}",
+    user_uuid,
+    phone
+  );
   
   let verify_result = state
     .gotrue_client
@@ -158,63 +166,21 @@ pub async fn verify_and_bind_phone(
     .await;
   
   match verify_result {
-    Ok(token_response) => {
+    Ok(_token_response) => {
       event!(
         tracing::Level::INFO,
-        "Phone OTP verified successfully for user: {}, phone: {}",
+        "Phone OTP verified successfully, GoTrue has updated auth.users.phone for user: {}, phone: {}",
         user_uuid,
         phone
       );
       
-      // Step 2: Update GoTrue's auth.users table to change login credentials
-      // This is CRITICAL - if this fails, the user will still be able to login with old phone
-      // We only set the phone field, other fields remain empty strings
-      // GoTrue should ignore empty string fields and only update the phone
-      let mut update_params = gotrue_entity::dto::UpdateGotrueUserParams::new();
-      update_params.phone = phone.to_string();
-      
-      event!(
-        tracing::Level::INFO,
-        "Attempting to update GoTrue user phone for user: {}, phone: {}",
-        user_uuid,
-        phone
-      );
-      
-      let gotrue_update_result = state
-        .gotrue_client
-        .update_user(&token_response.access_token, &update_params)
-        .await;
-      
-      // If GoTrue update fails, we should NOT update the business database
-      // to avoid data inconsistency (user can login with old phone but sees new phone)
-      if let Err(e) = gotrue_update_result {
-        event!(
-          tracing::Level::ERROR,
-          "Failed to update GoTrue user phone for user: {}, phone: {}, error: {}",
-          user_uuid,
-          phone,
-          e
-        );
-        return Err(AppError::Internal(anyhow::anyhow!(
-          "更新登录凭证失败，请稍后重试: {}",
-          e
-        )));
-      }
-      
-      event!(
-        tracing::Level::INFO,
-        "GoTrue user phone updated successfully for user: {}, phone: {}",
-        user_uuid,
-        phone
-      );
-      
-      // Step 3: Update the user's phone number in the business database
-      // Only do this after GoTrue update succeeds to ensure data consistency
+      // Step 2: Sync the phone number to our business database
+      // GoTrue has already updated auth.users.phone, now we update af_user.phone
       update_user(&state.pg_pool, user_uuid, None, None, Some(phone.to_string()), None).await?;
       
       event!(
         tracing::Level::INFO,
-        "Phone number bound successfully for user: {}, phone: {}",
+        "Phone number change completed successfully for user: {}, phone: {}",
         user_uuid,
         phone
       );
@@ -237,33 +203,47 @@ pub async fn verify_and_bind_phone(
   }
 }
 
-/// Send phone OTP using GoTrue's magic link endpoint
+/// Initiate phone number change by calling GoTrue's update_user
 /// 
-/// This function sends a verification code to the specified phone number
+/// This function follows GoTrue's standard phone change flow:
+/// 1. Calls GoTrue's update_user API with the new phone number
+/// 2. GoTrue sends an OTP to the new phone number
+/// 3. GoTrue stores the new phone in a pending state (new_phone field)
+/// 4. User must verify the OTP using verify_and_bind_phone to complete the change
+/// 
+/// IMPORTANT: This requires the user's access_token to authenticate the request.
 #[instrument(skip(state), err)]
 pub async fn send_phone_otp(
+  access_token: &str,
   phone: &str,
   state: &AppState,
 ) -> Result<(), AppError> {
-  use gotrue::params::MagicLinkParams;
+  use gotrue_entity::dto::UpdateGotrueUserParams;
   
-  // Create magic link parameters for phone
-  let magic_link_params = MagicLinkParams {
-    phone: phone.to_string(),
-    ..Default::default()
-  };
+  event!(
+    tracing::Level::INFO,
+    "Initiating phone change to: {}",
+    phone
+  );
   
-  // Send OTP using GoTrue client's magic_link method
+  // Call GoTrue's update_user API to initiate phone change
+  // GoTrue will:
+  // 1. Store the new phone in the new_phone field
+  // 2. Send an OTP to the new phone number
+  // 3. Wait for verification before actually updating the phone field
+  let mut update_params = UpdateGotrueUserParams::new();
+  update_params.phone = phone.to_string();
+  
   let result = state
     .gotrue_client
-    .magic_link(&magic_link_params, None)
+    .update_user(access_token, &update_params)
     .await;
   
   match result {
-    Ok(_) => {
+    Ok(_user) => {
       event!(
         tracing::Level::INFO,
-        "Phone OTP sent successfully to: {}",
+        "Phone change initiated successfully, OTP sent to: {}",
         phone
       );
       Ok(())
@@ -271,7 +251,7 @@ pub async fn send_phone_otp(
     Err(e) => {
       event!(
         tracing::Level::WARN,
-        "Failed to send phone OTP to: {}, error: {}",
+        "Failed to initiate phone change to: {}, error: {}",
         phone,
         e
       );
