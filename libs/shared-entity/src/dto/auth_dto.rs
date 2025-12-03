@@ -3,6 +3,8 @@
 use gotrue_entity::dto::GotrueTokenResponse;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use chrono::{DateTime, Utc};
+use uuid::Uuid;
 
 #[derive(Deserialize, Serialize)]
 pub struct SignInParams {
@@ -69,6 +71,25 @@ pub struct SignInPasswordResponse {
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct SignInTokenResponse {
   pub is_new: bool,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct SearchUserQuery {
+  pub q: Option<String>,
+  pub page_no: Option<usize>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+pub struct SearchUserResponse {
+  pub uid: i64,
+  pub uuid: Option<Uuid>,
+  pub email: Option<String>,
+  pub phone: Option<String>,
+  pub name: Option<String>,
+  pub metadata: Option<serde_json::Value>,
+  pub deleted_at: Option<DateTime<Utc>>,
+  pub updated_at: Option<DateTime<Utc>>,
+  pub created_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]

@@ -22,3 +22,9 @@ flake.lock
 **/.env.*
 
 docker-compose.override.yml
+
+.history
+tmp
+
+# docker image
+*.tar

@@ -74,6 +74,10 @@ impl AccessControl {
     }
   }
 
+  pub async fn add_policy(&self, params: Vec<String>) -> Result<(), AppError> {
+    self.enforcer.add_policy(params).await
+  }
+
   pub async fn update_policy<T>(
     &self,
     sub: SubjectType,

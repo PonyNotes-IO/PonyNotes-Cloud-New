@@ -6,15 +6,16 @@ use database_entity::dto::{
   WorkspaceMemberProfile,
 };
 use futures_util::stream::BoxStream;
-use sqlx::{types::uuid, Executor, PgPool, Postgres, Transaction};
+use sqlx::{types::uuid, Acquire, Executor, PgPool, Postgres, Transaction};
 use std::{collections::HashMap, ops::DerefMut};
 use tracing::{event, instrument};
 use uuid::Uuid;
 
 use crate::pg_row::{
-  AFGlobalCommentRow, AFImportTask, AFPermissionRow, AFReactionRow, AFUserProfileRow,
-  AFWebUserWithEmailColumn, AFWorkspaceInvitationMinimal, AFWorkspaceMemberPermRow,
-  AFWorkspaceMemberRow, AFWorkspaceRow, AFWorkspaceRowWithMemberCountAndRole,
+  AFCollabMemberPermRow, AFGlobalCommentRow, AFImportTask, AFPermissionRow, AFReactionRow,
+  AFUserProfileRow, AFWebUserWithEmailColumn, AFWorkspaceInvitationMinimal,
+  AFWorkspaceMemberPermRow, AFWorkspaceMemberRow, AFWorkspaceRow,
+  AFWorkspaceRowWithMemberCountAndRole,
 };
 use crate::user::select_uid_from_email;
 use app_error::AppError;
@@ -513,6 +514,22 @@ pub fn select_workspace_member_perm_stream(
   .fetch(pg_pool)
 }
 
+pub fn select_collab_member_perm_stream(
+  pg_pool: &PgPool,
+) -> BoxStream<'_, sqlx::Result<AFCollabMemberPermRow>> {
+  sqlx::query_as!(
+    AFCollabMemberPermRow,
+    "SELECT uid, oid, permission_id FROM af_collab_member"
+  )
+  .fetch(pg_pool)
+}
+
+pub async fn select_all_perm(pg_pool: &PgPool) -> sqlx::Result<Vec<AFPermissionRow>> {
+  sqlx::query_as!(AFPermissionRow, "SELECT * FROM af_permissions")
+    .fetch_all(pg_pool)
+    .await
+}
+
 pub async fn select_email_belongs_to_a_workspace_member(
   pg_pool: &PgPool,
   workspace_id: &Uuid,
@@ -710,7 +727,7 @@ pub async fn select_user_profile<'a, E: Executor<'a, Database = Postgres>>(
          false
        ) AS password_is_set
       FROM af_user_row
-    "#
+    "#,
   )
   .bind(user_uuid)
   .fetch_optional(executor)
@@ -1097,14 +1114,14 @@ pub async fn select_roles_for_workspaces(
 
 pub async fn select_permission(
   pool: &PgPool,
-  permission_id: &i64,
+  permission_id: i32,
 ) -> Result<Option<AFPermissionRow>, AppError> {
   let permission = sqlx::query_as!(
     AFPermissionRow,
     r#"
       SELECT * FROM public.af_permissions WHERE id = $1
     "#,
-    *permission_id as i32
+    permission_id as i32
   )
   .fetch_optional(pool)
   .await?;
@@ -2122,4 +2139,81 @@ pub async fn select_user_workspace_ids<'a, E: Executor<'a, Database = Postgres>>
     .collect();
 
   Ok(result)
+}
+
+pub async fn select_collab_owner<'e, E: sqlx::Executor<'e, Database = Postgres>>(
+  executor: E,
+  workspace_id: &Uuid,
+  view_id: &Uuid,
+) -> Result<i64, AppError> {
+  let res = sqlx::query!(
+    r#"
+      SELECT owner_uid
+      FROM af_collab
+      WHERE workspace_id = $1 AND oid = $2
+    "#,
+    workspace_id,
+    view_id,
+  )
+  .fetch_one(executor)
+  .await?;
+
+  Ok(res.owner_uid)
+}
+
+pub async fn insert_collab_member(
+  executor: &mut Transaction<'_, Postgres>,
+  view_id: &Uuid,
+  send_uid: i64,
+  received_uid: i64,
+) -> Result<(), AppError> {
+  let mut tx = executor.begin().await?;
+  let view_id = view_id.to_string();
+  sqlx::query!(
+    r#"
+      INSERT INTO af_collab_member (uid, oid, permission_id)
+      VALUES ($1, $2, 1)
+    "#,
+    received_uid,
+    &view_id,
+  )
+  .execute(tx.deref_mut())
+  .await?;
+
+  sqlx::query!(
+    r#"
+      INSERT INTO af_collab_member_invite (oid, send_uid, received_uid)
+      VALUES ($1, $2, $3)
+    "#,
+    view_id,
+    send_uid,
+    received_uid,
+  )
+  .execute(tx.deref_mut())
+  .await?;
+  tx.commit().await?;
+  Ok(())
+}
+
+pub async fn update_collab_member_permission(
+  executor: &PgPool,
+  view_id: &Uuid,
+  uid: i64,
+  new_permission_id: i32,
+) -> Result<(), AppError> {
+  let view_id = view_id.to_string();
+  sqlx::query!(
+    r#"
+      UPDATE af_collab_member
+      SET permission_id = $1
+      WHERE uid = $2 AND oid = $3
+    "#,
+    new_permission_id,
+    uid,
+    &view_id,
+  )
+  .execute(executor)
+  .await?;
+
+  Ok(())
 }

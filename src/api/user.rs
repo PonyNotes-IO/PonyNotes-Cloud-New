@@ -3,6 +3,7 @@ use crate::biz::authentication::jwt::{Authorization, UserUuid};
 use crate::biz::user::image_asset::{get_user_image_asset, upload_user_image_asset};
 use crate::biz::user::user_delete::delete_user;
 use crate::biz::user::user_info::{get_profile, get_user_workspace_info, update_user};
+use crate::biz::user::user_search::search_users_by_email;
 use crate::biz::user::user_verify::{send_phone_otp, verify_and_bind_phone, verify_token};
 use crate::state::AppState;
 use actix_http::StatusCode;
@@ -11,9 +12,13 @@ use actix_multipart::form::MultipartForm;
 use actix_web::web::{Data, Json};
 use actix_web::{web, HttpResponse, Scope};
 use actix_web::{HttpRequest, Result};
+use app_error::AppError;
 use database_entity::dto::{AFUserProfile, AFUserWorkspaceInfo, UserImageAssetSource};
 use semver::Version;
-use shared_entity::dto::auth_dto::{DeleteUserQuery, SendPhoneOtpParams, SignInTokenResponse, UpdateUserParams, VerifyAndBindPhoneParams};
+use shared_entity::dto::auth_dto::{
+  DeleteUserQuery, SearchUserQuery, SearchUserResponse, SendPhoneOtpParams, SignInTokenResponse,
+  UpdateUserParams, VerifyAndBindPhoneParams,
+};
 use shared_entity::response::AppResponseError;
 use shared_entity::response::{AppResponse, JsonAppResponse};
 use uuid::Uuid;
@@ -31,6 +36,7 @@ pub fn user_scope() -> Scope {
       web::resource("/asset/image/person/{person_id}/file/{file_id}")
         .route(web::get().to(get_user_image_asset_handler)),
     )
+    .service(web::resource("/search").route(web::get().to(search_user_handler)))
     .service(web::resource("").route(web::delete().to(delete_user_handler)))
 }
 
@@ -94,22 +100,9 @@ async fn verify_and_bind_phone_handler(
 ) -> Result<JsonAppResponse<()>> {
   let user_uuid = auth.uuid()?;
   let params = payload.into_inner();
-  
-  verify_and_bind_phone(&user_uuid, &params.phone, &params.otp, state.as_ref()).await?;
-  
-  Ok(AppResponse::Ok().into())
-}
 
-#[tracing::instrument(skip(state, auth, payload), err)]
-async fn send_phone_otp_handler(
-  auth: Authorization,
-  payload: Json<SendPhoneOtpParams>,
-  state: Data<AppState>,
-) -> Result<JsonAppResponse<()>> {
-  let params = payload.into_inner();
-  
-  send_phone_otp(&auth.token, &params.phone, state.as_ref()).await?;
-  
+  verify_and_bind_phone(&user_uuid, &params.phone, &params.otp, state.as_ref()).await?;
+
   Ok(AppResponse::Ok().into())
 }
 
@@ -174,4 +167,44 @@ async fn post_user_image_asset_handler(
       .with_data(UserImageAssetSource { file_id })
       .into(),
   )
+}
+
+#[tracing::instrument(skip(state, auth, payload), err)]
+async fn send_phone_otp_handler(
+  auth: Authorization,
+  payload: Json<SendPhoneOtpParams>,
+  state: Data<AppState>,
+) -> Result<JsonAppResponse<()>> {
+  let params = payload.into_inner();
+
+  send_phone_otp(&auth.token, &params.phone, state.as_ref()).await?;
+  Ok(AppResponse::Ok().into())
+}
+
+async fn search_user_handler(
+  state: Data<AppState>,
+  query: web::Query<SearchUserQuery>,
+) -> Result<JsonAppResponse<Vec<SearchUserResponse>>, AppError> {
+  let SearchUserQuery { q, page_no } = query.into_inner();
+  match q {
+    None => Err(AppError::MissingPayload("q is required.".to_string()).into()),
+    Some(q) => {
+      let af_users = search_users_by_email(&state.pg_pool, &q, page_no.unwrap_or(1)).await?;
+      let users = af_users
+        .into_iter()
+        .map(|u| SearchUserResponse {
+          uid: u.uid,
+          uuid: u.uuid,
+          email: u.email,
+          phone: u.phone,
+          name: u.name,
+          metadata: u.metadata,
+          deleted_at: u.deleted_at,
+          updated_at: u.updated_at,
+          created_at: u.created_at,
+        })
+        .collect();
+      Ok(AppResponse::Ok().with_data(users).into())
+    },
+  }
 }

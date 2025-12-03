@@ -1498,6 +1498,11 @@ pub struct ProcessedPageMentionNotification {
   pub person_id: Uuid,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct EditCollabMemberParams {
+  pub permission_id:i32,
+}
+
 #[cfg(test)]
 mod test {
   use crate::dto::{CreateCollabData, CreateCollabDataV0};

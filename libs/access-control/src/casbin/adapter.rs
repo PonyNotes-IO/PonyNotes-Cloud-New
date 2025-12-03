@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::collections::HashMap;
 
 use crate::entity::ObjectType;
 use crate::metrics::AccessControlMetrics;
@@ -7,8 +8,10 @@ use casbin::Filter;
 use casbin::Model;
 use casbin::Result;
 
-use database::pg_row::AFWorkspaceMemberPermRow;
-use database::workspace::select_workspace_member_perm_stream;
+use database::pg_row::{AFCollabMemberPermRow, AFWorkspaceMemberPermRow};
+use database::workspace::{
+  select_all_perm, select_collab_member_perm_stream, select_workspace_member_perm_stream,
+};
 
 use crate::act::Acts;
 use futures_util::stream::BoxStream;
@@ -16,6 +19,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio_stream::StreamExt;
+use tracing::{error, warn};
 
 /// Implementation of [`casbin::Adapter`] for access control authorisation.
 /// Access control policies that are managed by workspace and collab CRUD.
@@ -94,6 +98,45 @@ pub async fn load_workspace_policies(
   Ok(policies)
 }
 
+pub async fn load_collab_policies(
+  pg_pool: &PgPool,
+  mut stream: BoxStream<'_, sqlx::Result<AFCollabMemberPermRow>>,
+) -> Result<Vec<Vec<String>>> {
+  let mut policies: Vec<Vec<String>> = Vec::new();
+
+  let permission_map = match select_all_perm(pg_pool).await {
+    Ok(p) => {
+      p.into_iter()
+        .map(|p| (p.id, p.access_level.policy_acts()))
+        .collect::<HashMap<_, _>>()
+    },
+    Err(err) => {
+      error!("failed load permission map: {:?}", err);
+      return Ok(policies);
+    },
+  };
+
+  while let Some(Ok(member_permission)) = stream.next().await {
+    let uid = member_permission.uid;
+    let object_id = member_permission.oid.to_string(); // 注意字段名变化
+
+    // 关键变化：使用 ObjectType::Collab
+    let object_type = ObjectType::Collab(object_id.to_string());
+
+    if let Some(acts) = permission_map.get(&member_permission.permission_id) {
+      for act in acts {
+        let policy = vec![uid.to_string(), object_type.policy_object(), act.clone()];
+        policies.push(policy);
+      }
+    }else {
+      // 推荐：添加警告处理，以防权限 ID 丢失（如果业务允许的话）
+      warn!("error permission {} for af_collab_member.oid {}", member_permission.permission_id, object_id);
+    }
+  }
+
+  Ok(policies)
+}
+
 #[async_trait]
 impl Adapter for PgAdapter {
   async fn load_policy(&mut self, model: &mut dyn Model) -> Result<()> {
@@ -101,9 +144,17 @@ impl Adapter for PgAdapter {
     let workspace_member_perm_stream = select_workspace_member_perm_stream(&self.pg_pool);
     let workspace_policies = load_workspace_policies(workspace_member_perm_stream).await?;
 
-    // Policy definition `p` of type `p`. See `model.conf`
-    model.add_policies("p", "p", workspace_policies);
+    let collab_member_perm_stream = select_collab_member_perm_stream(&self.pg_pool);
+    let collab_policies = load_collab_policies(&self.pg_pool, collab_member_perm_stream).await?;
+    // 3. 合并所有策略
+    let all_policies = workspace_policies
+      .into_iter()
+      .chain(collab_policies)
+      .collect::<Vec<_>>();
 
+    // Policy definition `p` of type `p`. See `model.conf`
+    model.add_policies("p", "p", all_policies);
+    
     self
       .access_control_metrics
       .record_load_all_policies_in_ms(start.elapsed().as_millis() as u64);

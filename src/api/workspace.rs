@@ -70,6 +70,9 @@ use itertools::Itertools;
 use prost::Message as ProstMessage;
 use rayon::prelude::*;
 
+use crate::biz::collab::me::{get_received_collab_list, get_send_collab_list};
+use crate::biz::workspace::collab_member::{add_collab_member, edit_collab_member_permission};
+use database::pg_row::AFCollabMemberInvite;
 use semver::Version;
 use sha2::{Digest, Sha256};
 use shared_entity::dto::publish_dto::DuplicatePublishedPageResponse;
@@ -100,339 +103,360 @@ pub const WORKSPACE_PUBLISH_NAMESPACE_PATTERN: &str =
 
 pub fn workspace_scope() -> Scope {
   web::scope("/api/workspace")
-    .service(
-      web::resource("")
-        .route(web::get().to(list_workspace_handler))
-        .route(web::post().to(create_workspace_handler))
-        .route(web::patch().to(patch_workspace_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/invite").route(web::post().to(post_workspace_invite_handler)), // invite members to workspace
-    )
-    .service(
-      web::resource("/invite").route(web::get().to(get_workspace_invite_handler)), // show invites for user
-    )
-    .service(
-      web::resource("/invite/{invite_id}").route(web::get().to(get_workspace_invite_by_id_handler)),
-    )
-    .service(
-      web::resource("/accept-invite/{invite_id}")
-        .route(web::post().to(post_accept_workspace_invite_handler)), // accept invitation to workspace
-    )
-    .service(
-      web::resource("/join-by-invite-code")
-        .route(web::post().to(post_join_workspace_invite_by_code_handler)),
-    )
+        .service(
+            web::resource("")
+                .route(web::get().to(list_workspace_handler))
+                .route(web::post().to(create_workspace_handler))
+                .route(web::patch().to(patch_workspace_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/invite").route(web::post().to(post_workspace_invite_handler)), // invite members to workspace
+        )
+        .service(
+            web::resource("/invite").route(web::get().to(get_workspace_invite_handler)), // show invites for user
+        )
+        .service(
+            web::resource("/invite/{invite_id}").route(web::get().to(get_workspace_invite_by_id_handler)),
+        )
+        .service(
+            web::resource("/accept-invite/{invite_id}")
+                .route(web::post().to(post_accept_workspace_invite_handler)), // accept invitation to workspace
+        )
+        .service(
+            web::resource("/join-by-invite-code")
+                .route(web::post().to(post_join_workspace_invite_by_code_handler)),
+        )
 
-    .service(web::resource("/{workspace_id}").route(web::delete().to(delete_workspace_handler)))
-    .service(
-      web::resource("/{workspace_id}/settings")
-        .route(web::get().to(get_workspace_settings_handler))
-        .route(web::post().to(post_workspace_settings_handler)),
-    )
-    .service(web::resource("/{workspace_id}/open").route(web::put().to(open_workspace_handler)))
-    .service(web::resource("/{workspace_id}/leave").route(web::post().to(leave_workspace_handler)))
-    .service(
-      web::resource("/{workspace_id}/member")
-        .route(web::get().to(get_workspace_members_handler))
-        .route(web::put().to(update_workspace_member_handler))
-        .route(web::delete().to(remove_workspace_member_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/mentionable-person")
-        .route(web::get().to(list_workspace_mentionable_person_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/mentionable-person/{contact_id}")
-        .route(web::get().to(get_workspace_mentionable_person_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/update-member-profile")
-        .route(web::put().to(put_workspace_member_profile_handler)),
-    )
-    // Deprecated since v0.9.24
-    .service(
-      web::resource("/{workspace_id}/member/user/{user_id}")
-        .route(web::get().to(get_workspace_member_handler)),
-    )
-    .service(
-      web::resource("v1/{workspace_id}/member/user/{user_id}")
-        .route(web::get().to(get_workspace_member_v1_handler)),
-      )
-    .service(
-      web::resource("/{workspace_id}/collab/{object_id}")
-        .app_data(
-          PayloadConfig::new(5 * 1024 * 1024), // 5 MB
+        .service(web::resource("/{workspace_id}").route(web::delete().to(delete_workspace_handler)))
+        .service(
+            web::resource("/{workspace_id}/settings")
+                .route(web::get().to(get_workspace_settings_handler))
+                .route(web::post().to(post_workspace_settings_handler)),
         )
-        .route(web::post().to(create_collab_handler))
-        .route(web::get().to(get_collab_handler))
-        .route(web::put().to(update_collab_handler))
-        .route(web::delete().to(delete_collab_handler)),
-    )
-    .service(
-      web::resource("/v1/{workspace_id}/collab/{object_id}")
-        .route(web::get().to(v1_get_collab_handler)),
-    )
-    .service(
-      web::resource("/v1/{workspace_id}/collab/{object_id}/json")
-        .route(web::get().to(get_collab_json_handler)),
-    )
-    .service(
-      web::resource("/v1/{workspace_id}/collab/{object_id}/full-sync")
-        .route(web::post().to(collab_full_sync_handler)),
-    )
-    .service(
-      web::resource("/v1/{workspace_id}/collab/{object_id}/web-update")
-        .route(web::post().to(post_web_update_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/collab/{object_id}/row-document-collab-exists")
-          .route(web::get().to(get_row_document_collab_exists_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/collab/{object_id}/embed-info")
-        .route(web::get().to(get_collab_embed_info_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/collab/{object_id}/generate-embedding")
-          .route(web::get().to(force_generate_collab_embedding_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/collab/embed-info/list")
-        .route(web::post().to(batch_get_collab_embed_info_handler)),
-    )
-    .service(web::resource("/{workspace_id}/space").route(web::post().to(post_space_handler)))
-    .service(
-      web::resource("/{workspace_id}/space/{view_id}").route(web::patch().to(update_space_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/folder-view").route(web::post().to(post_folder_view_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/page-view").route(web::post().to(post_page_view_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/page-view/{view_id}")
-        .route(web::get().to(get_page_view_handler))
-        .route(web::patch().to(update_page_view_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/page-view/{view_id}/mentionable-person-with-access")
-        .route(web::get().to(list_page_mentionable_person_with_access_handler))
-    )
-    .service(
-      web::resource("/{workspace_id}/page-view/{view_id}/page-mention")
-        .route(web::put().to(put_page_mention_handler))
-    )
-    .service(
-      web::resource("/{workspace_id}/page-view/{view_id}/update-name")
-        .route(web::post().to(update_page_name_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/page-view/{view_id}/update-icon")
-        .route(web::post().to(update_page_icon_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/page-view/{view_id}/update-extra")
-        .route(web::post().to(update_page_extra_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/page-view/{view_id}/remove-icon")
-        .route(web::post().to(remove_page_icon_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/page-view/{view_id}/favorite")
-        .route(web::post().to(favorite_page_view_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/page-view/{view_id}/append-block")
-        .route(web::post().to(append_block_to_page_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/page-view/{view_id}/move")
-        .route(web::post().to(move_page_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/page-view/{view_id}/reorder-favorite")
-        .route(web::post().to(reorder_favorite_page_handler)),
-    )
-    .service(
-          web::resource("/{workspace_id}/page-view/{view_id}/duplicate")
-            .route(web::post().to(duplicate_page_handler)),
+        .service(web::resource("/{workspace_id}/open").route(web::put().to(open_workspace_handler)))
+        .service(web::resource("/{workspace_id}/leave").route(web::post().to(leave_workspace_handler)))
+        .service(
+            web::resource("/{workspace_id}/member")
+                .route(web::get().to(get_workspace_members_handler))
+                .route(web::put().to(update_workspace_member_handler))
+                .route(web::delete().to(remove_workspace_member_handler)),
         )
-    .service(
-      web::resource("/{workspace_id}/page-view/{view_id}/database-view")
-        .route(web::post().to(post_page_database_view_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/page-view/{view_id}/move-to-trash")
-        .route(web::post().to(move_page_to_trash_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/page-view/{view_id}/restore-from-trash")
-        .route(web::post().to(restore_page_from_trash_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/add-recent-pages")
-        .route(web::post().to(add_recent_pages_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/restore-all-pages-from-trash")
-        .route(web::post().to(restore_all_pages_from_trash_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/delete-all-pages-from-trash")
-        .route(web::post().to(delete_all_pages_from_trash_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/page-view/{view_id}/publish")
-        .route(web::post().to(publish_page_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/page-view/{view_id}/unpublish")
-        .route(web::post().to(unpublish_page_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/orphaned-view")
-        .route(web::post().to(post_orphaned_view_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/batch/collab")
-        .route(web::post().to(batch_create_collab_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/usage").route(web::get().to(get_workspace_usage_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/usage-and-limit")
-        .route(web::get().to(get_workspace_usage_and_limit_handler)),
-    )
-    .service(
-      web::resource("/published/{publish_namespace}")
-        .route(web::get().to(get_default_published_collab_info_meta_handler)),
-    )
-    .service(
-      web::resource("/v1/published/{publish_namespace}/{publish_name}")
-        .route(web::get().to(get_v1_published_collab_handler)),
-    )
-    .service(
-      web::resource("/published/{publish_namespace}/{publish_name}/blob")
-        .route(web::get().to(get_published_collab_blob_handler)),
-    )
-    .service(
-      web::resource("{workspace_id}/published-duplicate")
-        .route(web::post().to(post_published_duplicate_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/published-info")
-        .route(web::get().to(list_published_collab_info_handler)),
-    )
-    .service(
-      // deprecated since 0.7.4
-      web::resource("/published-info/{view_id}")
-        .route(web::get().to(get_published_collab_info_handler)),
-    )
-    .service(
-      web::resource("/v1/published-info/{view_id}")
-        .route(web::get().to(get_v1_published_collab_info_handler)),
-    )
-    .service(
-      web::resource("/published-info/{view_id}/comment")
-        .route(web::get().to(get_published_collab_comment_handler))
-        .route(web::post().to(post_published_collab_comment_handler))
-        .route(web::delete().to(delete_published_collab_comment_handler)),
-    )
-    .service(
-      web::resource("/published-info/{view_id}/reaction")
-        .route(web::get().to(get_published_collab_reaction_handler))
-        .route(web::post().to(post_published_collab_reaction_handler))
-        .route(web::delete().to(delete_published_collab_reaction_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/publish-namespace")
-        .route(web::put().to(put_publish_namespace_handler))
-        .route(web::get().to(get_publish_namespace_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/publish-default")
-        .route(web::put().to(put_workspace_default_published_view_handler))
-        .route(web::delete().to(delete_workspace_default_published_view_handler))
-        .route(web::get().to(get_workspace_published_default_info_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/publish")
-        .route(web::post().to(post_publish_collabs_handler))
-        .route(web::delete().to(delete_published_collabs_handler))
-        .route(web::patch().to(patch_published_collabs_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/folder").route(web::get().to(get_workspace_folder_handler)),
-    )
-    .service(web::resource("/{workspace_id}/recent").route(web::get().to(get_recent_views_handler)))
-    .service(
-      web::resource("/{workspace_id}/favorite").route(web::get().to(get_favorite_views_handler)),
-    )
-    .service(web::resource("/{workspace_id}/trash").route(web::get().to(get_trash_views_handler)))
-    .service(
-      web::resource("/{workspace_id}/trash/{view_id}")
-        .route(web::delete().to(delete_page_from_trash_handler)),
-    )
-    .service(
-      web::resource("/published-outline/{publish_namespace}")
-        .route(web::get().to(get_workspace_publish_outline_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/collab_list")
-      .route(web::get().to(batch_get_collab_handler))
-      // Web browser can't carry payload when using GET method, so for browser compatibility, we use POST method
-      .route(web::post().to(batch_get_collab_handler)),
-    )
-    .service(web::resource("/{workspace_id}/database").route(web::get().to(list_database_handler)))
-    .service(
-      web::resource("/{workspace_id}/database/{database_id}/row")
-        .route(web::get().to(list_database_row_id_handler))
-        .route(web::post().to(post_database_row_handler))
-        .route(web::put().to(put_database_row_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/database/{database_id}/fields")
-        .route(web::get().to(get_database_fields_handler))
-        .route(web::post().to(post_database_fields_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/database/{database_id}/row/updated")
-        .route(web::get().to(list_database_row_id_updated_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/database/{database_id}/row/detail")
-        .route(web::get().to(list_database_row_details_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/quick-note")
-        .route(web::get().to(list_quick_notes_handler))
-        .route(web::post().to(post_quick_note_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/quick-note/{quick_note_id}")
-        .route(web::put().to(update_quick_note_handler))
-        .route(web::delete().to(delete_quick_note_handler)),
-    )
-    .service(
-      web::resource("/{workspace_id}/invite-code")
-        .route(web::get().to(get_workspace_invite_code_handler))
-        .route(web::delete().to(delete_workspace_invite_code_handler))
-        .route(web::post().to(post_workspace_invite_code_handler)),
-    )
+        .service(
+            web::resource("/{workspace_id}/mentionable-person")
+                .route(web::get().to(list_workspace_mentionable_person_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/mentionable-person/{contact_id}")
+                .route(web::get().to(get_workspace_mentionable_person_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/update-member-profile")
+                .route(web::put().to(put_workspace_member_profile_handler)),
+        )
+        // Deprecated since v0.9.24
+        .service(
+            web::resource("/{workspace_id}/member/user/{user_id}")
+                .route(web::get().to(get_workspace_member_handler)),
+        )
+        .service(
+            web::resource("v1/{workspace_id}/member/user/{user_id}")
+                .route(web::get().to(get_workspace_member_v1_handler)),
+        )
+        .service(
+            web::resource("/api/workspace/{workspace_id}/collab/{object_id}")
+                .app_data(
+                    PayloadConfig::new(5 * 1024 * 1024), // 5 MB
+                )
+                .route(web::post().to(create_collab_handler))
+                .route(web::get().to(get_collab_handler))
+                .route(web::put().to(update_collab_handler))
+                .route(web::delete().to(delete_collab_handler)),
+        )
+        .service(
+            // 添加协作成员（给自己或别人）
+            web::resource("/{workspace_id}/collab/{object_id}/members/{member_user_id}")
+                .route(web::post().to(add_collab_member_handler)),
+        )
+        .service(
+            // 修改已有协作成员的权限
+            web::resource("/{workspace_id}/collab/{object_id}/members/{member_user_id}")
+                .route(web::patch().to(update_collab_member_permission_handler)),
+        )
+        .service(
+            web::resource("/v1/{workspace_id}/collab/{object_id}")
+                .route(web::get().to(v1_get_collab_handler)),
+        )
+        .service(
+            web::resource("/v1/{workspace_id}/collab/{object_id}/json")
+                .route(web::get().to(get_collab_json_handler)),
+        )
+        .service(
+            web::resource("/v1/{workspace_id}/collab/{object_id}/full-sync")
+                .route(web::post().to(collab_full_sync_handler)),
+        )
+        .service(
+            web::resource("/v1/{workspace_id}/collab/{object_id}/web-update")
+                .route(web::post().to(post_web_update_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/collab/{object_id}/row-document-collab-exists")
+                .route(web::get().to(get_row_document_collab_exists_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/collab/{object_id}/embed-info")
+                .route(web::get().to(get_collab_embed_info_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/collab/{object_id}/generate-embedding")
+                .route(web::get().to(force_generate_collab_embedding_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/collab/embed-info/list")
+                .route(web::post().to(batch_get_collab_embed_info_handler)),
+        )
+        .service(web::resource("/{workspace_id}/space").route(web::post().to(post_space_handler)))
+        .service(
+            web::resource("/{workspace_id}/space/{view_id}").route(web::patch().to(update_space_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/folder-view").route(web::post().to(post_folder_view_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/page-view").route(web::post().to(post_page_view_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/page-view/{view_id}")
+                .route(web::get().to(get_page_view_handler))
+                .route(web::patch().to(update_page_view_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/page-view/{view_id}/mentionable-person-with-access")
+                .route(web::get().to(list_page_mentionable_person_with_access_handler))
+        )
+        .service(
+            web::resource("/{workspace_id}/page-view/{view_id}/page-mention")
+                .route(web::put().to(put_page_mention_handler))
+        )
+        .service(
+            web::resource("/{workspace_id}/page-view/{view_id}/update-name")
+                .route(web::post().to(update_page_name_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/page-view/{view_id}/update-icon")
+                .route(web::post().to(update_page_icon_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/page-view/{view_id}/update-extra")
+                .route(web::post().to(update_page_extra_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/page-view/{view_id}/remove-icon")
+                .route(web::post().to(remove_page_icon_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/page-view/{view_id}/favorite")
+                .route(web::post().to(favorite_page_view_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/page-view/{view_id}/append-block")
+                .route(web::post().to(append_block_to_page_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/page-view/{view_id}/move")
+                .route(web::post().to(move_page_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/page-view/{view_id}/reorder-favorite")
+                .route(web::post().to(reorder_favorite_page_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/page-view/{view_id}/duplicate")
+                .route(web::post().to(duplicate_page_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/page-view/{view_id}/database-view")
+                .route(web::post().to(post_page_database_view_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/page-view/{view_id}/move-to-trash")
+                .route(web::post().to(move_page_to_trash_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/page-view/{view_id}/restore-from-trash")
+                .route(web::post().to(restore_page_from_trash_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/add-recent-pages")
+                .route(web::post().to(add_recent_pages_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/restore-all-pages-from-trash")
+                .route(web::post().to(restore_all_pages_from_trash_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/delete-all-pages-from-trash")
+                .route(web::post().to(delete_all_pages_from_trash_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/page-view/{view_id}/publish")
+                .route(web::post().to(publish_page_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/page-view/{view_id}/unpublish")
+                .route(web::post().to(unpublish_page_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/orphaned-view")
+                .route(web::post().to(post_orphaned_view_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/batch/collab")
+                .route(web::post().to(batch_create_collab_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/usage").route(web::get().to(get_workspace_usage_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/usage-and-limit")
+                .route(web::get().to(get_workspace_usage_and_limit_handler)),
+        )
+        .service(
+            web::resource("/published/{publish_namespace}")
+                .route(web::get().to(get_default_published_collab_info_meta_handler)),
+        )
+        .service(
+            web::resource("/v1/published/{publish_namespace}/{publish_name}")
+                .route(web::get().to(get_v1_published_collab_handler)),
+        )
+        .service(
+            web::resource("/published/{publish_namespace}/{publish_name}/blob")
+                .route(web::get().to(get_published_collab_blob_handler)),
+        )
+        .service(
+            web::resource("{workspace_id}/published-duplicate")
+                .route(web::post().to(post_published_duplicate_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/published-info")
+                .route(web::get().to(list_published_collab_info_handler)),
+        )
+        .service(
+            // deprecated since 0.7.4
+            web::resource("/published-info/{view_id}")
+                .route(web::get().to(get_published_collab_info_handler)),
+        )
+        .service(
+            web::resource("/v1/published-info/{view_id}")
+                .route(web::get().to(get_v1_published_collab_info_handler)),
+        )
+        .service(
+            web::resource("/published-info/{view_id}/comment")
+                .route(web::get().to(get_published_collab_comment_handler))
+                .route(web::post().to(post_published_collab_comment_handler))
+                .route(web::delete().to(delete_published_collab_comment_handler)),
+        )
+        .service(
+            web::resource("/published-info/{view_id}/reaction")
+                .route(web::get().to(get_published_collab_reaction_handler))
+                .route(web::post().to(post_published_collab_reaction_handler))
+                .route(web::delete().to(delete_published_collab_reaction_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/publish-namespace")
+                .route(web::put().to(put_publish_namespace_handler))
+                .route(web::get().to(get_publish_namespace_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/publish-default")
+                .route(web::put().to(put_workspace_default_published_view_handler))
+                .route(web::delete().to(delete_workspace_default_published_view_handler))
+                .route(web::get().to(get_workspace_published_default_info_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/publish")
+                .route(web::post().to(post_publish_collabs_handler))
+                .route(web::delete().to(delete_published_collabs_handler))
+                .route(web::patch().to(patch_published_collabs_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/folder").route(web::get().to(get_workspace_folder_handler)),
+        )
+        .service(web::resource("/{workspace_id}/recent").route(web::get().to(get_recent_views_handler)))
+        .service(
+            web::resource("/{workspace_id}/favorite").route(web::get().to(get_favorite_views_handler)),
+        )
+        .service(web::resource("/{workspace_id}/trash").route(web::get().to(get_trash_views_handler)))
+        .service(
+            web::resource("/{workspace_id}/trash/{view_id}")
+                .route(web::delete().to(delete_page_from_trash_handler)),
+        )
+        .service(
+            web::resource("/published-outline/{publish_namespace}")
+                .route(web::get().to(get_workspace_publish_outline_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/collab_list")
+                .route(web::get().to(batch_get_collab_handler))
+                // Web browser can't carry payload when using GET method, so for browser compatibility, we use POST method
+                .route(web::post().to(batch_get_collab_handler)),
+        )
+        .service(web::resource("/{workspace_id}/database").route(web::get().to(list_database_handler)))
+        .service(
+            web::resource("/{workspace_id}/database/{database_id}/row")
+                .route(web::get().to(list_database_row_id_handler))
+                .route(web::post().to(post_database_row_handler))
+                .route(web::put().to(put_database_row_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/database/{database_id}/fields")
+                .route(web::get().to(get_database_fields_handler))
+                .route(web::post().to(post_database_fields_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/database/{database_id}/row/updated")
+                .route(web::get().to(list_database_row_id_updated_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/database/{database_id}/row/detail")
+                .route(web::get().to(list_database_row_details_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/quick-note")
+                .route(web::get().to(list_quick_notes_handler))
+                .route(web::post().to(post_quick_note_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/quick-note/{quick_note_id}")
+                .route(web::put().to(update_quick_note_handler))
+                .route(web::delete().to(delete_quick_note_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/invite-code")
+                .route(web::get().to(get_workspace_invite_code_handler))
+                .route(web::delete().to(delete_workspace_invite_code_handler))
+                .route(web::post().to(post_workspace_invite_code_handler)),
+        )
 }
 
 pub fn collab_scope() -> Scope {
-  web::scope("/api/realtime").service(
-    web::resource("post/stream")
-      .app_data(
-        PayloadConfig::new(10 * 1024 * 1024), // 10 MB
-      )
-      .route(web::post().to(post_realtime_message_stream_handler)),
-  )
+  web::scope("/api")
+    .service(
+      // 别人分享给我的协作视图列表
+      web::resource("/collab/me/received").route(web::get().to(list_received_collab_handler)),
+    )
+    .service(
+      // 我分享给别人的协作视图列表
+      web::resource("/collab/me/sent").route(web::get().to(list_sent_collab_handler)),
+    )
+    .service(
+      web::scope("/realtime").service(
+        web::resource("post/stream")
+          .app_data(
+            PayloadConfig::new(10 * 1024 * 1024), // 10 MB
+          )
+          .route(web::post().to(post_realtime_message_stream_handler)),
+      ),
+    )
 }
 
 // Adds a workspace for user, if success, return the workspace id
@@ -1280,7 +1304,11 @@ async fn v1_get_collab_handler(
   let encode_collab = state
     .collab_storage
     .get_full_encode_collab(uid.into(), &workspace_id, &object_id, query.collab_type)
-    .await
+    .await;
+  if let Err(x) = &encode_collab {
+    eprintln!("Failed to encode collab object: {:?}", x);
+  }
+  let encode_collab = encode_collab
     .map_err(AppResponseError::from)?
     .encoded_collab;
 
@@ -2472,7 +2500,8 @@ async fn get_workspace_usage_and_limit_handler(
     .workspace_access_control
     .enforce_role_weak(&uid, &workspace_id, AFRole::Owner)
     .await?;
-  let res = biz::workspace::ops::get_workspace_usage_and_limit(&state.pg_pool, &workspace_id).await?;
+  let res =
+    biz::workspace::ops::get_workspace_usage_and_limit(&state.pg_pool, &workspace_id).await?;
   Ok(Json(AppResponse::Ok().with_data(res)))
 }
 
@@ -3090,4 +3119,83 @@ async fn post_workspace_invite_code_handler(
     generate_workspace_invite_token(&state.pg_pool, &workspace_id, data.validity_period_hours)
       .await?;
   Ok(Json(AppResponse::Ok().with_data(workspace_invite_link)))
+}
+/// 添加协作成员到笔记
+///
+/// 业务走到这里了就其实是加入别人的笔记。所以无需判断邀请者权限。无需验证受邀者身份。
+///
+async fn add_collab_member_handler(
+  user_uuid: UserUuid,
+  path_param: web::Path<(Uuid, Uuid, Uuid)>,
+  state: Data<AppState>,
+) -> Result<JsonAppResponse<()>> {
+  // 检查是否是自己的笔记
+  // 不能是添加自己
+  // 用户必须存在
+  // 添加到 zf_collab_member
+  // 添加到分享表
+  let (workspace_id, view_id, received_uid) = path_param.into_inner();
+
+  // 找到这个笔记的拥有者
+  let uid = state.user_cache.get_user_uid(&user_uuid).await?;
+  let received_uid = state.user_cache.get_user_uid(&received_uid).await?;
+  add_collab_member(
+    &state.pg_pool,
+    state.collab_access_control.clone(),
+    &workspace_id,
+    &view_id,
+    uid,
+    received_uid,
+  )
+  .await?;
+  Ok(Json(AppResponse::Ok()))
+}
+
+/// 更新协作成员权限，这个需要检查权限的。暂定为，只能笔记拥有者有修改权
+async fn update_collab_member_permission_handler(
+  user_uuid: UserUuid,
+  path_param: web::Path<(Uuid, Uuid, Uuid)>,
+  state: Data<AppState>,
+  data: Json<EditCollabMemberParams>,
+) -> Result<JsonAppResponse<()>> {
+  // 检查笔记是否是自己的
+  // 用户必须存在
+  // 不能是变更自己的权限
+  let data = data.into_inner();
+  let (workspace_id, view_id, opt_uid) = path_param.into_inner();
+  let edit_uid = state.user_cache.get_user_uid(&opt_uid).await?;
+  let user_uid = state.user_cache.get_user_uid(&user_uuid).await?;
+  edit_collab_member_permission(
+    &state.pg_pool,
+    &workspace_id,
+    &view_id,
+    user_uid,
+    edit_uid,
+    data.permission_id,
+  )
+  .await?;
+  // 变更权限
+  Ok(Json(AppResponse::Ok()))
+}
+
+/// 我分析给别人的笔记
+async fn list_sent_collab_handler(
+  user_uuid: UserUuid,
+  state: Data<AppState>,
+) -> Result<JsonAppResponse<Vec<AFCollabMemberInvite>>> {
+  // 查询分享表实现  过滤 shared_by = user_uuid（由我发起的）
+  let uid = state.user_cache.get_user_uid(&user_uuid).await?;
+  let list = get_send_collab_list(&state.pg_pool, uid).await?;
+  Ok(Json(AppResponse::Ok().with_data(list)))
+}
+
+/// 别人分享给我的笔记
+async fn list_received_collab_handler(
+  user_uuid: UserUuid,
+  state: Data<AppState>,
+) -> Result<JsonAppResponse<Vec<AFCollabMemberInvite>>> {
+  // 查询分享表实现  过滤 shared_to = user_uuid（接收者是我）
+  let uid = state.user_cache.get_user_uid(&user_uuid).await?;
+  let list = get_received_collab_list(&state.pg_pool, uid).await?;
+  Ok(Json(AppResponse::Ok().with_data(list)))
 }

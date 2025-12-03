@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use database_entity::dto::AFAccessLevel;
 use tracing::instrument;
 use uuid::Uuid;
-
+use crate::act::Acts;
 use super::access::AccessControl;
 
 #[derive(Clone)]
@@ -28,7 +28,7 @@ impl CollabAccessControl for CollabAccessControlImpl {
     &self,
     workspace_id: &Uuid,
     uid: &i64,
-    _oid: &Uuid,
+    oid: &Uuid,
     action: Action,
   ) -> Result<(), AppError> {
     // TODO: allow non workspace member to read a collab.
@@ -39,6 +39,20 @@ impl CollabAccessControl for CollabAccessControlImpl {
       Action::Write => Action::Write,
       Action::Delete => Action::Write,
     };
+
+    let result = self
+        .access_control
+        .enforce_immediately(
+          uid,
+          ObjectType::Collab(oid.to_string()),
+          workspace_action.clone(),
+        )
+        .await;
+    match result {
+      Ok(true) => return Ok(()),
+      Err(e) => return Err(e),
+      _ => {},
+    }
 
     let result = self
       .access_control
@@ -90,11 +104,16 @@ impl CollabAccessControl for CollabAccessControlImpl {
   #[instrument(level = "info", skip_all)]
   async fn update_access_level_policy(
     &self,
-    _uid: &i64,
-    _oid: &Uuid,
-    _level: AFAccessLevel,
+    uid: &i64,
+    oid: &Uuid,
+    level: AFAccessLevel,
   ) -> Result<(), AppError> {
     // TODO: allow non workspace member to read a collab.
+    for act in level.policy_acts(){
+      let policy = vec![uid.to_string(), ObjectType::Collab(oid.to_string()).policy_object(), act.clone()];
+      self.access_control.add_policy(policy).await?;
+    }
+
     Ok(())
   }
 

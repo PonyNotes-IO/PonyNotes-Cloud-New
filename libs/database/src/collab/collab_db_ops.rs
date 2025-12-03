@@ -7,7 +7,7 @@ use database_entity::dto::{
 use shared_entity::dto::workspace_dto::{DatabaseRowUpdatedItem, EmbeddedCollabQuery};
 
 use crate::collab::{partition_key_from_collab_type, SNAPSHOT_PER_HOUR};
-use crate::pg_row::AFSnapshotRow;
+use crate::pg_row::{AFCollabMemberInvite, AFSnapshotRow};
 use crate::pg_row::{AFCollabData, AFCollabRowMeta};
 use app_error::AppError;
 use chrono::{DateTime, Duration, Utc};
@@ -683,4 +683,32 @@ where
     items.push(embed_info);
   }
   Ok(RepeatedAFCollabEmbedInfo(items))
+}
+
+pub async fn select_send_collab_list<'a, E>(executor: E, uid: i64) -> Result<Vec<AFCollabMemberInvite>, AppError>
+where
+  E: Executor<'a, Database = Postgres>,
+{
+  let list = sqlx::query_as!(
+    AFCollabMemberInvite,
+    "select * from af_collab_member_invite where send_uid = $1",
+    uid
+  )
+  .fetch_all(executor)
+  .await?;
+  Ok(list)
+}
+
+pub async fn select_received_collab_list<'a, E>(executor: E, uid: i64) -> Result<Vec<AFCollabMemberInvite>, AppError>
+where
+  E: Executor<'a, Database = Postgres>,
+{
+  let list = sqlx::query_as!(
+    AFCollabMemberInvite,
+    "select * from af_collab_member_invite where send_uid = $1",
+    uid
+  )
+  .fetch_all(executor)
+  .await?;
+  Ok(list)
 }

@@ -281,6 +281,12 @@ impl AFEnforcerV2 {
     }
   }
 
+  pub async fn add_policy(&self,params:Vec<String>) -> Result<(), AppError> {
+    let mut enforcer = self.enforcer.write().await;
+    enforcer.add_policy(params).await.map_err(|e| AppError::Internal(anyhow!(e)))?;
+    Ok(())
+  }
+
   /// Update policy for a user using queue-based approach.
   /// This method will never cause a deadlock.
   #[instrument(level = "debug", skip_all, err)]

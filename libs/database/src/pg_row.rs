@@ -3,11 +3,11 @@ use app_error::AppError;
 use chrono::{DateTime, Utc};
 
 use database_entity::dto::{
-  AFAccessLevel, AFRole, AFUserProfile, AFWebUser, AFWebUserWithObfuscatedName, AFWorkspace,
-  AFWorkspaceInvitationStatus, AFWorkspaceMember, AccessRequestMinimal, AccessRequestStatus,
-  AccessRequestWithViewId, AccessRequesterInfo, AccountLink, GlobalComment, QuickNote, Reaction,
-  Template, TemplateCategory, TemplateCategoryMinimal, TemplateCategoryType, TemplateCreator,
-  TemplateCreatorMinimal, TemplateGroup, TemplateMinimal,
+  AFAccessLevel, AFRole, AFUserProfile, AFWebUser, AFWebUserWithObfuscatedName,
+  AFWorkspace, AFWorkspaceInvitationStatus, AFWorkspaceMember, AccessRequestMinimal,
+  AccessRequestStatus, AccessRequestWithViewId, AccessRequesterInfo, AccountLink, GlobalComment,
+  QuickNote, Reaction, Template, TemplateCategory, TemplateCategoryMinimal, TemplateCategoryType,
+  TemplateCreator, TemplateCreatorMinimal, TemplateGroup, TemplateMinimal,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
@@ -228,6 +228,13 @@ pub struct AFWorkspaceMemberPermRow {
   pub workspace_id: Uuid,
 }
 
+#[derive(FromRow, Serialize, Deserialize)]
+pub struct AFCollabMemberPermRow {
+  pub uid: i64,
+  pub oid: String,
+  pub permission_id: i32,
+}
+
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct AFWorkspaceMemberRow {
   pub uid: i64,
@@ -322,7 +329,7 @@ pub struct AFUserNotification {
   pub payload: Option<AFUserRow>,
 }
 
-#[derive(FromRow, Debug, Clone)]
+#[derive(FromRow, Serialize, Deserialize, Debug, Clone)]
 pub struct AFPermissionRow {
   pub id: i32,
   pub name: String,
@@ -826,6 +833,14 @@ pub struct AFPublishViewWithPublishInfo {
   pub publish_timestamp: DateTime<Utc>,
   pub comments_enabled: bool,
   pub duplicate_enabled: bool,
+}
+
+#[derive(FromRow, Serialize, Deserialize, Debug)]
+pub struct AFCollabMemberInvite {
+  pub oid: String,
+  pub send_uid: i64,
+  pub received_uid: i64,
+  pub created_at: DateTime<Utc>,
 }
 
 #[cfg(test)]
