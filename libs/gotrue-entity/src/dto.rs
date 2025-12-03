@@ -227,14 +227,23 @@ pub enum SignUpResponse {
 }
 #[derive(Default, Serialize, Deserialize)]
 pub struct UpdateGotrueUserParams {
+  #[serde(skip_serializing_if = "String::is_empty")]
   pub email: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub password: Option<String>,
+  #[serde(skip_serializing_if = "String::is_empty")]
   pub nonce: String,
+  #[serde(skip_serializing_if = "BTreeMap::is_empty")]
   pub data: BTreeMap<String, serde_json::Value>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub app_metadata: Option<BTreeMap<String, serde_json::Value>>,
+  #[serde(skip_serializing_if = "String::is_empty")]
   pub phone: String,
+  #[serde(skip_serializing_if = "String::is_empty")]
   pub channel: String,
+  #[serde(skip_serializing_if = "String::is_empty")]
   pub code_challenge: String,
+  #[serde(skip_serializing_if = "String::is_empty")]
   pub code_challenge_method: String,
 }
 

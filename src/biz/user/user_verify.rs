@@ -206,7 +206,7 @@ pub async fn verify_and_bind_phone(
 /// Initiate phone number change by calling GoTrue's update_user
 /// 
 /// This function follows GoTrue's standard phone change flow:
-/// 1. Calls GoTrue's update_user API with the new phone number
+/// 1. Calls GoTrue's update_user API with the new phone number and channel=sms
 /// 2. GoTrue sends an OTP to the new phone number
 /// 3. GoTrue stores the new phone in a pending state (new_phone field)
 /// 4. User must verify the OTP using verify_and_bind_phone to complete the change
@@ -227,12 +227,16 @@ pub async fn send_phone_otp(
   );
   
   // Call GoTrue's update_user API to initiate phone change
-  // GoTrue will:
-  // 1. Store the new phone in the new_phone field
-  // 2. Send an OTP to the new phone number
-  // 3. Wait for verification before actually updating the phone field
+  // IMPORTANT: Must set channel to "sms" to trigger SMS sending
   let mut update_params = UpdateGotrueUserParams::new();
   update_params.phone = phone.to_string();
+  update_params.channel = "sms".to_string(); // This is critical!
+  
+  event!(
+    tracing::Level::INFO,
+    "Calling GoTrue update_user with phone: {}, channel: sms",
+    phone
+  );
   
   let result = state
     .gotrue_client
