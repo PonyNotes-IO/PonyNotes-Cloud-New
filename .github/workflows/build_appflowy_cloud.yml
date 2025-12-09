@@ -1,0 +1,81 @@
+name: Build and Push appflowy_cloud (Main Branch)
+
+# 触发条件：推送到 main 分支时自动构建
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'libs/**'
+      - 'services/**'
+      - 'Dockerfile'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:  # 允许手动触发
+
+env:
+  CARGO_TERM_COLOR: always
+  IMAGE_NAME: appflowyinc/appflowy_cloud
+  REGISTRY: docker.io
+
+jobs:
+  build_and_push:
+    runs-on: ubuntu-22.04  # 使用 amd64 runner，构建速度更快
+    
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 获取完整历史，便于获取 commit SHA
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+
+      - name: Get Git SHA
+        id: git_sha
+        run: |
+          GIT_SHA=$(git rev-parse --short HEAD)
+          echo "GIT_SHA=${GIT_SHA}" >> $GITHUB_OUTPUT
+          echo "Git SHA: ${GIT_SHA}"
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ steps.git_sha.outputs.GIT_SHA }}
+            type=sha,prefix={{branch}}-
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64  # 只构建 amd64，速度更快
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha  # 使用 GitHub Actions cache
+          cache-to: type=gha,mode=max  # 保存缓存到 GitHub Actions
+          build-args: |
+            PROFILE=release
+            FEATURES=
+            GIT_SHA=${{ steps.git_sha.outputs.GIT_SHA }}
+
+      - name: Image digest
+        run: echo "Image pushed with digest ${{ steps.build.outputs.digest }}"
+
+      - name: Logout from Docker Hub
+        if: always()
+        run: docker logout
+
+
