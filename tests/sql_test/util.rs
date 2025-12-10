@@ -62,7 +62,7 @@ pub async fn create_test_user(
 ) -> anyhow::Result<TestUser> {
   insert_auth_user(pool, user_uuid).await.unwrap();
   let uid = ID_GEN.write().await.next_id();
-  let workspace_id = database::user::create_user(pool, uid, &user_uuid, email, name)
+  let workspace_id = database::user::create_user(pool, uid, &user_uuid, Some(email), None, name)
     .await
     .unwrap();
 

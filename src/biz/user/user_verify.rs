@@ -34,15 +34,41 @@ pub async fn verify_token(access_token: &str, state: &AppState) -> Result<bool, 
     let new_uid = state.id_gen.write().await.next_id();
     event!(tracing::Level::INFO, "create new user:{}", new_uid);
     
-    // Use phone number if email is empty (for phone-based authentication)
-    let email_or_phone = if user.email.is_empty() {
-      &user.phone
+    // Prepare email and phone for user creation
+    // Business requirement: phone number cannot be empty, but email can be empty
+    let email = if user.email.is_empty() {
+      None
     } else {
-      &user.email
+      Some(user.email.as_str())
+    };
+    
+    // If phone is empty (e.g., WeChat login without phone binding),
+    // generate a temporary phone number based on user UUID to satisfy the requirement
+    // Format: +86temp{uuid前12位数字} to follow E.164-like format
+    let temp_phone: Option<String> = if user.phone.is_empty() {
+      event!(
+        tracing::Level::INFO,
+        "Phone is empty for user {}, generating temporary phone number",
+        user_uuid
+      );
+      // Generate a temporary phone number: +86temp + first 12 digits of UUID (without dashes)
+      let uuid_str = user_uuid.to_string().replace("-", "");
+      Some(format!("+86temp{}", &uuid_str[..uuid_str.len().min(12)]))
+    } else {
+      None
+    };
+    
+    // Use actual phone if available, otherwise use temporary phone
+    let phone = if !user.phone.is_empty() {
+      Some(user.phone.as_str())
+    } else if let Some(ref temp) = temp_phone {
+      Some(temp.as_str())
+    } else {
+      None
     };
     
     let workspace_id =
-      create_user(txn.deref_mut(), new_uid, &user_uuid, email_or_phone, &name).await?;
+      create_user(txn.deref_mut(), new_uid, &user_uuid, email, phone, &name).await?;
     let workspace_row = select_workspace(txn.deref_mut(), &workspace_id).await?;
 
     // It's essential to cache the user's role because subsequent actions will rely on this cached information.

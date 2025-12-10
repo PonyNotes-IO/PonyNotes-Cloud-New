@@ -116,12 +116,13 @@ pub async fn create_user<'a, E: Executor<'a, Database = Postgres>>(
   executor: E,
   uid: i64,
   user_uuid: &Uuid,
-  email: &str,
+  email: Option<&str>,
+  phone: Option<&str>,
   name: &str,
 ) -> Result<Uuid, AppError> {
   let name = {
     if name.is_empty() {
-      email
+      email.unwrap_or(phone.unwrap_or(""))
     } else {
       name
     }
@@ -130,8 +131,8 @@ pub async fn create_user<'a, E: Executor<'a, Database = Postgres>>(
   let row = sqlx::query!(
     r#"
     WITH ins_user AS (
-        INSERT INTO af_user (uid, uuid, email, name)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO af_user (uid, uuid, email, phone, name)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING uid
     ),
     owner_role AS (
@@ -147,6 +148,7 @@ pub async fn create_user<'a, E: Executor<'a, Database = Postgres>>(
     uid,
     user_uuid,
     email,
+    phone,
     name
   )
   .fetch_one(executor)
