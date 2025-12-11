@@ -4,7 +4,7 @@ use crate::biz::user::image_asset::{get_user_image_asset, upload_user_image_asse
 use crate::biz::user::user_delete::delete_user;
 use crate::biz::user::user_info::{get_profile, get_user_workspace_info, update_user};
 use crate::biz::user::user_search::search_users_by_email;
-use crate::biz::user::user_verify::{send_phone_otp, verify_and_bind_phone, verify_token};
+use crate::biz::user::user_verify::{send_phone_otp, send_phone_otp_for_sso_user, verify_and_bind_phone, verify_token};
 use crate::state::AppState;
 use actix_http::StatusCode;
 use actix_multipart::form::bytes::Bytes;
@@ -176,8 +176,37 @@ async fn send_phone_otp_handler(
   state: Data<AppState>,
 ) -> Result<JsonAppResponse<()>> {
   let params = payload.into_inner();
+  let user_uuid = auth.uuid()?;
 
-  send_phone_otp(&auth.token, &params.phone, state.as_ref()).await?;
+  // Check if user has a phone number (or has a temporary phone number)
+  // If no phone or temporary phone, this is first-time binding for SSO user
+  let user_info = state
+    .gotrue_client
+    .user_info(&auth.token)
+    .await
+    .map_err(AppResponseError::from)?;
+  
+  let current_phone = user_info.phone.unwrap_or_default();
+  let is_first_binding = current_phone.is_empty() || current_phone.starts_with("+86temp");
+  
+  if is_first_binding {
+    // First-time binding for SSO user (e.g., WeChat login)
+    event!(
+      tracing::Level::INFO,
+      "Detected first-time phone binding for user {}, using SSO-specific flow",
+      user_uuid
+    );
+    send_phone_otp_for_sso_user(&auth.token, &params.phone, state.as_ref()).await?;
+  } else {
+    // Phone change scenario (换绑) - use standard flow
+    event!(
+      tracing::Level::INFO,
+      "Detected phone change scenario for user {}, using standard flow",
+      user_uuid
+    );
+    send_phone_otp(&auth.token, &params.phone, state.as_ref()).await?;
+  }
+  
   Ok(AppResponse::Ok().into())
 }
 

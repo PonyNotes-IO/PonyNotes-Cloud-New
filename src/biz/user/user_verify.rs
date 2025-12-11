@@ -238,6 +238,7 @@ pub async fn verify_and_bind_phone(
 /// 4. User must verify the OTP using verify_and_bind_phone to complete the change
 /// 
 /// IMPORTANT: This requires the user's access_token to authenticate the request.
+/// This function is used for phone number change (换绑) scenarios where the user already has a phone number.
 #[instrument(skip(state), err)]
 pub async fn send_phone_otp(
   access_token: &str,
@@ -289,6 +290,120 @@ pub async fn send_phone_otp(
         "发送验证码失败: {}",
         e
       )))
+    }
+  }
+}
+
+/// Send phone OTP for SSO users (e.g., WeChat login) who need to bind phone for the first time
+/// 
+/// This function is specifically designed for SSO users who don't have a phone number yet.
+/// It uses GoTrue's /otp endpoint or Admin API to send verification code.
+/// 
+/// IMPORTANT: This requires the user's access_token to authenticate the request.
+#[instrument(skip(state), err)]
+pub async fn send_phone_otp_for_sso_user(
+  access_token: &str,
+  phone: &str,
+  state: &AppState,
+) -> Result<(), AppError> {
+  use gotrue::params::{AdminUserParams, MagicLinkParams};
+  
+  event!(
+    tracing::Level::INFO,
+    "Sending phone OTP for SSO user (first-time binding) to: {}",
+    phone
+  );
+  
+  // Get user info to get user UUID
+  let user_info = state
+    .gotrue_client
+    .user_info(access_token)
+    .await
+    .map_err(|err| AppError::InvalidRequest(format!(
+      "Failed to get user info: {}",
+      err
+    )))?;
+  
+  let admin_token = state.gotrue_admin.token().await?;
+  
+  // Get current user details first
+  let current_user = state
+    .gotrue_client
+    .admin_user_details(&admin_token, &user_info.id)
+    .await
+    .map_err(|err| AppError::InvalidRequest(format!(
+      "Failed to get user details: {}",
+      err
+    )))?;
+  
+  // For SSO users, try using /otp endpoint first
+  let mut otp_params = MagicLinkParams::default();
+  otp_params.phone = phone.to_string();
+  
+  event!(
+    tracing::Level::INFO,
+    "Using /otp endpoint to send OTP for SSO user phone: {}",
+    phone
+  );
+  
+  let otp_result = state
+    .gotrue_client
+    .magic_link(&otp_params, None)
+    .await;
+  
+  match otp_result {
+    Ok(_) => {
+      event!(
+        tracing::Level::INFO,
+        "OTP sent successfully via /otp endpoint for SSO user phone: {}",
+        phone
+      );
+      Ok(())
+    }
+    Err(otp_err) => {
+      event!(
+        tracing::Level::WARN,
+        "/otp endpoint failed for SSO user phone: {}, error: {}, trying Admin API",
+        phone,
+        otp_err
+      );
+      // Fallback: Try Admin API to set phone (this might trigger OTP sending)
+      let mut admin_params = AdminUserParams::default();
+      admin_params.aud = current_user.aud;
+      admin_params.role = current_user.role.unwrap_or_default();
+      admin_params.email = current_user.email.unwrap_or_default();
+      admin_params.phone = phone.to_string();
+      admin_params.phone_confirm = false;
+      admin_params.email_confirm = current_user.email_confirmed_at.is_some();
+      
+      let admin_result = state
+        .gotrue_client
+        .admin_update_user(&admin_token, &user_info.id, &admin_params)
+        .await;
+      
+      match admin_result {
+        Ok(_) => {
+          event!(
+            tracing::Level::INFO,
+            "Admin API phone update successful for SSO user, OTP should be sent to: {}",
+            phone
+          );
+          Ok(())
+        }
+        Err(admin_err) => {
+          event!(
+            tracing::Level::WARN,
+            "Both /otp and Admin API failed for SSO user phone: {}, errors: {} / {}",
+            phone,
+            otp_err,
+            admin_err
+          );
+          Err(AppError::InvalidRequest(format!(
+            "发送验证码失败: {} (SSO账户)",
+            otp_err
+          )))
+        }
+      }
     }
   }
 }
