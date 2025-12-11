@@ -21,6 +21,7 @@ use shared_entity::dto::auth_dto::{
 };
 use shared_entity::response::AppResponseError;
 use shared_entity::response::{AppResponse, JsonAppResponse};
+use tracing::event;
 use uuid::Uuid;
 
 pub fn user_scope() -> Scope {
@@ -186,7 +187,7 @@ async fn send_phone_otp_handler(
     .await
     .map_err(AppResponseError::from)?;
   
-  let current_phone = user_info.phone.unwrap_or_default();
+  let current_phone = user_info.phone;
   let is_first_binding = current_phone.is_empty() || current_phone.starts_with("+86temp");
   
   if is_first_binding {

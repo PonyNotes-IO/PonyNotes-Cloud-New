@@ -370,8 +370,8 @@ pub async fn send_phone_otp_for_sso_user(
       // Fallback: Try Admin API to set phone (this might trigger OTP sending)
       let mut admin_params = AdminUserParams::default();
       admin_params.aud = current_user.aud;
-      admin_params.role = current_user.role.unwrap_or_default();
-      admin_params.email = current_user.email.unwrap_or_default();
+      admin_params.role = current_user.role;
+      admin_params.email = current_user.email;
       admin_params.phone = phone.to_string();
       admin_params.phone_confirm = false;
       admin_params.email_confirm = current_user.email_confirmed_at.is_some();
