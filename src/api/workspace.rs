@@ -439,17 +439,17 @@ pub fn workspace_scope() -> Scope {
 }
 
 pub fn collab_scope() -> Scope {
-  web::scope("/api")
+  web::scope("/api/collab/me")
     .service(
       // 别人分享给我的协作视图列表
-      web::resource("/collab/me/received").route(web::get().to(list_received_collab_handler)),
+      web::resource("/received").route(web::get().to(list_received_collab_handler)),
     )
     .service(
       // 我分享给别人的协作视图列表
-      web::resource("/collab/me/sent").route(web::get().to(list_sent_collab_handler)),
+      web::resource("/sent").route(web::get().to(list_sent_collab_handler)),
     )
     .service(
-      web::scope("/realtime").service(
+      web::scope("/api/realtime").service(
         web::resource("post/stream")
           .app_data(
             PayloadConfig::new(10 * 1024 * 1024), // 10 MB
