@@ -33,6 +33,23 @@ RUN if [ "$PROFILE" = "release" ]; then \
     fi
 
 COPY . .
+
+# Try to prepare sqlx cache if database is available and sqlx-cli is installed
+# This ensures all queries are cached before building with SQLX_OFFLINE
+# Note: If .sqlx cache is incomplete, you should run `./prepare_sqlx_cache.sh` locally first
+RUN if [ -n "$DATABASE_URL" ] && (command -v cargo-sqlx >/dev/null 2>&1 || cargo install sqlx-cli --no-default-features --features postgres --quiet 2>/dev/null); then \
+      echo "Preparing SQLx cache with DATABASE_URL=$DATABASE_URL..."; \
+      if cargo sqlx prepare --workspace 2>&1; then \
+        echo "✓ SQLx cache prepared successfully"; \
+      else \
+        echo "⚠ Warning: SQLx prepare failed (database may not be accessible during build)"; \
+        echo "⚠ Using existing cache. If build fails, run './prepare_sqlx_cache.sh' locally first."; \
+      fi; \
+    else \
+      echo "⚠ Skipping SQLx cache preparation (database not available or sqlx-cli not installed)"; \
+      echo "⚠ Using existing cache. If build fails, run './prepare_sqlx_cache.sh' locally first."; \
+    fi
+
 # Enable SQLX_OFFLINE to use pre-generated sqlx-data.json and avoid database connection during build
 ENV SQLX_OFFLINE=true
 

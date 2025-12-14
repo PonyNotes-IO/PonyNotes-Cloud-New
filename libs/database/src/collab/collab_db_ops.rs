@@ -705,7 +705,7 @@ where
 {
   let list = sqlx::query_as!(
     AFCollabMemberInvite,
-    "select * from af_collab_member_invite where send_uid = $1",
+    "select * from af_collab_member_invite where received_uid = $1",
     uid
   )
   .fetch_all(executor)
