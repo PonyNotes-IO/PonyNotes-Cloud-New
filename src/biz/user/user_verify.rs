@@ -149,17 +149,25 @@ fn name_from_user_metadata(value: &serde_json::Value) -> String {
     .unwrap_or_default()
 }
 
-/// Verify phone OTP and complete phone number change
+/// Verify phone OTP and complete phone number change or first-time binding
 /// 
-/// This function follows GoTrue's standard phone change flow:
+/// This function handles two scenarios:
+/// 1. First-time phone binding for SSO users (uses /otp endpoint, verify with type=sms)
+/// 2. Phone number change for existing users (uses update_user, verify with type=PhoneChange)
+/// 
+/// Flow for first-time binding:
+/// 1. User calls send_phone_otp_for_sso_user which uses /otp endpoint
+/// 2. User receives OTP and calls this function to verify
+/// 3. This function verifies with type=sms
+/// 4. GoTrue automatically updates auth.users.phone upon successful verification
+/// 5. We sync the change to our business database (af_user table)
+/// 
+/// Flow for phone change:
 /// 1. User calls send_phone_otp which triggers GoTrue's update_user (sends OTP)
 /// 2. User receives OTP and calls this function to verify
 /// 3. This function verifies with type=PhoneChange
 /// 4. GoTrue automatically updates auth.users.phone upon successful verification
 /// 5. We sync the change to our business database (af_user table)
-/// 
-/// IMPORTANT: GoTrue handles the phone update automatically when verifying with PhoneChange type.
-/// We don't need to manually call update_user after verification.
 #[instrument(skip(state), err)]
 pub async fn verify_and_bind_phone(
   user_uuid: &uuid::Uuid,
@@ -170,21 +178,61 @@ pub async fn verify_and_bind_phone(
   use database::user::update_user;
   use gotrue::params::VerifyParams;
   
-  // Use PhoneChange type - this tells GoTrue to complete the phone number change
-  // that was initiated by the update_user call in send_phone_otp
+  // Check current user's phone in GoTrue using admin API
+  // Note: SSO users already have a temporary phone number, so this is always a phone change
+  let admin_token = state.gotrue_admin.token().await?;
+  let current_user = state
+    .gotrue_client
+    .admin_user_details(&admin_token, &user_uuid.to_string())
+    .await
+    .ok();
+  
+  let current_phone = current_user
+    .as_ref()
+    .map(|u| u.phone.as_str())
+    .unwrap_or("");
+  
+  // Since SSO users always have a phone (even if temporary), this should always be PhoneChange
+  // Only use sms type if user truly has no phone (shouldn't happen due to DB constraints)
+  let verify_type = if current_phone.is_empty() {
+    event!(
+      tracing::Level::WARN,
+      "User {} has no phone in GoTrue (unexpected), using sms verification type for phone: {}",
+      user_uuid,
+      phone
+    );
+    gotrue::params::VerifyType::Sms
+  } else {
+    event!(
+      tracing::Level::INFO,
+      "User {} has phone {}, binding new phone {} - using PhoneChange verification type",
+      user_uuid,
+      current_phone,
+      phone
+    );
+    gotrue::params::VerifyType::PhoneChange
+  };
+  
+  let verify_type_str = match verify_type {
+    gotrue::params::VerifyType::Sms => "sms",
+    gotrue::params::VerifyType::PhoneChange => "phone_change",
+    gotrue::params::VerifyType::MagicLink => "magiclink",
+    gotrue::params::VerifyType::Recovery => "recovery",
+  };
+  event!(
+    tracing::Level::INFO,
+    "Verifying phone OTP for user: {}, phone: {}, verification_type: {}",
+    user_uuid,
+    phone,
+    verify_type_str
+  );
+  
   let verify_params = VerifyParams {
-    type_: gotrue::params::VerifyType::PhoneChange,
+    type_: verify_type,
     phone: phone.to_string(),
     token: otp.to_string(),
     email: String::new(),
   };
-  
-  event!(
-    tracing::Level::INFO,
-    "Verifying phone change OTP for user: {}, phone: {}",
-    user_uuid,
-    phone
-  );
   
   let verify_result = state
     .gotrue_client
@@ -202,7 +250,34 @@ pub async fn verify_and_bind_phone(
       
       // Step 2: Sync the phone number to our business database
       // GoTrue has already updated auth.users.phone, now we update af_user.phone
+      event!(
+        tracing::Level::INFO,
+        "Updating af_user.phone for user: {}, phone: {}",
+        user_uuid,
+        phone
+      );
+      
       update_user(&state.pg_pool, user_uuid, None, None, Some(phone.to_string()), None).await?;
+      
+      // Verify the update was successful
+      let updated_phone = database::user::select_phone_from_user_uuid(&state.pg_pool, user_uuid).await?;
+      event!(
+        tracing::Level::INFO,
+        "Phone number update verification - user: {}, requested phone: {}, actual phone in DB: {:?}",
+        user_uuid,
+        phone,
+        updated_phone
+      );
+      
+      if updated_phone.as_ref().map(|p| p.as_str()) != Some(phone) {
+        event!(
+          tracing::Level::ERROR,
+          "Phone number update mismatch! user: {}, requested: {}, actual in DB: {:?}",
+          user_uuid,
+          phone,
+          updated_phone
+        );
+      }
       
       event!(
         tracing::Level::INFO,
