@@ -3,7 +3,7 @@ use crate::biz::authentication::jwt::{Authorization, UserUuid};
 use crate::biz::user::image_asset::{get_user_image_asset, upload_user_image_asset};
 use crate::biz::user::user_delete::delete_user;
 use crate::biz::user::user_info::{get_profile, get_user_workspace_info, update_user};
-use crate::biz::user::user_search::search_users_by_email;
+use crate::biz::user::user_search::{get_uid_by_email_or_phone, search_users_by_email};
 use crate::biz::user::user_verify::{send_phone_otp, verify_and_bind_phone, verify_token};
 use crate::state::AppState;
 use actix_http::StatusCode;
@@ -16,8 +16,9 @@ use app_error::AppError;
 use database_entity::dto::{AFUserProfile, AFUserWorkspaceInfo, UserImageAssetSource};
 use semver::Version;
 use shared_entity::dto::auth_dto::{
-  DeleteUserQuery, SearchUserQuery, SearchUserResponse, SendPhoneOtpParams, SignInTokenResponse,
-  UpdateUserParams, VerifyAndBindPhoneParams,
+  DeleteUserQuery, GetUidByEmailOrPhoneQuery, GetUidByEmailOrPhoneResponse, SearchUserQuery,
+  SearchUserResponse, SendPhoneOtpParams, SignInTokenResponse, UpdateUserParams,
+  VerifyAndBindPhoneParams,
 };
 use shared_entity::response::AppResponseError;
 use shared_entity::response::{AppResponse, JsonAppResponse};
@@ -38,6 +39,7 @@ pub fn user_scope() -> Scope {
         .route(web::get().to(get_user_image_asset_handler)),
     )
     .service(web::resource("/search").route(web::get().to(search_user_handler)))
+    .service(web::resource("/get-uid").route(web::get().to(get_uid_by_email_or_phone_handler)))
     .service(web::resource("").route(web::delete().to(delete_user_handler)))
 }
 
@@ -239,4 +241,30 @@ async fn search_user_handler(
       Ok(AppResponse::Ok().with_data(users).into())
     },
   }
+}
+
+#[tracing::instrument(skip(state, auth, query), err)]
+async fn get_uid_by_email_or_phone_handler(
+  auth: Authorization,
+  state: Data<AppState>,
+  query: web::Query<GetUidByEmailOrPhoneQuery>,
+) -> Result<JsonAppResponse<GetUidByEmailOrPhoneResponse>, AppError> {
+  let identifier = query.identifier.trim();
+
+  if identifier.is_empty() {
+    return Err(AppError::InvalidRequest(
+      "identifier parameter is required".to_string(),
+    )
+    .into());
+  }
+
+  let (uid, identifier_type) =
+    get_uid_by_email_or_phone(&state.pg_pool, identifier).await?;
+
+  let response = GetUidByEmailOrPhoneResponse {
+    uid,
+    identifier_type,
+  };
+
+  Ok(AppResponse::Ok().with_data(response).into())
 }

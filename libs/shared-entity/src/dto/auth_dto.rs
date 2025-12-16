@@ -108,3 +108,14 @@ pub struct VerifyAndBindPhoneParams {
 pub struct SendPhoneOtpParams {
   pub phone: String,
 }
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct GetUidByEmailOrPhoneQuery {
+  pub identifier: String, // 手机号或邮箱
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct GetUidByEmailOrPhoneResponse {
+  pub uid: i64,
+  pub identifier_type: String, // "email" 或 "phone"
+}
