@@ -197,12 +197,9 @@ async fn send_phone_otp_handler(
     .map_err(AppResponseError::from)?;
   
   let current_phone = user_info.phone;
-  
-  // Always use standard phone change flow for logged-in users
-  // This works for:
-  // 1. SSO users with temporary phone (e.g., +86temp...) - will set phone_change state
-  // 2. Users with real phone - will set phone_change state for phone change
-  // 3. Users with no phone (unexpected but handled) - will set phone_change state
+
+  // Use the standard phone change flow for all logged-in users.
+  // This initiates phone_change in GoTrue and sends OTP via SMS (channel=sms).
   event!(
     tracing::Level::INFO,
     "Logged-in user {} (current phone: {}) binding/changing to phone {} - using standard phone change flow",
