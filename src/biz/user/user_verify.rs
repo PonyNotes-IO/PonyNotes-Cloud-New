@@ -35,20 +35,22 @@ pub async fn verify_token(access_token: &str, state: &AppState) -> Result<bool, 
     event!(tracing::Level::INFO, "create new user:{}", new_uid);
     
     // Prepare email and phone for user creation
-    // Business requirement: phone number cannot be empty, but email can be empty
     let email = if user.email.is_empty() {
       None
     } else {
       Some(user.email.as_str())
     };
     
-    // If phone is empty (e.g., WeChat login without phone binding),
-    // generate a temporary phone number based on user UUID to satisfy the requirement
+    // Determine if this is an SSO user (no email) or email-registered user
+    let is_sso_user = user.email.is_empty();
+    
+    // Only generate temporary phone number for SSO users (e.g., WeChat login without phone binding)
+    // Email-registered users can have no phone number, they can bind it later if needed
     // Format: +86temp{uuid前12位数字} to follow E.164-like format
-    let temp_phone: Option<String> = if user.phone.is_empty() {
+    let temp_phone: Option<String> = if is_sso_user && user.phone.is_empty() {
       event!(
         tracing::Level::INFO,
-        "Phone is empty for user {}, generating temporary phone number",
+        "SSO user {} has no phone, generating temporary phone number",
         user_uuid
       );
       // Generate a temporary phone number: +86temp + first 12 digits of UUID (without dashes)
@@ -58,12 +60,14 @@ pub async fn verify_token(access_token: &str, state: &AppState) -> Result<bool, 
       None
     };
     
-    // Use actual phone if available, otherwise use temporary phone
+    // Use actual phone if available, otherwise use temporary phone (only for SSO users)
     let phone = if !user.phone.is_empty() {
       Some(user.phone.as_str())
     } else if let Some(ref temp) = temp_phone {
+      // Only use temp phone for SSO users
       Some(temp.as_str())
     } else {
+      // Email-registered users can have no phone
       None
     };
     
@@ -361,10 +365,18 @@ pub async fn send_phone_otp(
         phone,
         e
       );
-      Err(AppError::InvalidRequest(format!(
-        "发送验证码失败: {}",
-        e
-      )))
+      
+      // Check if the error is about phone number already being registered
+      let error_msg = e.to_string();
+      let friendly_msg = if error_msg.contains("already been registered") 
+        || error_msg.contains("phone number has already") 
+        || error_msg.contains("phone exists") {
+        format!("该手机号 {} 已被其他用户注册，请使用其他手机号", phone)
+      } else {
+        format!("发送验证码失败: {}", error_msg)
+      };
+      
+      Err(AppError::InvalidRequest(friendly_msg))
     }
   }
 }
