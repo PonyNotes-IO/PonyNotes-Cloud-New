@@ -196,26 +196,25 @@ pub async fn verify_and_bind_phone(
     .map(|u| u.phone.as_str())
     .unwrap_or("");
   
-  // Since SSO users always have a phone (even if temporary), this should always be PhoneChange
-  // Only use sms type if user truly has no phone (shouldn't happen due to DB constraints)
-  let verify_type = if current_phone.is_empty() {
-    event!(
-      tracing::Level::WARN,
-      "User {} has no phone in GoTrue (unexpected), using sms verification type for phone: {}",
-      user_uuid,
-      phone
-    );
-    gotrue::params::VerifyType::Sms
-  } else {
-    event!(
-      tracing::Level::INFO,
-      "User {} has phone {}, binding new phone {} - using PhoneChange verification type",
-      user_uuid,
-      current_phone,
-      phone
-    );
-    gotrue::params::VerifyType::PhoneChange
-  };
+  // IMPORTANT: This function is ONLY called from /api/user/verify-phone endpoint,
+  // which is ONLY used for logged-in users binding/changing their phone number.
+  // All callers use send_phone_otp() which calls GoTrue's update_user API.
+  // GoTrue's update_user API ALWAYS creates a phone_change record, even if the user has no current phone.
+  // Therefore, we MUST always use PhoneChange verification type here.
+  // 
+  // This does NOT affect other login flows:
+  // - Normal phone login: Uses GoTrue's /token or /otp + /verify endpoints directly
+  // - Forgot password: Uses GoTrue's /recover + /verify endpoints directly
+  // - These flows never call this function
+  let verify_type = gotrue::params::VerifyType::PhoneChange;
+  
+  event!(
+    tracing::Level::INFO,
+    "User {} (current phone: {}) verifying phone {} - using PhoneChange verification type (always, because OTP was sent via update_user)",
+    user_uuid,
+    if current_phone.is_empty() { "(none)" } else { current_phone },
+    phone
+  );
   
   let verify_type_str = match verify_type {
     gotrue::params::VerifyType::Sms => "sms",
@@ -225,12 +224,22 @@ pub async fn verify_and_bind_phone(
   };
   event!(
     tracing::Level::INFO,
+    "Verifying phone OTP for user: {}, phone: {} (raw), verification_type: {}",
+    user_uuid,
+    phone,
+    verify_type_str
+  );
+  
+  event!(
+    tracing::Level::INFO,
     "Verifying phone OTP for user: {}, phone: {}, verification_type: {}",
     user_uuid,
     phone,
     verify_type_str
   );
   
+  // Note: GoTrue's validatePhone will normalize the phone format (remove + prefix)
+  // Frontend should ensure consistent format, but GoTrue will handle normalization
   let verify_params = VerifyParams {
     type_: verify_type,
     phone: phone.to_string(),
@@ -334,6 +343,7 @@ pub async fn send_phone_otp(
   
   // Call GoTrue's update_user API to initiate phone change
   // IMPORTANT: Must set channel to "sms" to trigger SMS sending
+  // Note: GoTrue's validatePhone will normalize the phone format (remove + prefix)
   let mut update_params = UpdateGotrueUserParams::new();
   update_params.phone = phone.to_string();
   update_params.channel = "sms".to_string(); // This is critical!
