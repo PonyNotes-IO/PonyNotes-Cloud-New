@@ -15,3 +15,4 @@ pub mod resource_usage;
 pub mod template;
 pub mod user;
 pub mod workspace;
+pub mod integrations;

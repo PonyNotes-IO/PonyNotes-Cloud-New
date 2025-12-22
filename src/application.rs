@@ -56,6 +56,7 @@ use crate::api::ai::ai_completion_scope;
 use crate::api::chat::chat_scope;
 use crate::api::data_import::data_import_scope;
 use crate::api::file_storage::file_storage_scope;
+use crate::api::integrations::baidu::baidu_scope;
 use crate::api::guest::sharing_scope;
 use crate::api::invite_code::invite_code_scope;
 use crate::api::metrics::metrics_scope;
@@ -162,6 +163,7 @@ pub async fn run_actix_server(
       .service(collab_scope())
       .service(ws_scope())
       .service(file_storage_scope())
+      .service(baidu_scope())
       .service(metrics_scope())
       .service(search_scope())
       .service(template_scope())
