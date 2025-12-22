@@ -5,6 +5,7 @@ use crate::state::AppState;
 use crate::biz::authentication::jwt::Authorization;
 use serde::Deserialize;
 use shared_entity::response::{AppResponse, JsonAppResponse};
+use app_error::ErrorCode;
 use serde_json::json;
 use tracing::{instrument, event};
 use infra::env_util::get_env_var;
@@ -67,7 +68,7 @@ async fn get_authorize_url(state: Data<AppState>) -> Result<JsonAppResponse<serd
   let client_id = get_env_var("BAIDU_CLOUD_APP_KEY", "");
   let redirect_uri = get_env_var("BAIDU_CLOUD_REDIRECT_URI", "http://localhost:8080/auth/callback");
   if client_id.is_empty() {
-    return Ok(AppResponse::BadRequest("Baidu config not set on server".to_string()).into());
+    return Ok(AppResponse::new(ErrorCode::InvalidRequest, "Baidu config not set on server".to_string()).into());
   }
   let params = [
     ("response_type", "code"),
@@ -105,7 +106,7 @@ async fn post_exchange_code(
   let client_secret = get_env_var("BAIDU_CLOUD_SECRET_KEY", "");
   let redirect_uri = get_env_var("BAIDU_CLOUD_REDIRECT_URI", "http://localhost:8080/auth/callback");
   if client_id.is_empty() || client_secret.is_empty() {
-    return Ok(AppResponse::BadRequest("Baidu client secret not configured on server".to_string()).into());
+    return Ok(AppResponse::new(ErrorCode::InvalidRequest, "Baidu client secret not configured on server".to_string()).into());
   }
 
   // Exchange code for token
@@ -129,7 +130,7 @@ async fn post_exchange_code(
   let text = resp.text().await.unwrap_or_default();
   if !status.is_success() {
     event!(tracing::Level::ERROR, "baidu token exchange failed: {} {}", status, text);
-    return Ok(AppResponse::InternalServerError("Baidu token exchange failed".to_string()).into());
+    return Ok(AppResponse::new(ErrorCode::Internal, "Baidu token exchange failed".to_string()).into());
   }
   let data: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({}));
 

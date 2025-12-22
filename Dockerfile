@@ -14,8 +14,6 @@ FROM chef as builder
 # Update package lists and install protobuf-compiler along with other build dependencies
 RUN apt update && apt install -y protobuf-compiler lld clang
 
-# Specify a default value for FEATURES; it could be an empty string if no features are enabled by default
-ARG FEATURES=""
 ARG PROFILE="release"
 ARG DATABASE_URL=postgres://postgres:password@postgres:5432/postgres
 ENV DATABASE_URL=$DATABASE_URL
@@ -50,15 +48,38 @@ RUN if [ -n "$DATABASE_URL" ] && (command -v cargo-sqlx >/dev/null 2>&1 || cargo
       echo "⚠ Using existing cache. If build fails, run './prepare_sqlx_cache.sh' locally first."; \
     fi
 
-# Enable SQLX_OFFLINE to use pre-generated sqlx-data.json and avoid database connection during build
-ENV SQLX_OFFLINE=true
-
-# Build the project
-RUN echo "Building with profile: ${PROFILE}, features: ${FEATURES}, "
-RUN if [ "$PROFILE" = "release" ]; then \
-      cargo build --release --features "${FEATURES}" --bin appflowy_cloud; \
+# Build the project.
+# Attempt to prepare SQLx cache and, if successful, build with SQLX_OFFLINE in the same RUN.
+# If prepare fails (e.g. DB not reachable during docker build), fall back to building without SQLX_OFFLINE.
+RUN echo "Building with profile: ${PROFILE}" && \
+    if [ "$PROFILE" = "release" ]; then \
+      echo "Profile is release. Checking for sqlx cache or attempting prepare..."; \
+      if cargo sqlx prepare --workspace >/dev/null 2>&1; then \
+        echo "SQLx cache prepared successfully - building with SQLX_OFFLINE=true"; \
+        SQLX_OFFLINE=true cargo build --release --bin appflowy_cloud; \
+      elif [ -f ./sqlx-data.json ] || [ -d ./.sqlx ]; then \
+        echo "Found existing sqlx cache in workspace - building with SQLX_OFFLINE=true"; \
+        SQLX_OFFLINE=true cargo build --release --bin appflowy_cloud; \
+      else \
+        echo "ERROR: sqlx cache not found and 'cargo sqlx prepare' failed."; \
+        echo "Please run 'cargo sqlx prepare --workspace' locally (or run ./prepare_sqlx_cache.sh) and include the generated 'sqlx-data.json' or '.sqlx' directory in the build context."; \
+        echo "Aborting build to avoid obscure compile-time sqlx errors (see devops-docs for details)."; \
+        exit 1; \
+      fi; \
     else \
-      cargo build --features "${FEATURES}" --bin appflowy_cloud; \
+      echo "Profile is debug. Checking for sqlx cache or attempting prepare..."; \
+      if cargo sqlx prepare --workspace >/dev/null 2>&1; then \
+        echo "SQLx cache prepared successfully - building with SQLX_OFFLINE=true"; \
+        SQLX_OFFLINE=true cargo build --bin appflowy_cloud; \
+      elif [ -f ./sqlx-data.json ] || [ -d ./.sqlx ]; then \
+        echo "Found existing sqlx cache in workspace - building with SQLX_OFFLINE=true"; \
+        SQLX_OFFLINE=true cargo build --bin appflowy_cloud; \
+      else \
+        echo "ERROR: sqlx cache not found and 'cargo sqlx prepare' failed."; \
+        echo "Please run 'cargo sqlx prepare --workspace' locally (or run ./prepare_sqlx_cache.sh) and include the generated 'sqlx-data.json' or '.sqlx' directory in the build context."; \
+        echo "Aborting build to avoid obscure compile-time sqlx errors (see devops-docs for details)."; \
+        exit 1; \
+      fi; \
     fi
 
 FROM debian:bookworm-slim AS runtime

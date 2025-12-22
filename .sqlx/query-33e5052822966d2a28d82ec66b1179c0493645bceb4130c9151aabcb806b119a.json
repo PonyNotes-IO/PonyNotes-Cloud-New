@@ -1,0 +1,83 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n    SELECT id, provider, user_uid, access_token, refresh_token, expires_at, scopes, meta, is_revoked, created_at, updated_at\n    FROM user_cloud_integrations\n    WHERE user_uid = $1 AND provider = $2\n    ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "provider",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "user_uid",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "access_token",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "refresh_token",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "expires_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "scopes",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "meta",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 8,
+        "name": "is_revoked",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 9,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "33e5052822966d2a28d82ec66b1179c0493645bceb4130c9151aabcb806b119a"
+}

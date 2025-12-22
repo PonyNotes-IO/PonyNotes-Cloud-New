@@ -694,6 +694,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-segmentation",
+ "urlencoding",
  "uuid",
  "validator",
  "workspace-template",
