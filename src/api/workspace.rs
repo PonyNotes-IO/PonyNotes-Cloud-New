@@ -163,7 +163,7 @@ pub fn workspace_scope() -> Scope {
                 .route(web::get().to(get_workspace_member_v1_handler)),
         )
         .service(
-            web::resource("/api/workspace/{workspace_id}/collab/{object_id}")
+            web::resource("/{workspace_id}/collab/{object_id}")
                 .app_data(
                     PayloadConfig::new(5 * 1024 * 1024), // 5 MB
                 )

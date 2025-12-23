@@ -159,8 +159,10 @@ pub async fn run_actix_server(
       .service(invite_code_scope())
       .service(ai_completion_scope())
       .service(subscription_scope())
-      .service(chat_scope())
+      // Register collab_scope earlier to avoid route matching conflicts where a more
+      // generic scope (e.g., chat_scope) may capture the same path and return 405 for POST.
       .service(collab_scope())
+      .service(chat_scope())
       .service(ws_scope())
       .service(file_storage_scope())
       .service(baidu_scope())

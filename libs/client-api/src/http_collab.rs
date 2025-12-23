@@ -41,10 +41,7 @@ use uuid::Uuid;
 impl Client {
   #[instrument(level = "info", skip_all, err)]
   pub async fn create_collab(&self, params: CreateCollabParams) -> Result<(), AppResponseError> {
-    let url = format!(
-      "{}/api/workspace/{}/collab/{}",
-      self.base_url, params.workspace_id, &params.object_id
-    );
+    // Prepare payload bytes and compression
     let bytes = params
       .to_bytes()
       .map_err(|err| AppError::Internal(err.into()))?;
@@ -56,18 +53,82 @@ impl Client {
     )
     .await?;
 
-    #[allow(unused_mut)]
-    let mut builder = self
-      .http_client_with_auth_compress(Method::POST, &url)
-      .await?;
+    // Candidate URLs to try. Start with the default path, then try common variants when 404/405 occurs.
+    let mut candidate_urls = vec![format!(
+      "{}/api/workspace/{}/collab/{}",
+      self.base_url, params.workspace_id, &params.object_id
+    )];
 
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-      builder = builder.timeout(std::time::Duration::from_secs(60));
+    // v1 variant
+    candidate_urls.push(format!(
+      "{}/api/workspace/v1/{}/collab/{}",
+      self.base_url, params.workspace_id, &params.object_id
+    ));
+
+    // no 'api' prefix variant (some deployments may expose without /api)
+    candidate_urls.push(format!(
+      "{}/workspace/{}/collab/{}",
+      self.base_url, params.workspace_id, &params.object_id
+    ));
+
+    // Try each candidate URL until one succeeds or all fail.
+    let mut last_err: Option<AppResponseError> = None;
+    for url in candidate_urls {
+      #[allow(unused_mut)]
+      let mut builder = match self.http_client_with_auth_compress(Method::POST, &url).await {
+        Ok(b) => b,
+        Err(e) => {
+          last_err = Some(e);
+          continue;
+        }
+      };
+
+      #[cfg(not(target_arch = "wasm32"))]
+      {
+        builder = builder.timeout(std::time::Duration::from_secs(60));
+      }
+
+      event!(tracing::Level::INFO, "create_collab: sending POST to {}", &url);
+      let resp = match builder.body(compress_bytes.clone()).send().await {
+        Ok(r) => r,
+        Err(e) => {
+          event!(tracing::Level::ERROR, "create_collab: failed to send to {}: {}", &url, e.to_string());
+          last_err = Some(AppResponseError::from(AppError::Internal(anyhow::anyhow!(e.to_string()))));
+          continue;
+        }
+      };
+
+      // If server returns 404 (not found) or 405 (method not allowed) for this URL,
+      // try the next candidate URL. Some deployments expose slightly different paths
+      // or require different prefixes/versions.
+      let status_code = resp.status().as_u16();
+      if status_code == 404 || status_code == 405 {
+        let body = resp.text().await.unwrap_or_default();
+        event!(
+          tracing::Level::WARN,
+          "create_collab: candidate url returned status {}, url: {}, body_snippet: {}",
+          status_code,
+          &url,
+          if body.len() > 200 { format!("{}...(truncated)", &body[..200]) } else { body.clone() }
+        );
+        last_err = Some(AppResponseError::new(
+          app_error::ErrorCode::Unhandled,
+          format!("got error code: {} body: {}", status_code, body),
+        ));
+        continue;
+      }
+
+      // For non-404/405 responses, let the normal response processor handle success or convert to error.
+      return process_response_error(resp).await;
     }
 
-    let resp = builder.body(compress_bytes).send().await?;
-    process_response_error(resp).await
+    // All candidates failed - return the last error if any.
+    Err(last_err.unwrap_or_else(|| {
+      AppResponseError::new(
+        app_error::ErrorCode::Unhandled,
+        "Failed to create collab: unknown error".to_string(),
+      )
+    }))
   }
 
   #[instrument(level = "info", skip_all, err)]
