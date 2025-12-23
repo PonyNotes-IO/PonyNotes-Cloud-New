@@ -24,6 +24,7 @@ use shared_entity::response::AppResponseError;
 use shared_entity::response::{AppResponse, JsonAppResponse};
 use tracing::event;
 use uuid::Uuid;
+use serde_json::json;
 
 pub fn user_scope() -> Scope {
   web::scope("/api/user")
@@ -41,6 +42,11 @@ pub fn user_scope() -> Scope {
     .service(web::resource("/search").route(web::get().to(search_user_handler)))
     .service(web::resource("/get-uid").route(web::get().to(get_uid_by_email_or_phone_handler)))
     .service(web::resource("").route(web::delete().to(delete_user_handler)))
+    .service(
+      web::resource("/notification-preferences")
+        .route(web::get().to(get_notification_preferences_handler))
+        .route(web::post().to(post_notification_preferences_handler)),
+    )
 }
 
 #[tracing::instrument(skip(state, path), err)]
@@ -209,6 +215,68 @@ async fn send_phone_otp_handler(
   );
   send_phone_otp(&auth.token, &params.phone, state.as_ref()).await?;
   
+  Ok(AppResponse::Ok().into())
+}
+
+#[tracing::instrument(skip(state, auth), err)]
+async fn get_notification_preferences_handler(
+  auth: Authorization,
+  state: Data<AppState>,
+) -> Result<JsonAppResponse<serde_json::Value>> {
+  let user_uuid = auth.uuid()?;
+
+  // read user profile to get metadata
+  let profile_opt = database::workspace::select_user_profile(&state.pg_pool, &user_uuid)
+    .await
+    .map_err(AppResponseError::from)?;
+
+  let notification_settings = profile_opt
+    .as_ref()
+    .and_then(|p| p.metadata.as_ref())
+    .and_then(|m| m.get("notification_settings").cloned())
+    .unwrap_or_else(|| json!({
+      "notify_at_me": true,
+      "notify_pending": true,
+      "notify_permission_change": true,
+      "notify_join_team": true,
+      "notify_clip": true
+    }));
+
+  Ok(AppResponse::Ok().with_data(notification_settings).into())
+}
+
+#[derive(serde::Deserialize)]
+struct NotificationPreferencesPayload {
+  notify_at_me: Option<bool>,
+  notify_pending: Option<bool>,
+  notify_permission_change: Option<bool>,
+  notify_join_team: Option<bool>,
+  notify_clip: Option<bool>,
+}
+
+#[tracing::instrument(skip(state, auth, payload), err)]
+async fn post_notification_preferences_handler(
+  auth: Authorization,
+  payload: Json<NotificationPreferencesPayload>,
+  state: Data<AppState>,
+) -> Result<JsonAppResponse<()>> {
+  let user_uuid = auth.uuid()?;
+  let prefs = payload.into_inner();
+
+  let mut obj = serde_json::Map::new();
+  if let Some(v) = prefs.notify_at_me { obj.insert("notify_at_me".to_string(), serde_json::json!(v)); }
+  if let Some(v) = prefs.notify_pending { obj.insert("notify_pending".to_string(), serde_json::json!(v)); }
+  if let Some(v) = prefs.notify_permission_change { obj.insert("notify_permission_change".to_string(), serde_json::json!(v)); }
+  if let Some(v) = prefs.notify_join_team { obj.insert("notify_join_team".to_string(), serde_json::json!(v)); }
+  if let Some(v) = prefs.notify_clip { obj.insert("notify_clip".to_string(), serde_json::json!(v)); }
+
+  let metadata = json!({ "notification_settings": serde_json::Value::Object(obj) });
+
+  // merge into user metadata
+  database::user::update_user(&state.pg_pool, &user_uuid, None, None, None, Some(metadata.into()))
+    .await
+    .map_err(AppResponseError::from)?;
+
   Ok(AppResponse::Ok().into())
 }
 
