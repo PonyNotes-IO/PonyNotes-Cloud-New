@@ -161,15 +161,42 @@ echo "  ssh root@8.152.101.166 \"docker exec -it docker-compose-appflowy_cloud-1
 echo ""
 
 # 健康检查
-echo -e "${YELLOW}[健康检查] 测试API响应...${NC}"
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://8.152.101.166/api/health || echo "000")
+echo -e "${YELLOW}[健康检查] 测试AI聊天模型API...${NC}"
+RESPONSE=$(curl -s http://8.152.101.166/api/ai/chat/models || echo "")
 
-if [ "$HTTP_CODE" = "200" ]; then
-    echo -e "${GREEN}✅ API健康检查通过 (HTTP $HTTP_CODE)${NC}"
-elif [ "$HTTP_CODE" = "000" ]; then
-    echo -e "${YELLOW}⚠️  无法连接到API（可能还在启动中，请等待30秒后手动检查）${NC}"
+if [ -n "$RESPONSE" ]; then
+    echo -e "${BLUE}API响应数据：${NC}"
+    echo "$RESPONSE" | jq '.' 2>/dev/null || echo "$RESPONSE"
+
+    # 检查响应是否包含预期的结构
+    if echo "$RESPONSE" | grep -q '"code":0' && echo "$RESPONSE" | grep -q '"models":'; then
+        MODEL_COUNT=$(echo "$RESPONSE" | grep -o '"id":"[^"]*"' | wc -l)
+        echo -e "${GREEN}✅ AI聊天模型API健康检查通过 (返回了 $MODEL_COUNT 个模型)${NC}"
+    else
+        echo -e "${YELLOW}⚠️  API响应格式异常${NC}"
+    fi
 else
-    echo -e "${YELLOW}⚠️  API返回异常状态码: HTTP $HTTP_CODE${NC}"
+    echo -e "${YELLOW}⚠️  无法连接到AI聊天模型API（可能还在启动中，请等待30秒后手动检查）${NC}"
+fi
+echo ""
+
+# 订阅计划接口测试
+echo -e "${YELLOW}[健康检查] 测试订阅计划API...${NC}"
+PLANS_RESPONSE=$(curl -s http://8.152.101.166/api/subscription/plans || echo "")
+
+if [ -n "$PLANS_RESPONSE" ]; then
+    echo -e "${BLUE}订阅计划API响应数据：${NC}"
+    echo "$PLANS_RESPONSE" | jq '.' 2>/dev/null || echo "$PLANS_RESPONSE"
+
+    # 检查响应是否包含预期的结构
+    if echo "$PLANS_RESPONSE" | grep -q '"code":0' && echo "$PLANS_RESPONSE" | grep -q '"data":'; then
+        PLAN_COUNT=$(echo "$PLANS_RESPONSE" | grep -o '"plan_code":"[^"]*"' | wc -l)
+        echo -e "${GREEN}✅ 订阅计划API健康检查通过 (返回了 $PLAN_COUNT 个订阅计划)${NC}"
+    else
+        echo -e "${YELLOW}⚠️  订阅计划API响应格式异常${NC}"
+    fi
+else
+    echo -e "${YELLOW}⚠️  无法连接到订阅计划API（可能还在启动中，请等待30秒后手动检查）${NC}"
 fi
 echo ""
 
