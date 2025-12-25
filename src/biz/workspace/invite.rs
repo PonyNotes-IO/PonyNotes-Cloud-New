@@ -8,6 +8,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use database_entity::dto::{AFRole, InvitationCodeInfo, WorkspaceInviteToken};
+use crate::biz::notification::ops::create_workspace_notification;
 
 const INVITE_LINK_CODE_LENGTH: usize = 16;
 
@@ -20,6 +21,17 @@ pub async fn generate_workspace_invite_token(
   let code = generate_workspace_invite_code();
   let expires_at = validity_period_hours.map(|v| chrono::Utc::now() + chrono::Duration::hours(v));
   insert_workspace_invite_code(pg_pool, workspace_id, &code, expires_at.as_ref()).await?;
+
+  // 创建通知：工作空间所有者收到"已生成邀请链接"的通知
+  let payload = serde_json::json!({
+    "invite_code": code,
+    "expires_at": expires_at,
+    "created_at": chrono::Utc::now().timestamp(),
+    "message": "您的工作空间邀请链接已生成"
+  });
+  if let Err(err) = create_workspace_notification(pg_pool, workspace_id, "workspace_invite_created", &payload, None).await {
+    tracing::warn!("Failed to create workspace invite notification: {:?}", err);
+  }
 
   Ok(WorkspaceInviteToken { code: Some(code) })
 }
@@ -40,6 +52,19 @@ pub async fn join_workspace_invite_by_code(
 ) -> Result<Uuid, AppError> {
   let invited_workspace_id = select_invited_workspace_id(pg_pool, invitation_code).await?;
   upsert_workspace_member_uid(pg_pool, &invited_workspace_id, uid, AFRole::Member).await?;
+
+  // 创建通知：工作空间所有者收到"新成员加入"的通知
+  let payload = serde_json::json!({
+    "invite_code": invitation_code,
+    "joined_uid": uid,
+    "joined_at": chrono::Utc::now().timestamp(),
+    "role": "Member",
+    "message": "新成员通过邀请链接加入了工作空间"
+  });
+  if let Err(err) = create_workspace_notification(pg_pool, &invited_workspace_id, "workspace_member_joined", &payload, None).await {
+    tracing::warn!("Failed to create workspace member joined notification: {:?}", err);
+  }
+
   Ok(invited_workspace_id)
 }
 

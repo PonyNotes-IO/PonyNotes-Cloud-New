@@ -59,6 +59,7 @@ use crate::api::file_storage::file_storage_scope;
 use crate::api::integrations::baidu::baidu_scope;
 use crate::api::guest::sharing_scope;
 use crate::api::invite_code::invite_code_scope;
+use crate::api::invite_landing;
 use crate::api::metrics::metrics_scope;
 use crate::api::search::search_scope;
 use crate::api::server_info::server_info_scope;
@@ -157,6 +158,8 @@ pub async fn run_actix_server(
       .service(user_scope())
       .service(workspace_scope())
       .service(invite_code_scope())
+      // Short invite landing/redirect route for invite links
+      .route("/r/invite/{code}", web::get().to(invite_landing::invite_landing_handler))
       .service(ai_completion_scope())
       .service(subscription_scope())
       // Register collab_scope earlier to avoid route matching conflicts where a more
