@@ -715,6 +715,9 @@ pub struct AFWorkspaceSettings {
 
   #[serde(default)]
   pub ai_model: String,
+
+  #[serde(default)]
+  pub only_owner_can_create_team_workspace: bool,
 }
 
 impl Default for AFWorkspaceSettings {
@@ -722,6 +725,7 @@ impl Default for AFWorkspaceSettings {
     Self {
       disable_search_indexing: false,
       ai_model: "Auto".to_string(),
+      only_owner_can_create_team_workspace: true,
     }
   }
 }
@@ -732,6 +736,8 @@ pub struct AFWorkspaceSettingsChange {
   pub disable_search_indexing: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub ai_model: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub only_owner_can_create_team_workspace: Option<bool>,
 }
 
 impl AFWorkspaceSettingsChange {
@@ -739,6 +745,7 @@ impl AFWorkspaceSettingsChange {
     Self {
       disable_search_indexing: None,
       ai_model: None,
+      only_owner_can_create_team_workspace: None,
     }
   }
   pub fn disable_search_indexing(mut self, disable_search_indexing: bool) -> Self {
@@ -747,6 +754,10 @@ impl AFWorkspaceSettingsChange {
   }
   pub fn ai_model(mut self, ai_model: String) -> Self {
     self.ai_model = Some(ai_model);
+    self
+  }
+  pub fn only_owner_can_create_team_workspace(mut self, only_owner_can_create_team_workspace: bool) -> Self {
+    self.only_owner_can_create_team_workspace = Some(only_owner_can_create_team_workspace);
     self
   }
 }
