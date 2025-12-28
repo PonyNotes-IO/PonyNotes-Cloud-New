@@ -31,6 +31,8 @@ COPY --from=planner /app/recipe.json recipe.json
 ENV CARGO_BUILD_JOBS=4
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+# 禁用增量编译以减少内存占用（Docker 构建不需要增量）
+ENV CARGO_INCREMENTAL=0
 # Reduce memory usage during compilation
 RUN echo "Building appflowy cloud with profile: ${PROFILE}"
 # Use BuildKit cache mounts to persist cargo registry/git and sccache between builds.

@@ -95,6 +95,8 @@ dashmap.workspace = true
 async-stream.workspace = true
 futures.workspace = true
 semver = "1.0.22"
+log = "0.4"
+html-escape = "0.2"
 tonic.workspace = true
 prost.workspace = true
 tonic-proto.workspace = true
@@ -293,9 +295,10 @@ collab-plugins = { version = "0.2.0" }
 smallvec = "1.15.0"
 
 [profile.release]
-lto = true
+lto = "thin"           # 使用 thin LTO，内存占用减少 50-70%
 opt-level = 3
-codegen-units = 1
+codegen-units = 16     # 允许并行编译，减少峰值内存
+strip = "debuginfo"    # 去除调试信息，减小二进制体积
 
 [profile.profiling]
 inherits = "release"

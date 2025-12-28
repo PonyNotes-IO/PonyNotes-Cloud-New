@@ -15,3 +15,4 @@ pub mod util;
 pub mod workspace;
 pub mod ws;
 pub mod integrations;
+pub mod invite_landing;

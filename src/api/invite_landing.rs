@@ -2,9 +2,7 @@ use actix_web::{web::{Data, Path}, HttpResponse, Result, HttpRequest};
 use crate::state::AppState;
 use crate::biz::authentication::jwt::OptionalUserUuid;
 use crate::biz::workspace::invite::{join_workspace_invite_by_code};
-use crate::libs::appflowy_proto as _unused;
-use database::workspace::{select_invited_workspace_id, select_workspace, select_workspace_name_from_workspace_id};
-use uuid::Uuid;
+use database::workspace::{select_invited_workspace_id, select_workspace};
 
 /// Short invite URL handler.
 /// - If user is authenticated: join workspace by code and redirect to workspace page.
@@ -49,7 +47,7 @@ pub async fn invite_landing_handler(
 
   // Not logged in (or join failed) — render simple landing page
   let workspace = select_workspace(&state.pg_pool, &workspace_id).await.ok();
-  let workspace_name = workspace.as_ref().map(|w| w.workspace_name.clone()).unwrap_or_else(|| "Workspace".to_string());
+  let workspace_name = workspace.as_ref().and_then(|w| w.workspace_name.clone()).unwrap_or_else(|| "Workspace".to_string());
 
   // Deep link to app
   let app_deep_link = format!("ponynotes://invitation-callback?workspace_id={}&code={}", workspace_id, code);
