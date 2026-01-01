@@ -408,6 +408,67 @@ impl Client {
     Ok(response)
   }
 
+  /// Record sign-in log to gotrue
+  /// 
+  /// This method sends a sign-in log record to the gotrue service.
+  /// The log includes information about the sign-in attempt such as provider,
+  /// success status, and optional metadata.
+  #[instrument(level = "debug", skip_all, err)]
+  pub async fn record_sign_in_log(
+    &self,
+    provider: Option<String>,
+    success: bool,
+    error_reason: Option<String>,
+    metadata: Option<serde_json::Value>,
+  ) -> Result<(), AppResponseError> {
+    use reqwest::Method;
+    use serde_json::json;
+
+    // Get access token for authentication
+    let access_token = self.access_token()?;
+    
+    // Build request body
+    let mut body = json!({
+      "success": success,
+    });
+    
+    if let Some(p) = provider {
+      body["provider"] = json!(p);
+    }
+    
+    if let Some(er) = error_reason {
+      body["error_reason"] = json!(er);
+    }
+    
+    if let Some(m) = metadata {
+      body["metadata"] = m;
+    }
+
+    // Construct URL - use gotrue base URL
+    let url = format!("{}/user/sign_in_log", self.gotrue_client.base_url);
+    
+    // Send POST request with Bearer token
+    let resp = self
+      .cloud_client
+      .request(Method::POST, &url)
+      .bearer_auth(access_token)
+      .json(&body)
+      .send()
+      .await?;
+
+    if resp.status().is_success() {
+      Ok(())
+    } else {
+      // Try to parse error response
+      let status = resp.status();
+      let error_text = resp.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+      Err(AppResponseError::new(
+        ErrorCode::Internal,
+        format!("Failed to record sign-in log: {} - {}", status, error_text),
+      ))
+    }
+  }
+
   /// Attempts to sign in using a URL, extracting refresh_token from the URL.
   /// It looks like, e.g., `appflowy-flutter://#access_token=...&expires_in=3600&provider_token=...&refresh_token=...&token_type=bearer`.
   ///
