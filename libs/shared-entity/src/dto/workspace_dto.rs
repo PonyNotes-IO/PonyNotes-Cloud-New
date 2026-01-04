@@ -51,6 +51,25 @@ pub struct WorkspaceMemberInvitation {
   pub wait_email_send: bool,
 }
 
+/// 支持单个邀请对象或邀请对象数组的枚举类型
+/// 使用 #[serde(untagged)] 让 serde 自动判断是单个对象还是数组
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum SingleOrVecInvitation {
+  Single(WorkspaceMemberInvitation),
+  Vec(Vec<WorkspaceMemberInvitation>),
+}
+
+impl SingleOrVecInvitation {
+  /// 转换为 Vec<WorkspaceMemberInvitation>
+  pub fn into_vec(self) -> Vec<WorkspaceMemberInvitation> {
+    match self {
+      SingleOrVecInvitation::Single(invitation) => vec![invitation],
+      SingleOrVecInvitation::Vec(invitations) => invitations,
+    }
+  }
+}
+
 impl Default for WorkspaceMemberInvitation {
   fn default() -> Self {
     Self {

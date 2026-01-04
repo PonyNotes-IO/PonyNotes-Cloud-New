@@ -76,7 +76,7 @@ use database::pg_row::AFCollabMemberInvite;
 use semver::Version;
 use sha2::{Digest, Sha256};
 use shared_entity::dto::publish_dto::DuplicatePublishedPageResponse;
-use shared_entity::dto::workspace_dto::*;
+use shared_entity::dto::workspace_dto::{SingleOrVecInvitation, *};
 use shared_entity::response::AppResponseError;
 use shared_entity::response::{AppResponse, JsonAppResponse};
 use sqlx::types::uuid;
@@ -566,7 +566,7 @@ async fn list_workspace_handler(
 async fn post_workspace_invite_handler(
   user_uuid: UserUuid,
   workspace_id: web::Path<Uuid>,
-  payload: Json<Vec<WorkspaceMemberInvitation>>,
+  payload: web::Json<SingleOrVecInvitation>,
   state: Data<AppState>,
 ) -> Result<JsonAppResponse<()>> {
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
@@ -576,7 +576,9 @@ async fn post_workspace_invite_handler(
     .enforce_role_strong(&uid, &workspace_id, AFRole::Owner)
     .await?;
 
-  let invitations = payload.into_inner();
+  // 支持单个对象或数组格式，自动转换为Vec
+  let invitations = payload.into_inner().into_vec();
+
   workspace::ops::invite_workspace_members(
     &state.mailer,
     &state.pg_pool,

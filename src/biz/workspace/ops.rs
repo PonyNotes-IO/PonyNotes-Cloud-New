@@ -425,23 +425,113 @@ pub async fn invite_workspace_members(
       "https://cdn.pixabay.com/photo/2015/10/05/22/37/blank-profile-picture-973460_1280.png"
         .to_string();
 
+    // 检查被邀请的用户是否已注册
+    let invitee_uid_result = select_uid_from_email(txn.deref_mut(), &invitation.email).await;
+    
     let invite_id = match pending_invitations.get(&invitation.email) {
       None => {
         // user is not invited yet
         let invite_id = uuid::Uuid::new_v4();
-        insert_workspace_invitation(
-          &mut txn,
-          &invite_id,
-          workspace_id,
-          inviter,
-          invitation.email.as_str(),
-          &invitation.role,
-        )
-        .await?;
+        
+        // 如果用户已注册，直接添加到成员表并创建已接受的邀请记录
+        if let Ok(_invitee_uid) = invitee_uid_result {
+          tracing::info!(
+            "User {} is already registered, auto-accepting invitation and adding to workspace",
+            invitation.email
+          );
+          
+          // 直接添加到成员表
+          upsert_workspace_member_with_txn(
+            &mut txn,
+            workspace_id,
+            &invitation.email,
+            invitation.role.clone(),
+          )
+          .await?;
+          
+          // 创建邀请记录（先创建pending状态）
+          insert_workspace_invitation(
+            &mut txn,
+            &invite_id,
+            workspace_id,
+            inviter,
+            invitation.email.as_str(),
+            &invitation.role,
+          )
+          .await?;
+          
+          // 更新邀请状态为已接受（触发数据库触发器自动添加collab权限）
+          sqlx::query(
+            r#"
+            UPDATE public.af_workspace_invitation
+            SET status = 1
+            WHERE id = $1 AND status = 0
+            "#,
+          )
+          .bind(invite_id)
+          .execute(txn.deref_mut())
+          .await?;
+        } else {
+          // 用户未注册，创建pending邀请记录
+          insert_workspace_invitation(
+            &mut txn,
+            &invite_id,
+            workspace_id,
+            inviter,
+            invitation.email.as_str(),
+            &invitation.role,
+          )
+          .await?;
+        }
+        
         invite_id
       },
       Some(invite_id) => {
         tracing::warn!("User already invited: {}", invitation.email);
+        
+        // 如果已有pending邀请，但用户现在已注册，自动接受
+        if let Ok(_invitee_uid) = invitee_uid_result {
+          // 检查邀请状态
+          let invite_status: i16 = sqlx::query_scalar(
+            r#"
+            SELECT status FROM public.af_workspace_invitation
+            WHERE id = $1
+            "#,
+          )
+          .bind(invite_id)
+          .fetch_one(txn.deref_mut())
+          .await?;
+          
+          if invite_status == 0i16 {
+            // 状态为pending，自动接受
+            tracing::info!(
+              "Auto-accepting pending invitation for registered user: {}",
+              invitation.email
+            );
+            
+            // 添加到成员表
+            upsert_workspace_member_with_txn(
+              &mut txn,
+              workspace_id,
+              &invitation.email,
+              invitation.role.clone(),
+            )
+            .await?;
+            
+            // 更新邀请状态为已接受
+            sqlx::query(
+              r#"
+              UPDATE public.af_workspace_invitation
+              SET status = 1
+              WHERE id = $1 AND status = 0
+              "#,
+            )
+            .bind(invite_id)
+            .execute(txn.deref_mut())
+            .await?;
+          }
+        }
+        
         *invite_id
       },
     };
