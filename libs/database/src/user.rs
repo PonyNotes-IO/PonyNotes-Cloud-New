@@ -232,6 +232,52 @@ pub async fn select_uid_from_phone<'a, E: Executor<'a, Database = Postgres>>(
   Ok(uid)
 }
 
+/// 根据邮箱或手机号查找用户 uid
+/// 自动判断输入类型：包含 @ 是邮箱，否则是手机号
+#[inline]
+pub async fn select_uid_from_email_or_phone<'a, E: Executor<'a, Database = Postgres>>(
+  executor: E,
+  identifier: &str,
+) -> Result<i64, AppError> {
+  // 判断是邮箱还是手机号
+  if identifier.contains('@') {
+    // 邮箱查询
+    let uid = sqlx::query!(
+      r#"
+        SELECT uid FROM af_user WHERE email = $1
+      "#,
+      identifier
+    )
+    .fetch_one(executor)
+    .await?
+    .uid;
+    Ok(uid)
+  } else {
+    // 手机号查询 - 支持多种格式
+    let cleaned = identifier.trim().trim_start_matches('+');
+    
+    // 尝试直接查询
+    let result = sqlx::query!(
+      r#"
+        SELECT uid FROM af_user WHERE phone = $1 OR phone = $2 OR phone = $3
+      "#,
+      identifier,
+      cleaned,
+      format!("+86{}", cleaned)
+    )
+    .fetch_optional(executor)
+    .await?;
+    
+    match result {
+      Some(row) => Ok(row.uid),
+      None => Err(AppError::RecordNotFound(format!(
+        "User with phone {} not found",
+        identifier
+      ))),
+    }
+  }
+}
+
 #[inline]
 pub async fn is_user_exist<'a, E: Executor<'a, Database = Postgres>>(
   executor: E,

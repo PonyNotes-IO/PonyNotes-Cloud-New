@@ -20,7 +20,7 @@ use collab_stream::model::UpdateStreamMessage;
 use database::collab::CollabStore;
 use database::file::s3_client_impl::S3BucketStorage;
 use database::pg_row::AFWorkspaceMemberRow;
-use database::user::select_uid_from_email;
+use database::user::{select_uid_from_email, select_uid_from_email_or_phone};
 use database::workspace::*;
 use database::subscription::aggregate_user_usage;
 use database_entity::dto::{
@@ -425,8 +425,8 @@ pub async fn invite_workspace_members(
       "https://cdn.pixabay.com/photo/2015/10/05/22/37/blank-profile-picture-973460_1280.png"
         .to_string();
 
-    // 检查被邀请的用户是否已注册
-    let invitee_uid_result = select_uid_from_email(txn.deref_mut(), &invitation.email).await;
+    // 检查被邀请的用户是否已注册（支持邮箱或手机号）
+    let invitee_uid_result = select_uid_from_email_or_phone(txn.deref_mut(), &invitation.email).await;
     
     let invite_id = match pending_invitations.get(&invitation.email) {
       None => {

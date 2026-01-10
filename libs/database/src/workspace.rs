@@ -216,29 +216,58 @@ pub async fn select_user_role<'a, E: Executor<'a, Database = Postgres>>(
 }
 
 #[inline]
+/// 添加工作空间成员（支持邮箱或手机号）
+/// identifier 可以是邮箱（包含@）或手机号
 pub async fn upsert_workspace_member_with_txn(
   txn: &mut Transaction<'_, sqlx::Postgres>,
   workspace_id: &uuid::Uuid,
-  member_email: &str,
+  identifier: &str,
   role: AFRole,
 ) -> Result<(), AppError> {
   let role_id: i32 = role.into();
-  sqlx::query!(
-    r#"
-      INSERT INTO public.af_workspace_member (workspace_id, uid, role_id)
-      SELECT $1, af_user.uid, $3
-      FROM public.af_user
-      WHERE
-        af_user.email = $2
-      ON CONFLICT (workspace_id, uid)
-      DO NOTHING;
-    "#,
-    workspace_id,
-    member_email,
-    role_id
-  )
-  .execute(txn.deref_mut())
-  .await?;
+  
+  // 判断是邮箱还是手机号
+  if identifier.contains('@') {
+    // 邮箱用户
+    sqlx::query!(
+      r#"
+        INSERT INTO public.af_workspace_member (workspace_id, uid, role_id)
+        SELECT $1, af_user.uid, $3
+        FROM public.af_user
+        WHERE
+          af_user.email = $2
+        ON CONFLICT (workspace_id, uid)
+        DO NOTHING;
+      "#,
+      workspace_id,
+      identifier,
+      role_id
+    )
+    .execute(txn.deref_mut())
+    .await?;
+  } else {
+    // 手机号用户 - 支持多种格式
+    let cleaned = identifier.trim().trim_start_matches('+');
+    let with_country_code = format!("+86{}", cleaned);
+    
+    sqlx::query!(
+      r#"
+        INSERT INTO public.af_workspace_member (workspace_id, uid, role_id)
+        SELECT $1, af_user.uid, $4
+        FROM public.af_user
+        WHERE
+          af_user.phone = $2 OR af_user.phone = $3
+        ON CONFLICT (workspace_id, uid)
+        DO NOTHING;
+      "#,
+      workspace_id,
+      identifier,
+      with_country_code,
+      role_id
+    )
+    .execute(txn.deref_mut())
+    .await?;
+  }
 
   Ok(())
 }
