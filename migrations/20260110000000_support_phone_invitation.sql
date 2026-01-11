@@ -51,3 +51,4 @@ $$ LANGUAGE plpgsql;
 -- 注释说明
 COMMENT ON FUNCTION add_to_af_workspace_member() IS '当工作空间邀请状态变为已接受时，自动添加成员到工作空间。支持通过邮箱或手机号查找被邀请的用户。';
 
+
