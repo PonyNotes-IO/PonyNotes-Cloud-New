@@ -26,6 +26,9 @@ pub struct ChatRequestParams {
   pub has_images: bool,
   /// 图片数据 (base64 编码)
   pub images: Option<Vec<String>>,
+  /// 是否启用深度思考模式
+  #[serde(default)]
+  pub enable_thinking: bool,
 }
 
 /// 聊天消息

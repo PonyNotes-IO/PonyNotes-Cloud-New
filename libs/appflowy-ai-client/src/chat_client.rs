@@ -104,11 +104,16 @@ impl ChatClient {
     let url = format!("{}/chat/completions", self.deepseek_api_base);
     let messages = self.build_messages(params);
 
-    let body = json!({
+    let mut body = json!({
       "model": self.deepseek_model,
       "messages": messages,
       "stream": true,
     });
+    
+    // 如果启用深度思考，添加 enable_thinking 参数
+    if params.enable_thinking {
+      body["enable_thinking"] = json!(true);
+    }
 
     debug!("DeepSeek request URL: {}", url);
     debug!("DeepSeek request body: {}", serde_json::to_string_pretty(&body)?);
@@ -151,11 +156,18 @@ impl ChatClient {
     let url = format!("{}/chat/completions", self.qwen_api_base);
     let messages = self.build_messages(params);
 
-    let body = json!({
+    let mut body = json!({
       "model": model_name,
       "messages": messages,
       "stream": true,
     });
+    
+    // 如果启用深度思考，添加 enable_thinking 参数（通义千问使用 extra_body）
+    if params.enable_thinking {
+      body["extra_body"] = json!({
+        "enable_thinking": true
+      });
+    }
 
     debug!("Qwen request URL: {}", url);
 
@@ -196,11 +208,16 @@ impl ChatClient {
     let url = format!("{}/chat/completions", self.doubao_api_base);
     let messages = self.build_messages(params);
 
-    let body = json!({
+    let mut body = json!({
       "model": self.doubao_model,
       "messages": messages,
       "stream": true,
     });
+    
+    // 如果启用深度思考，添加 enable_thinking 参数
+    if params.enable_thinking {
+      body["enable_thinking"] = json!(true);
+    }
 
     debug!("Doubao request URL: {}", url);
 
