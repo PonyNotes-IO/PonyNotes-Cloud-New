@@ -26,9 +26,42 @@ pub struct ChatRequestParams {
   pub has_images: bool,
   /// 图片数据 (base64 编码)
   pub images: Option<Vec<String>>,
+  /// 是否包含文件附件
+  #[serde(default)]
+  pub has_files: bool,
+  /// 文件附件数据
+  pub files: Option<Vec<ChatFile>>,
   /// 是否启用深度思考模式
   #[serde(default)]
   pub enable_thinking: bool,
+  /// 是否启用全网搜索模式
+  #[serde(default)]
+  pub enable_web_search: bool,
+}
+
+/// 聊天文件附件
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatFile {
+  /// 文件名
+  pub file_name: String,
+  /// 文件类型 (pdf, docx, xlsx, txt, etc.)
+  pub file_type: String,
+  /// 文件大小 (字节)
+  pub file_size: i64,
+  /// 文件数据
+  pub file_data: FileData,
+}
+
+/// 文件数据类型
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum FileData {
+  /// Base64 编码的文件内容
+  Base64(String),
+  /// 文件的 URL 地址
+  Url(String),
+  /// 提取的文本内容 (用于已预处理的文件)
+  Text(String),
 }
 
 /// 聊天消息

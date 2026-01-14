@@ -114,6 +114,11 @@ impl ChatClient {
     if params.enable_thinking {
       body["enable_thinking"] = json!(true);
     }
+    
+    // 如果启用全网搜索，添加 web_search 参数
+    if params.enable_web_search {
+      body["web_search"] = json!(true);
+    }
 
     debug!("DeepSeek request URL: {}", url);
     debug!("DeepSeek request body: {}", serde_json::to_string_pretty(&body)?);
@@ -162,11 +167,14 @@ impl ChatClient {
       "stream": true,
     });
     
-    // 如果启用深度思考，添加 enable_thinking 参数（通义千问使用 extra_body）
+    // 通义千问：enable_search 直接在顶层
+    if params.enable_web_search {
+      body["enable_search"] = json!(true);
+    }
+    
+    // 深度思考可以通过提示词实现，或者作为参数传递
     if params.enable_thinking {
-      body["extra_body"] = json!({
-        "enable_thinking": true
-      });
+      body["enable_thinking"] = json!(true);
     }
 
     debug!("Qwen request URL: {}", url);
@@ -218,6 +226,11 @@ impl ChatClient {
     if params.enable_thinking {
       body["enable_thinking"] = json!(true);
     }
+    
+    // 如果启用全网搜索，添加 web_search 参数
+    if params.enable_web_search {
+      body["web_search"] = json!(true);
+    }
 
     debug!("Doubao request URL: {}", url);
 
@@ -246,7 +259,7 @@ impl ChatClient {
     ))
   }
 
-  /// 构建消息列表 (支持历史对话和多模态)
+  /// 构建消息列表 (支持历史对话、多模态和文件)
   fn build_messages(&self, params: &ChatRequestParams) -> Vec<serde_json::Value> {
     let mut messages = Vec::new();
 
@@ -258,14 +271,18 @@ impl ChatClient {
       }));
     }
 
-    // 添加当前消息
-    if params.has_images && params.images.is_some() {
+    // 判断是否需要使用多模态格式 (图片或文件)
+    let has_multimodal = (params.has_images && params.images.is_some()) 
+                      || (params.has_files && params.files.is_some());
+
+    if has_multimodal {
       // 多模态消息
       let mut content = vec![json!({
         "type": "text",
-        "text": params.message,
+        "text": self.build_message_text_with_files(params),
       })];
 
+      // 添加图片
       if let Some(images) = &params.images {
         for image_base64 in images {
           content.push(json!({
@@ -290,6 +307,67 @@ impl ChatClient {
     }
 
     messages
+  }
+
+  /// 构建包含文件内容的消息文本
+  fn build_message_text_with_files(&self, params: &ChatRequestParams) -> String {
+    let mut text = params.message.clone();
+    
+    // 添加文件内容到消息中
+    if let Some(files) = &params.files {
+      if !files.is_empty() {
+        text.push_str("\n\n--- 附件文件 ---\n");
+        for file in files {
+          text.push_str(&format!("\n📄 文件名: {}\n", file.file_name));
+          text.push_str(&format!("文件类型: {}\n", file.file_type));
+          text.push_str(&format!("文件大小: {} 字节\n", file.file_size));
+          
+          match &file.file_data {
+            crate::dto::FileData::Text(content) => {
+              text.push_str("文件内容:\n```\n");
+              text.push_str(content);
+              text.push_str("\n```\n");
+            },
+            crate::dto::FileData::Url(url) => {
+              text.push_str(&format!("文件URL: {}\n", url));
+            },
+            crate::dto::FileData::Base64(base64_content) => {
+              // 对于base64，尝试判断是否是文本文件
+              if Self::is_text_file_type(&file.file_type) {
+                if let Ok(decoded) = base64::decode(base64_content) {
+                  if let Ok(content) = String::from_utf8(decoded) {
+                    text.push_str("文件内容:\n```\n");
+                    // 限制文件内容长度，避免超出token限制
+                    if content.len() > 50000 {
+                      text.push_str(&content[..50000]);
+                      text.push_str("\n... (内容过长，已截断) ...\n");
+                    } else {
+                      text.push_str(&content);
+                    }
+                    text.push_str("\n```\n");
+                  }
+                }
+              } else {
+                text.push_str("[二进制文件内容]\n");
+              }
+            },
+          }
+        }
+      }
+    }
+    
+    text
+  }
+
+  /// 判断是否是文本文件类型
+  fn is_text_file_type(file_type: &str) -> bool {
+    matches!(
+      file_type.to_lowercase().as_str(),
+      "txt" | "md" | "markdown" | "json" | "xml" | "html" | "css" | "js" 
+      | "ts" | "jsx" | "tsx" | "py" | "rs" | "go" | "java" | "c" | "cpp" 
+      | "h" | "hpp" | "sh" | "bash" | "yaml" | "yml" | "toml" | "ini" 
+      | "log" | "csv" | "sql"
+    )
   }
 
   /// 检查指定模型是否可用

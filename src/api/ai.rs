@@ -33,6 +33,7 @@ pub fn ai_completion_scope() -> Scope {
     // 公开接口（无需认证，无需workspace_id）
     .service(web::resource("/chat/models").route(web::get().to(list_chat_models_handler)))
     .service(web::resource("/chat/session").route(web::post().to(public_chat_session_handler)))
+    .service(web::resource("/file/upload").route(web::post().to(upload_file_handler)))
     // workspace相关接口
     .service(web::scope("/{workspace_id}")
       .service(web::resource("/complete/stream").route(web::post().to(stream_complete_text_handler)))
@@ -602,4 +603,108 @@ async fn public_chat_session_handler(
       )
     },
   }
+}
+
+/// 文件上传处理接口（需要JWT认证）
+/// 支持多种文件类型的上传和预处理
+#[instrument(level = "debug", skip(state, payload, user_uuid), err)]
+async fn upload_file_handler(
+  user_uuid: UserUuid,
+  state: Data<AppState>,
+  mut payload: actix_multipart::Multipart,
+) -> actix_web::Result<HttpResponse> {
+  use futures_util::StreamExt;
+  
+  trace!("File upload request from user {}", *user_uuid);
+  
+  let mut files_processed = Vec::new();
+  
+  while let Some(item) = payload.next().await {
+    let mut field = item.map_err(|e| {
+      error!("Failed to read multipart field: {}", e);
+      actix_web::error::ErrorBadRequest(format!("Invalid multipart data: {}", e))
+    })?;
+    
+    let content_disposition = field.content_disposition();
+    let filename = content_disposition
+      .get_filename()
+      .unwrap_or("unnamed_file")
+      .to_string();
+    
+    trace!("Processing file: {}", filename);
+    
+    // 读取文件数据
+    let mut file_data = Vec::new();
+    while let Some(chunk) = field.next().await {
+      let data = chunk.map_err(|e| {
+        error!("Failed to read file chunk: {}", e);
+        actix_web::error::ErrorBadRequest(format!("Failed to read file: {}", e))
+      })?;
+      file_data.extend_from_slice(&data);
+    }
+    
+    let file_size = file_data.len() as i64;
+    
+    // 文件大小限制: 20MB
+    if file_size > 20 * 1024 * 1024 {
+      return Ok(
+        HttpResponse::PayloadTooLarge()
+          .json(serde_json::json!({
+            "code": "FILE_TOO_LARGE",
+            "message": format!("文件 {} 超过20MB限制", filename),
+          }))
+      );
+    }
+    
+    // 提取文件类型
+    let file_type = filename
+      .split('.')
+      .last()
+      .unwrap_or("unknown")
+      .to_lowercase();
+    
+    trace!("File type: {}, size: {} bytes", file_type, file_size);
+    
+    // 根据文件类型进行预处理
+    let content_type = match file_type.as_str() {
+      // 文本文件：直接转换为文本
+      "txt" | "md" | "markdown" | "json" | "xml" | "html" | "css" | "js" 
+      | "ts" | "jsx" | "tsx" | "py" | "rs" | "go" | "java" | "c" | "cpp" 
+      | "h" | "hpp" | "sh" | "bash" | "yaml" | "yml" | "toml" | "ini" 
+      | "log" | "csv" | "sql" => {
+        match String::from_utf8(file_data.clone()) {
+          Ok(text) => {
+            info!("Text file processed: {} ({} chars)", filename, text.len());
+            "text"
+          },
+          Err(_) => "base64"
+        }
+      },
+      // PDF和Office文档：目前使用base64传输
+      "pdf" | "docx" | "xlsx" | "pptx" => {
+        warn!("Document {} will be sent as base64 (text extraction not implemented)", filename);
+        "base64"
+      },
+      _ => "base64"
+    };
+    
+    files_processed.push(serde_json::json!({
+      "file_name": filename,
+      "file_type": file_type,
+      "file_size": file_size,
+      "content_type": content_type,
+      "status": "processed",
+    }));
+  }
+  
+  info!("Successfully processed {} file(s)", files_processed.len());
+  
+  Ok(
+    HttpResponse::Ok()
+      .json(serde_json::json!({
+        "code": "SUCCESS",
+        "message": "文件上传成功",
+        "files": files_processed,
+      }))
+  )
 }
