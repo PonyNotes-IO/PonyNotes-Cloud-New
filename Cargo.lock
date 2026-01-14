@@ -587,6 +587,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "appflowy-ai-client",
+ "base64 0.21.7",
  "bytes",
  "futures",
  "infra",
@@ -4329,16 +4330,19 @@ name = "infra"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-sdk-s3",
  "bytes",
  "futures",
  "pin-project",
  "rayon",
  "reqwest",
+ "secrecy 0.8.0",
  "serde",
  "serde_json",
  "thiserror 2.0.12",
  "tokio",
  "tracing",
+ "uuid",
  "validator",
 ]
 

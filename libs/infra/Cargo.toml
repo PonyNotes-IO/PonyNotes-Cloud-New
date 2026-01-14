@@ -18,6 +18,9 @@ futures = "0.3.30"
 validator = { workspace = true, features = ["validator_derive", "derive"] }
 thiserror = { workspace = true }
 rayon = { workspace = true }
+aws-sdk-s3 = { version = "1.88.0", features = ["behavior-version-latest", "rt-tokio"] }
+secrecy = { workspace = true }
+uuid = { workspace = true }
 
 [features]
 file_util = ["tokio/fs"]

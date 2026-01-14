@@ -22,6 +22,7 @@ pub struct Config {
   pub redis_uri: Secret<String>,
   pub redis_worker_count: usize,
   pub s3: S3Setting,
+  pub qiniu: QiniuSetting,
   pub appflowy_ai: AppFlowyAISetting,
   pub collab: CollabSetting,
   pub published_collab: PublishedCollabSetting,
@@ -63,6 +64,31 @@ pub struct S3Setting {
   pub bucket: String,
   pub region: String,
   pub presigned_url_endpoint: Option<String>,
+}
+
+/// 七牛云对象存储配置（用于AI图片和文件）
+#[derive(serde::Deserialize, Clone, Debug)]
+pub struct QiniuSetting {
+  /// 是否启用七牛云存储
+  pub enabled: bool,
+  /// 七牛云AccessKey
+  pub access_key: String,
+  /// 七牛云SecretKey
+  pub secret_key: Secret<String>,
+  /// 存储空间名称
+  pub bucket: String,
+  /// 存储区域 (如 cn-east-1)
+  pub region: String,
+  /// S3兼容endpoint (如 https://s3-cn-east-1.qiniucs.com)
+  pub s3_endpoint: String,
+  /// 外链访问域名 (如 http://xxx.bkt.clouddn.com 或自定义域名)
+  pub domain: String,
+  /// 是否为私有空间
+  pub private_bucket: bool,
+  /// 私有空间URL有效期（秒）
+  pub url_expire_seconds: u64,
+  /// 是否使用HTTPS
+  pub use_https: bool,
 }
 
 #[derive(serde::Deserialize, Clone, Debug)]
@@ -237,6 +263,26 @@ pub fn get_configuration() -> Result<Config, anyhow::Error> {
       bucket: get_env_var("APPFLOWY_S3_BUCKET", "appflowy"),
       region: get_env_var("APPFLOWY_S3_REGION", ""),
       presigned_url_endpoint: get_env_var_opt("APPFLOWY_S3_PRESIGNED_URL_ENDPOINT"),
+    },
+    qiniu: QiniuSetting {
+      enabled: get_env_var("QINIU_ENABLED", "false")
+        .parse()
+        .context("fail to get QINIU_ENABLED")?,
+      access_key: get_env_var("QINIU_ACCESS_KEY", ""),
+      secret_key: get_env_var("QINIU_SECRET_KEY", "").into(),
+      bucket: get_env_var("QINIU_BUCKET", "ponynotes-ai-files"),
+      region: get_env_var("QINIU_REGION", "cn-east-1"),
+      s3_endpoint: get_env_var("QINIU_S3_ENDPOINT", "https://s3-cn-east-1.qiniucs.com"),
+      domain: get_env_var("QINIU_DOMAIN", ""),
+      private_bucket: get_env_var("QINIU_BUCKET_PRIVATE", "false")
+        .parse()
+        .context("fail to get QINIU_BUCKET_PRIVATE")?,
+      url_expire_seconds: get_env_var("QINIU_URL_EXPIRE_SECONDS", "3600")
+        .parse()
+        .context("fail to get QINIU_URL_EXPIRE_SECONDS")?,
+      use_https: get_env_var("QINIU_USE_HTTPS", "true")
+        .parse()
+        .context("fail to get QINIU_USE_HTTPS")?,
     },
     appflowy_ai: AppFlowyAISetting {
       port: get_env_var("AI_SERVER_PORT", "5001").into(),

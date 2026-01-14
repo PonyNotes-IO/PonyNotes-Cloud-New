@@ -384,6 +384,37 @@ pub async fn init_state(config: &Config) -> Result<AppState, Error> {
   );
   info!("ChatClient initialized");
 
+  // Initialize Qiniu Cloud client for AI file storage (optional)
+  let qiniu_client = if config.qiniu.enabled {
+    info!("Initializing Qiniu Cloud client...");
+    let qiniu_config = infra::qiniu_client::QiniuClientConfig {
+      access_key: config.qiniu.access_key.clone(),
+      secret_key: config.qiniu.secret_key.expose_secret().clone(),
+      bucket: config.qiniu.bucket.clone(),
+      region: config.qiniu.region.clone(),
+      s3_endpoint: config.qiniu.s3_endpoint.clone(),
+      domain: config.qiniu.domain.clone(),
+      private_bucket: config.qiniu.private_bucket,
+      url_expire_seconds: config.qiniu.url_expire_seconds,
+      use_https: config.qiniu.use_https,
+    };
+    
+    match infra::qiniu_client::QiniuClient::new(qiniu_config).await {
+      Ok(client) => {
+        info!("Qiniu Cloud client initialized successfully");
+        Some(Arc::new(client))
+      }
+      Err(e) => {
+        error!("Failed to initialize Qiniu Cloud client: {}", e);
+        info!("Continuing without Qiniu Cloud support");
+        None
+      }
+    }
+  } else {
+    info!("Qiniu Cloud is disabled, skipping initialization");
+    None
+  };
+
   info!("Application state initialized");
   Ok(AppState {
     pg_pool,
@@ -410,6 +441,7 @@ pub async fn init_state(config: &Config) -> Result<AppState, Error> {
     chat_client,
     indexer_scheduler,
     ws_server,
+    qiniu_client,
   })
 }
 

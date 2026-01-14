@@ -5,6 +5,7 @@ pub mod file_util;
 #[cfg(feature = "request_util")]
 pub mod reqwest;
 
+pub mod qiniu_client;
 pub mod thread_pool;
 // pub mod tokio_runtime;
 pub mod validate;

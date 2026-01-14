@@ -63,6 +63,8 @@ pub struct AppState {
   pub chat_client: Arc<ChatClient>,
   pub indexer_scheduler: Arc<IndexerScheduler>,
   pub ws_server: Addr<WsServer>,
+  /// 七牛云客户端（用于AI图片和文件存储），可选
+  pub qiniu_client: Option<Arc<infra::qiniu_client::QiniuClient>>,
 }
 
 impl AppState {

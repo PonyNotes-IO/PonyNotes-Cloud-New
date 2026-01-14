@@ -665,8 +665,38 @@ async fn upload_file_handler(
     
     trace!("File type: {}, size: {} bytes", file_type, file_size);
     
+    // 尝试上传到七牛云（如果已启用）
+    let file_url = if let Some(qiniu_client) = &state.qiniu_client {
+      trace!("Uploading file to Qiniu Cloud: {}", filename);
+      
+      // 推断Content-Type
+      let content_type = infra::qiniu_client::infer_content_type(&filename);
+      
+      // 生成对象存储key
+      let object_key = infra::qiniu_client::QiniuClient::generate_ai_file_key(
+        "ai-session",  // 暂时使用固定workspace_id，后续可以改为实际的
+        &user_uuid.to_string(),
+        &filename,
+      );
+      
+      // 上传到七牛云
+      match qiniu_client.upload_file(&object_key, file_data.clone(), &content_type).await {
+        Ok(url) => {
+          info!("File uploaded to Qiniu Cloud successfully: {}", url);
+          Some(url)
+        },
+        Err(e) => {
+          error!("Failed to upload file to Qiniu Cloud: {}", e);
+          None  // 失败时返回None，后续可以fallback到base64
+        }
+      }
+    } else {
+      trace!("Qiniu Cloud not enabled, file will be processed locally");
+      None
+    };
+    
     // 根据文件类型进行预处理
-    let content_type = match file_type.as_str() {
+    let (content_type, content_data) = match file_type.as_str() {
       // 文本文件：直接转换为文本
       "txt" | "md" | "markdown" | "json" | "xml" | "html" | "css" | "js" 
       | "ts" | "jsx" | "tsx" | "py" | "rs" | "go" | "java" | "c" | "cpp" 
@@ -675,26 +705,54 @@ async fn upload_file_handler(
         match String::from_utf8(file_data.clone()) {
           Ok(text) => {
             info!("Text file processed: {} ({} chars)", filename, text.len());
-            "text"
+            ("text", Some(text))
           },
-          Err(_) => "base64"
+          Err(_) => ("base64", Some(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &file_data)))
         }
       },
-      // PDF和Office文档：目前使用base64传输
-      "pdf" | "docx" | "xlsx" | "pptx" => {
-        warn!("Document {} will be sent as base64 (text extraction not implemented)", filename);
-        "base64"
+      // 图片文件：如果有URL则使用URL，否则使用base64
+      "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "svg" => {
+        if file_url.is_some() {
+          ("url", None)  // 如果有URL，不需要传输文件内容
+        } else {
+          ("base64", Some(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &file_data)))
+        }
       },
-      _ => "base64"
+      // PDF和Office文档：优先使用URL
+      "pdf" | "docx" | "xlsx" | "pptx" => {
+        if file_url.is_some() {
+          warn!("Document {} uploaded to Qiniu Cloud", filename);
+          ("url", None)
+        } else {
+          warn!("Document {} will be sent as base64 (Qiniu not available)", filename);
+          ("base64", Some(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &file_data)))
+        }
+      },
+      _ => {
+        if file_url.is_some() {
+          ("url", None)
+        } else {
+          ("base64", Some(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &file_data)))
+        }
+      }
     };
     
-    files_processed.push(serde_json::json!({
+    let mut file_info = serde_json::json!({
       "file_name": filename,
       "file_type": file_type,
       "file_size": file_size,
       "content_type": content_type,
       "status": "processed",
-    }));
+    });
+    
+    // 添加URL或content
+    if let Some(url) = file_url {
+      file_info["url"] = serde_json::json!(url);
+    } else if let Some(content) = content_data {
+      file_info["content"] = serde_json::json!(content);
+    }
+    
+    files_processed.push(file_info);
   }
   
   info!("Successfully processed {} file(s)", files_processed.len());
