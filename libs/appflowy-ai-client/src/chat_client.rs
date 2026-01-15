@@ -102,7 +102,7 @@ impl ChatClient {
     }
 
     let url = format!("{}/chat/completions", self.deepseek_api_base);
-    let messages = self.build_messages(params);
+    let messages = self.build_messages_for_openai_compatible(params);
 
     let mut body = json!({
       "model": self.deepseek_model,
@@ -159,7 +159,7 @@ impl ChatClient {
     }
 
     let url = format!("{}/chat/completions", self.qwen_api_base);
-    let messages = self.build_messages(params);
+    let messages = self.build_messages_for_openai_compatible(params);
 
     let mut body = json!({
       "model": model_name,
@@ -204,7 +204,7 @@ impl ChatClient {
     ))
   }
 
-  /// 调用豆包 API
+  /// 调用豆包 API（支持多模态）
   async fn stream_doubao(
     &self,
     params: &ChatRequestParams,
@@ -213,8 +213,25 @@ impl ChatClient {
       return Err(anyhow!("Doubao API key not configured"));
     }
 
+    // 检查是否有图片，如果有图片则使用 responses 接口（多模态），否则使用 chat/completions 接口
+    let has_images = params.has_images && params.images.is_some() && !params.images.as_ref().unwrap().is_empty();
+    
+    if has_images {
+      // 使用多模态接口 /responses
+      self.stream_doubao_multimodal(params).await
+    } else {
+      // 使用普通聊天接口 /chat/completions
+      self.stream_doubao_chat(params).await
+    }
+  }
+
+  /// 调用豆包普通聊天 API
+  async fn stream_doubao_chat(
+    &self,
+    params: &ChatRequestParams,
+  ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>> {
     let url = format!("{}/chat/completions", self.doubao_api_base);
-    let messages = self.build_messages(params);
+    let messages = self.build_messages_for_openai_compatible(params);
 
     let mut body = json!({
       "model": self.doubao_model,
@@ -232,7 +249,8 @@ impl ChatClient {
       body["web_search"] = json!(true);
     }
 
-    debug!("Doubao request URL: {}", url);
+    debug!("Doubao chat request URL: {}", url);
+    debug!("Doubao chat request body: {}", serde_json::to_string_pretty(&body)?);
 
     let response = self
       .http_client
@@ -259,8 +277,49 @@ impl ChatClient {
     ))
   }
 
-  /// 构建消息列表 (支持历史对话、多模态和文件)
-  fn build_messages(&self, params: &ChatRequestParams) -> Vec<serde_json::Value> {
+  /// 调用豆包多模态 API（使用 /responses 接口）
+  async fn stream_doubao_multimodal(
+    &self,
+    params: &ChatRequestParams,
+  ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>> {
+    let url = format!("{}/responses", self.doubao_api_base);
+    let input = self.build_input_for_doubao_multimodal(params);
+
+    let body = json!({
+      "model": self.doubao_model,
+      "input": input,
+    });
+
+    debug!("Doubao multimodal request URL: {}", url);
+    debug!("Doubao multimodal request body: {}", serde_json::to_string_pretty(&body)?);
+
+    let response = self
+      .http_client
+      .post(&url)
+      .header("Authorization", format!("Bearer {}", self.doubao_api_key))
+      .header("Content-Type", "application/json")
+      .json(&body)
+      .send()
+      .await?;
+
+    let status = response.status();
+    if !status.is_success() {
+      let error_text = response.text().await?;
+      error!("Doubao multimodal API error: {} - {}", status, error_text);
+      return Err(anyhow!("Doubao multimodal API error: {} - {}", status, error_text));
+    }
+
+    info!("Doubao multimodal API response status: {}", status);
+
+    Ok(Box::pin(
+      response
+        .bytes_stream()
+        .map(|result| result.map_err(|e| anyhow!("Stream error: {}", e))),
+    ))
+  }
+
+  /// 构建消息列表 (OpenAI兼容格式，支持历史对话、多模态和文件)
+  fn build_messages_for_openai_compatible(&self, params: &ChatRequestParams) -> Vec<serde_json::Value> {
     let mut messages = Vec::new();
 
     // 添加历史消息
@@ -282,15 +341,27 @@ impl ChatClient {
         "text": self.build_message_text_with_files(params),
       })];
 
-      // 添加图片
+      // 添加图片（OpenAI格式：使用data URL或http URL）
       if let Some(images) = &params.images {
-        for image_base64 in images {
-          content.push(json!({
-            "type": "image_url",
-            "image_url": {
-              "url": format!("data:image/jpeg;base64,{}", image_base64)
-            }
-          }));
+        for image_data in images {
+          // 判断是URL还是base64
+          if image_data.starts_with("http://") || image_data.starts_with("https://") {
+            // 如果已经是URL，直接使用
+            content.push(json!({
+              "type": "image_url",
+              "image_url": {
+                "url": image_data
+              }
+            }));
+          } else {
+            // 如果是base64，添加data URL前缀
+            content.push(json!({
+              "type": "image_url",
+              "image_url": {
+                "url": format!("data:image/jpeg;base64,{}", image_data)
+              }
+            }));
+          }
         }
       }
 
@@ -307,6 +378,59 @@ impl ChatClient {
     }
 
     messages
+  }
+
+  /// 构建豆包多模态 API 的 input 字段
+  fn build_input_for_doubao_multimodal(&self, params: &ChatRequestParams) -> Vec<serde_json::Value> {
+    let mut input = Vec::new();
+
+    // 添加历史消息（如果有）
+    for msg in &params.history {
+      // 豆包的历史消息格式与OpenAI类似
+      input.push(json!({
+        "role": msg.role,
+        "content": [
+          {
+            "type": "input_text",
+            "text": msg.content,
+          }
+        ],
+      }));
+    }
+
+    // 构建当前用户消息
+    let mut content = Vec::new();
+
+    // 添加图片（豆包格式：type: "input_image", image_url: "URL"）
+    if let Some(images) = &params.images {
+      for image_url in images {
+        // 豆包只接受URL，不接受base64
+        if image_url.starts_with("http://") || image_url.starts_with("https://") {
+          content.push(json!({
+            "type": "input_image",
+            "image_url": image_url,
+          }));
+        } else {
+          error!("Doubao multimodal API requires image URLs, but got non-URL data");
+          // 跳过非URL格式的图片
+        }
+      }
+    }
+
+    // 添加文本（豆包格式：type: "input_text", text: "内容"）
+    let text_content = self.build_message_text_with_files(params);
+    content.push(json!({
+      "type": "input_text",
+      "text": text_content,
+    }));
+
+    // 添加用户消息
+    input.push(json!({
+      "role": "user",
+      "content": content,
+    }));
+
+    input
   }
 
   /// 构建包含文件内容的消息文本

@@ -26,7 +26,7 @@ use shared_entity::dto::billing_dto::SubscriptionPlan;
 use shared_entity::response::AppResponse;
 use uuid::Uuid;
 
-use tracing::{error, instrument, trace};
+use tracing::{error, info, instrument, trace, warn};
 
 pub fn ai_completion_scope() -> Scope {
   web::scope("/api/ai")
@@ -362,10 +362,72 @@ async fn stream_chat_handler(
     );
   }
   
-  // 4. 调用 ChatClient 进行流式聊天
+  // 4. 如果有图片，上传到七牛云（豆包需要URL格式）
+  let mut params = params;
+  if params.has_images && params.images.is_some() {
+    if let Some(qiniu_client) = &state.qiniu_client {
+      let mut image_urls = Vec::new();
+      
+      if let Some(images) = &params.images {
+        for (idx, image_data) in images.iter().enumerate() {
+          // 判断是否已经是URL
+          if image_data.starts_with("http://") || image_data.starts_with("https://") {
+            // 已经是URL，直接使用
+            image_urls.push(image_data.clone());
+          } else {
+            // 是base64数据，需要上传到七牛云
+            match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, image_data) {
+              Ok(image_bytes) => {
+                // 生成对象存储key
+                let timestamp = std::time::SystemTime::now()
+                  .duration_since(std::time::UNIX_EPOCH)
+                  .unwrap()
+                  .as_millis();
+                let object_key = format!(
+                  "ai-chat-images/{}/{}-{}.jpg",
+                  workspace_id.to_string(),
+                  timestamp,
+                  idx
+                );
+                
+                // 上传到七牛云
+                match qiniu_client.upload_file(&object_key, image_bytes, "image/jpeg").await {
+                  Ok(url) => {
+                    info!("Image {} uploaded to Qiniu Cloud: {}", idx, url);
+                    image_urls.push(url);
+                  },
+                  Err(e) => {
+                    error!("Failed to upload image {} to Qiniu Cloud: {}", idx, e);
+                    // 如果上传失败，保留base64（对于不需要URL的模型）
+                    image_urls.push(image_data.clone());
+                  }
+                }
+              },
+              Err(e) => {
+                error!("Failed to decode base64 image {}: {}", idx, e);
+                // 解码失败，跳过此图片
+              }
+            }
+          }
+        }
+      }
+      
+      // 更新params中的图片数据为URL
+      if !image_urls.is_empty() {
+        params.images = Some(image_urls);
+        trace!("Updated {} image(s) to URL format", params.images.as_ref().unwrap().len());
+      } else {
+        warn!("No valid images after processing");
+      }
+    } else {
+      warn!("Qiniu Cloud not configured, images will be sent as base64 (may not work with Doubao)");
+    }
+  }
+  
+  // 5. 调用 ChatClient 进行流式聊天
   match state.chat_client.stream_chat(&params, model).await {
     Ok(stream) => {
-      // 5. 异步增加 AI 使用量
+      // 6. 异步增加 AI 使用量
       let pg_pool = state.pg_pool.clone();
       let ws_id = workspace_id;
       tokio::spawn(async move {
@@ -374,7 +436,7 @@ async fn stream_chat_handler(
         }
       });
       
-      // 6. 返回流式响应
+      // 7. 返回流式响应
       Ok(
         HttpResponse::Ok()
           .content_type("text/event-stream")
@@ -571,10 +633,72 @@ async fn public_chat_session_handler(
     );
   }
   
-  // 5. 调用 ChatClient 进行流式聊天
+  // 5. 如果有图片，上传到七牛云（豆包需要URL格式）
+  let mut params = params;
+  if params.has_images && params.images.is_some() {
+    if let Some(qiniu_client) = &state.qiniu_client {
+      let mut image_urls = Vec::new();
+      
+      if let Some(images) = &params.images {
+        for (idx, image_data) in images.iter().enumerate() {
+          // 判断是否已经是URL
+          if image_data.starts_with("http://") || image_data.starts_with("https://") {
+            // 已经是URL，直接使用
+            image_urls.push(image_data.clone());
+          } else {
+            // 是base64数据，需要上传到七牛云
+            match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, image_data) {
+              Ok(image_bytes) => {
+                // 生成对象存储key
+                let timestamp = std::time::SystemTime::now()
+                  .duration_since(std::time::UNIX_EPOCH)
+                  .unwrap()
+                  .as_millis();
+                let object_key = format!(
+                  "ai-chat-images/{}/{}-{}.jpg",
+                  user_uuid.to_string(),
+                  timestamp,
+                  idx
+                );
+                
+                // 上传到七牛云
+                match qiniu_client.upload_file(&object_key, image_bytes, "image/jpeg").await {
+                  Ok(url) => {
+                    info!("Image {} uploaded to Qiniu Cloud: {}", idx, url);
+                    image_urls.push(url);
+                  },
+                  Err(e) => {
+                    error!("Failed to upload image {} to Qiniu Cloud: {}", idx, e);
+                    // 如果上传失败，保留base64（对于不需要URL的模型）
+                    image_urls.push(image_data.clone());
+                  }
+                }
+              },
+              Err(e) => {
+                error!("Failed to decode base64 image {}: {}", idx, e);
+                // 解码失败，跳过此图片
+              }
+            }
+          }
+        }
+      }
+      
+      // 更新params中的图片数据为URL
+      if !image_urls.is_empty() {
+        params.images = Some(image_urls);
+        trace!("Updated {} image(s) to URL format", params.images.as_ref().unwrap().len());
+      } else {
+        warn!("No valid images after processing");
+      }
+    } else {
+      warn!("Qiniu Cloud not configured, images will be sent as base64 (may not work with Doubao)");
+    }
+  }
+  
+  // 6. 调用 ChatClient 进行流式聊天
   match state.chat_client.stream_chat(&params, model).await {
     Ok(stream) => {
-      // 6. 异步记录使用情况（不阻塞响应）
+      // 7. 异步记录使用情况（不阻塞响应）
       let state_clone = state.clone();
       let user_uuid_clone = user_uuid.clone();
       tokio::spawn(async move {
@@ -583,7 +707,7 @@ async fn public_chat_session_handler(
         }
       });
       
-      // 7. 返回流式响应
+      // 8. 返回流式响应
       Ok(
         HttpResponse::Ok()
           .content_type("text/event-stream")
@@ -625,9 +749,9 @@ async fn upload_file_handler(
       actix_web::error::ErrorBadRequest(format!("Invalid multipart data: {}", e))
     })?;
     
-    let content_disposition = field.content_disposition();
-    let filename = content_disposition
-      .get_filename()
+    let filename = field
+      .content_disposition()
+      .and_then(|cd| cd.get_filename())
       .unwrap_or("unnamed_file")
       .to_string();
     

@@ -1,6 +1,6 @@
 use app_error::AppError;
 use chrono::{DateTime, Utc};
-use sqlx::{postgres::PgArguments, PgPool};
+use sqlx::PgPool;
 use tracing::instrument;
 use serde_json::Value;
 

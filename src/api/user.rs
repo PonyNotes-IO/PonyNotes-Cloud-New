@@ -308,9 +308,9 @@ async fn search_user_handler(
   }
 }
 
-#[tracing::instrument(skip(state, auth, query), err)]
+#[tracing::instrument(skip(state, _auth, query), err)]
 async fn get_uid_by_email_or_phone_handler(
-  auth: Authorization,
+  _auth: Authorization,
   state: Data<AppState>,
   query: web::Query<GetUidByEmailOrPhoneQuery>,
 ) -> Result<JsonAppResponse<GetUidByEmailOrPhoneResponse>, AppError> {

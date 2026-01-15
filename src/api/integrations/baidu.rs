@@ -9,7 +9,6 @@ use app_error::ErrorCode;
 use serde_json::json;
 use tracing::{instrument, event};
 use infra::env_util::get_env_var;
-use database::user;
 use database::integrations as db_integrations;
 use chrono::{DateTime, Utc};
 
@@ -62,8 +61,8 @@ async fn post_migrate_tokens(
   Ok(AppResponse::Ok().with_data(json!({"ok": true})).into())
 }
 
-#[instrument(skip(state), err)]
-async fn get_authorize_url(state: Data<AppState>) -> Result<JsonAppResponse<serde_json::Value>> {
+#[instrument(skip(_state), err)]
+async fn get_authorize_url(_state: Data<AppState>) -> Result<JsonAppResponse<serde_json::Value>> {
   // Build authorize url from server-side env/config
   let client_id = get_env_var("BAIDU_CLOUD_APP_KEY", "");
   let redirect_uri = get_env_var("BAIDU_CLOUD_REDIRECT_URI", "http://localhost:8080/auth/callback");

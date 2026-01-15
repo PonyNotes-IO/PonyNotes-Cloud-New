@@ -36,7 +36,7 @@ pub async fn invite_landing_handler(
       Ok(joined_workspace_id) => {
         // redirect to app web workspace page
         let target = format!("{}/app/{}", state.config.appflowy_web_url, joined_workspace_id);
-        return Ok(HttpResponse::Found().header("Location", target).finish());
+        return Ok(HttpResponse::Found().append_header(("Location", target)).finish());
       }
       Err(err) => {
         // cannot join, show error and landing page
