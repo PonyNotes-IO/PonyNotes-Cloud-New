@@ -53,6 +53,7 @@ use snowflake::Snowflake;
 
 use crate::api::access_request::access_request_scope;
 use crate::api::ai::ai_completion_scope;
+use crate::api::billing::billing_scope;
 use crate::api::chat::chat_scope;
 use crate::api::data_import::data_import_scope;
 use crate::api::file_storage::file_storage_scope;
@@ -161,6 +162,7 @@ pub async fn run_actix_server(
       // Short invite landing/redirect route for invite links
       .route("/r/invite/{code}", web::get().to(invite_landing::invite_landing_handler))
       .service(ai_completion_scope())
+      .service(billing_scope())
       .service(subscription_scope())
       // Register collab_scope earlier to avoid route matching conflicts where a more
       // generic scope (e.g., chat_scope) may capture the same path and return 405 for POST.
