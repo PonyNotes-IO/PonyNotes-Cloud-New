@@ -137,7 +137,10 @@ impl Client {
     config: ClientConfiguration,
     client_id: &str,
   ) -> Self {
-    let reqwest_client = reqwest::Client::new();
+    let reqwest_client = reqwest::Client::builder()
+      .danger_accept_invalid_certs(true)  // 接受自签名证书，解决本地代理导致的SSL握手失败
+      .build()
+      .unwrap_or_else(|_| reqwest::Client::new());
     let client_version = Version::parse(client_id).unwrap_or_else(|_| Version::new(0, 6, 7));
 
     let min_version = Version::new(0, 6, 7);

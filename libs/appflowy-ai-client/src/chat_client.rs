@@ -216,10 +216,17 @@ impl ChatClient {
     // 检查是否有图片，如果有图片则使用 responses 接口（多模态），否则使用 chat/completions 接口
     let has_images = params.has_images && params.images.is_some() && !params.images.as_ref().unwrap().is_empty();
     
+    info!("🤖 [豆包] has_images: {}, images_count: {}", 
+      params.has_images, 
+      params.images.as_ref().map(|v| v.len()).unwrap_or(0)
+    );
+    
     if has_images {
+      info!("🎨 [豆包] 检测到图片，使用多模态接口 /responses");
       // 使用多模态接口 /responses
       self.stream_doubao_multimodal(params).await
     } else {
+      info!("💬 [豆包] 纯文本消息，使用普通接口 /chat/completions");
       // 使用普通聊天接口 /chat/completions
       self.stream_doubao_chat(params).await
     }
@@ -290,8 +297,9 @@ impl ChatClient {
       "input": input,
     });
 
-    debug!("Doubao multimodal request URL: {}", url);
-    debug!("Doubao multimodal request body: {}", serde_json::to_string_pretty(&body)?);
+    info!("🎨 [豆包多模态] 请求URL: {}", url);
+    info!("🎨 [豆包多模态] 模型: {}", self.doubao_model);
+    info!("🎨 [豆包多模态] 请求体: {}", serde_json::to_string_pretty(&body)?);
 
     let response = self
       .http_client
@@ -305,11 +313,11 @@ impl ChatClient {
     let status = response.status();
     if !status.is_success() {
       let error_text = response.text().await?;
-      error!("Doubao multimodal API error: {} - {}", status, error_text);
+      error!("❌ [豆包多模态] API错误: {} - {}", status, error_text);
       return Err(anyhow!("Doubao multimodal API error: {} - {}", status, error_text));
     }
 
-    info!("Doubao multimodal API response status: {}", status);
+    info!("✅ [豆包多模态] API响应成功: {}", status);
 
     Ok(Box::pin(
       response
@@ -403,15 +411,17 @@ impl ChatClient {
 
     // 添加图片（豆包格式：type: "input_image", image_url: "URL"）
     if let Some(images) = &params.images {
-      for image_url in images {
+      info!("🎨 [豆包多模态] 处理 {} 张图片", images.len());
+      for (idx, image_url) in images.iter().enumerate() {
         // 豆包只接受URL，不接受base64
         if image_url.starts_with("http://") || image_url.starts_with("https://") {
+          info!("✅ [豆包多模态] 添加图片 {}: {}", idx, image_url);
           content.push(json!({
             "type": "input_image",
             "image_url": image_url,
           }));
         } else {
-          error!("Doubao multimodal API requires image URLs, but got non-URL data");
+          error!("❌ [豆包多模态] 图片 {} 不是URL格式（长度: {}），跳过", idx, image_url.len());
           // 跳过非URL格式的图片
         }
       }
@@ -419,6 +429,7 @@ impl ChatClient {
 
     // 添加文本（豆包格式：type: "input_text", text: "内容"）
     let text_content = self.build_message_text_with_files(params);
+    info!("💬 [豆包多模态] 添加文本内容（长度: {}）", text_content.len());
     content.push(json!({
       "type": "input_text",
       "text": text_content,
@@ -430,6 +441,8 @@ impl ChatClient {
       "content": content,
     }));
 
+    info!("📦 [豆包多模态] 构建完成，content包含 {} 个元素", content.len());
+    
     input
   }
 

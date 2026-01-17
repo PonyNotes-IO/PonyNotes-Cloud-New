@@ -386,7 +386,16 @@ pub async fn init_state(config: &Config) -> Result<AppState, Error> {
 
   // Initialize Qiniu Cloud client for AI file storage (optional)
   let qiniu_client = if config.qiniu.enabled {
-    info!("Initializing Qiniu Cloud client...");
+    info!("🗄️ [七牛云] 开始初始化...");
+    info!("🗄️ [七牛云] 配置信息:");
+    info!("   - Bucket: {}", config.qiniu.bucket);
+    info!("   - Region: {}", config.qiniu.region);
+    info!("   - S3 Endpoint: {}", config.qiniu.s3_endpoint);
+    info!("   - Domain: {}", if config.qiniu.domain.is_empty() { "(未配置，将使用默认域名)" } else { &config.qiniu.domain });
+    info!("   - Private: {}", config.qiniu.private_bucket);
+    info!("   - Use HTTPS: {}", config.qiniu.use_https);
+    info!("   - Access Key: {}... (前10位)", &config.qiniu.access_key[..config.qiniu.access_key.len().min(10)]);
+    
     let qiniu_config = infra::qiniu_client::QiniuClientConfig {
       access_key: config.qiniu.access_key.clone(),
       secret_key: config.qiniu.secret_key.expose_secret().clone(),
@@ -401,17 +410,17 @@ pub async fn init_state(config: &Config) -> Result<AppState, Error> {
     
     match infra::qiniu_client::QiniuClient::new(qiniu_config).await {
       Ok(client) => {
-        info!("Qiniu Cloud client initialized successfully");
+        info!("✅ [七牛云] 初始化成功！");
         Some(Arc::new(client))
       }
       Err(e) => {
-        error!("Failed to initialize Qiniu Cloud client: {}", e);
-        info!("Continuing without Qiniu Cloud support");
+        error!("❌ [七牛云] 初始化失败: {}", e);
+        error!("   将继续运行，但图片上传功能不可用");
         None
       }
     }
   } else {
-    info!("Qiniu Cloud is disabled, skipping initialization");
+    info!("ℹ️ [七牛云] 未启用（QINIU_ENABLED=false）");
     None
   };
 

@@ -1,6 +1,7 @@
 // 七牛云对象存储客户端（使用S3兼容模式）
 use anyhow::{anyhow, Result};
 use aws_sdk_s3::config::{Credentials, Region, SharedCredentialsProvider};
+use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
 use std::path::Path;
@@ -81,7 +82,12 @@ impl QiniuClient {
     let body = ByteStream::from(data);
 
     // 上传到七牛云
-    self
+    debug!("🔄 [七牛云] 开始put_object操作");
+    debug!("   - bucket: {}", &self.config.bucket);
+    debug!("   - key: {}", object_key);
+    debug!("   - content_type: {}", content_type);
+    
+    let upload_result = self
       .s3_client
       .put_object()
       .bucket(&self.config.bucket)
@@ -89,11 +95,31 @@ impl QiniuClient {
       .body(body)
       .content_type(content_type)
       .send()
-      .await
-      .map_err(|e| {
-        error!("上传文件到七牛云失败: {}", e);
-        anyhow!("上传文件到七牛云失败: {}", e)
-      })?;
+      .await;
+    
+    match &upload_result {
+      Ok(_) => {
+        debug!("✅ [七牛云] put_object 操作成功");
+      }
+      Err(e) => {
+        error!("❌ [七牛云] put_object 操作失败");
+        error!("   - 错误类型: {:?}", e);
+        error!("   - 错误详情: {}", e);
+        error!("   - bucket: {}", &self.config.bucket);
+        error!("   - key: {}", object_key);
+        error!("   - endpoint: {}", &self.config.s3_endpoint);
+        
+        // 尝试获取更详细的错误信息
+        if let Some(service_err) = e.as_service_error() {
+          error!("   - Service Error: {:?}", service_err);
+          error!("   - Service Error Message: {:?}", service_err.message());
+        }
+      }
+    }
+    
+    upload_result.map_err(|e| {
+      anyhow!("上传文件到七牛云失败: {}", e)
+    })?;
 
     info!("文件上传成功: {}", object_key);
 

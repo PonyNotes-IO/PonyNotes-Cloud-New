@@ -129,6 +129,13 @@ services:
       - GOTRUE_EXTERNAL_DOUYIN_CLIENT_ID=${GOTRUE_EXTERNAL_DOUYIN_CLIENT_ID}
       - GOTRUE_EXTERNAL_DOUYIN_SECRET=${GOTRUE_EXTERNAL_DOUYIN_SECRET}
       - GOTRUE_EXTERNAL_DOUYIN_REDIRECT_URI=${GOTRUE_EXTERNAL_DOUYIN_REDIRECT_URI}
+      # 禁用代理（避免健康检查失败）
+      - HTTP_PROXY=
+      - HTTPS_PROXY=
+      - http_proxy=
+      - https_proxy=
+      - NO_PROXY=
+      - no_proxy=
     ports:
       - 9999:9999
 
@@ -155,9 +162,6 @@ services:
       - APPFLOWY_S3_BUCKET=${APPFLOWY_S3_BUCKET:-appflowy}
       - APPFLOWY_ACCESS_CONTROL=${APPFLOWY_ACCESS_CONTROL:-false}
       - APPFLOWY_DATABASE_MAX_CONNECTIONS=${APPFLOWY_DATABASE_MAX_CONNECTIONS:-10}
-      # AI Service Configuration
-      - AI_SERVER_PORT=${AI_SERVER_PORT:-5001}
-      - AI_SERVER_HOST=${AI_SERVER_HOST:-ai}
       # OpenAI Configuration for Indexer/Embedding
       - AI_OPENAI_API_KEY=${AI_OPENAI_API_KEY}
       - AI_OPENAI_API_BASE=${AI_OPENAI_API_BASE}
@@ -186,6 +190,17 @@ services:
       - AI_CHAT_DOUBAO_API_KEY=${AI_CHAT_DOUBAO_API_KEY}
       - AI_CHAT_DOUBAO_API_BASE=${AI_CHAT_DOUBAO_API_BASE}
       - AI_CHAT_DOUBAO_MODEL=${AI_CHAT_DOUBAO_MODEL}
+      # 七牛云对象存储配置 (用于AI图片/文件存储)
+      - QINIU_ENABLED=${QINIU_ENABLED}
+      - QINIU_ACCESS_KEY=${QINIU_ACCESS_KEY}
+      - QINIU_SECRET_KEY=${QINIU_SECRET_KEY}
+      - QINIU_BUCKET=${QINIU_BUCKET}
+      - QINIU_REGION=${QINIU_REGION}
+      - QINIU_S3_ENDPOINT=${QINIU_S3_ENDPOINT}
+      - QINIU_DOMAIN=${QINIU_DOMAIN}
+      - QINIU_BUCKET_PRIVATE=${QINIU_BUCKET_PRIVATE}
+      - QINIU_URL_EXPIRE_SECONDS=${QINIU_URL_EXPIRE_SECONDS}
+      - QINIU_USE_HTTPS=${QINIU_USE_HTTPS}
       # 禁用代理以避免干扰阿里云SMS服务连接
       - HTTP_PROXY=
       - HTTPS_PROXY=
@@ -199,57 +214,6 @@ services:
       postgres:
         condition: service_healthy
       gotrue:
-        condition: service_started
-      ai:
-        condition: service_started
-
-  ai:
-    restart: on-failure
-    image: appflowyinc/appflowy_ai:latest
-    ports:
-      - "5001:5001"
-    environment:
-      - AI_SERVER_PORT=${AI_SERVER_PORT:-5001}
-      - OPENAI_API_KEY=${AI_OPENAI_API_KEY}
-      - DEFAULT_AI_MODEL=gpt-4o-mini
-      - DEFAULT_AI_COMPLETION_MODEL=gpt-4o-mini
-      - AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY}
-      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}
-      - AZURE_OPENAI_API_VERSION=${AZURE_OPENAI_API_VERSION}
-      - APPFLOWY_S3_ACCESS_KEY=${APPFLOWY_S3_ACCESS_KEY:-minioadmin}
-      - APPFLOWY_S3_SECRET_KEY=${APPFLOWY_S3_SECRET_KEY:-minioadmin}
-      - APPFLOWY_S3_BUCKET=${APPFLOWY_S3_BUCKET:-appflowy}
-      - APPFLOWY_S3_REGION=${APPFLOWY_S3_REGION:-us-east-1}
-      - DATABASE_URL=${AI_DATABASE_URL}
-      - AI_DATABASE_URL=${AI_DATABASE_URL}
-      - AI_REDIS_URL=${APPFLOWY_REDIS_URI:-redis://redis:6379}
-      - AI_USE_MINIO=${APPFLOWY_S3_USE_MINIO:-true}
-      - AI_MINIO_URL=${APPFLOWY_S3_MINIO_URL:-http://minio:9000}
-      - AI_APPFLOWY_HOST=${APPFLOWY_BASE_URL:-http://localhost:8000}
-      - APPFLOWY_GOTRUE_JWT_SECRET=${GOTRUE_JWT_SECRET}
-      # Chinese AI providers
-      - AI_CHAT_DEEPSEEK_API_KEY=${AI_CHAT_DEEPSEEK_API_KEY}
-      - AI_CHAT_DEEPSEEK_API_BASE=${AI_CHAT_DEEPSEEK_API_BASE}
-      - AI_CHAT_DEEPSEEK_MODEL=${AI_CHAT_DEEPSEEK_MODEL}
-      - AI_CHAT_QWEN_API_KEY=${AI_CHAT_QWEN_API_KEY}
-      - AI_CHAT_QWEN_API_BASE=${AI_CHAT_QWEN_API_BASE}
-      - AI_CHAT_QWEN_TURBO_MODEL=${AI_CHAT_QWEN_TURBO_MODEL}
-      - AI_CHAT_QWEN_MAX_MODEL=${AI_CHAT_QWEN_MAX_MODEL}
-      - AI_CHAT_DOUBAO_API_KEY=${AI_CHAT_DOUBAO_API_KEY}
-      - AI_CHAT_DOUBAO_API_BASE=${AI_CHAT_DOUBAO_API_BASE}
-      - AI_CHAT_DOUBAO_MODEL=${AI_CHAT_DOUBAO_MODEL}
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:5001/health || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      minio:
         condition: service_started
 
   admin_frontend:

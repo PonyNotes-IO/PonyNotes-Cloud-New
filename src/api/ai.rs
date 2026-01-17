@@ -566,11 +566,19 @@ async fn public_chat_session_handler(
 ) -> actix_web::Result<HttpResponse> {
   let params = payload.into_inner();
   
-  trace!(
-    "Chat session request from user {}, message length: {}, model: {:?}", 
+  info!(
+    "🔍 [AI会话] 收到用户请求 - user: {}, message_len: {}, model: {:?}", 
     *user_uuid,
     params.message.len(),
     params.preferred_model
+  );
+  info!(
+    "🔍 [AI会话] 请求参数 - has_images: {}, images_count: {}, has_files: {}, thinking: {}, search: {}", 
+    params.has_images,
+    params.images.as_ref().map(|v| v.len()).unwrap_or(0),
+    params.has_files,
+    params.enable_thinking,
+    params.enable_web_search
   );
   
   // 1. 检查用户剩余AI调用次数
@@ -636,7 +644,9 @@ async fn public_chat_session_handler(
   // 5. 如果有图片，上传到七牛云（豆包需要URL格式）
   let mut params = params;
   if params.has_images && params.images.is_some() {
+    info!("📸 [AI会话] 检测到图片数据，准备处理...");
     if let Some(qiniu_client) = &state.qiniu_client {
+      info!("✅ [AI会话] 七牛云客户端已配置，开始上传图片");
       let mut image_urls = Vec::new();
       
       if let Some(images) = &params.images {
@@ -661,21 +671,23 @@ async fn public_chat_session_handler(
                   idx
                 );
                 
+                info!("🔄 [AI会话] 开始上传图片 {} 到七牛云，key: {}", idx, object_key);
+                
                 // 上传到七牛云
                 match qiniu_client.upload_file(&object_key, image_bytes, "image/jpeg").await {
                   Ok(url) => {
-                    info!("Image {} uploaded to Qiniu Cloud: {}", idx, url);
+                    info!("✅ [AI会话] 图片 {} 上传成功！URL: {}", idx, url);
                     image_urls.push(url);
                   },
                   Err(e) => {
-                    error!("Failed to upload image {} to Qiniu Cloud: {}", idx, e);
+                    error!("❌ [AI会话] 图片 {} 上传失败: {}", idx, e);
                     // 如果上传失败，保留base64（对于不需要URL的模型）
                     image_urls.push(image_data.clone());
                   }
                 }
               },
               Err(e) => {
-                error!("Failed to decode base64 image {}: {}", idx, e);
+                error!("❌ [AI会话] 图片 {} base64解码失败: {}", idx, e);
                 // 解码失败，跳过此图片
               }
             }
@@ -685,14 +697,20 @@ async fn public_chat_session_handler(
       
       // 更新params中的图片数据为URL
       if !image_urls.is_empty() {
+        info!("✅ [AI会话] 图片处理完成，共 {} 张图片转换为URL", image_urls.len());
+        for (i, url) in image_urls.iter().enumerate() {
+          info!("   图片 {}: {}", i, url);
+        }
         params.images = Some(image_urls);
-        trace!("Updated {} image(s) to URL format", params.images.as_ref().unwrap().len());
       } else {
-        warn!("No valid images after processing");
+        error!("❌ [AI会话] 图片处理后没有有效的图片数据");
       }
     } else {
-      warn!("Qiniu Cloud not configured, images will be sent as base64 (may not work with Doubao)");
+      error!("❌ [AI会话] 七牛云客户端未配置！无法上传图片");
+      error!("   请检查环境变量：QINIU_ENABLED, QINIU_ACCESS_KEY, QINIU_SECRET_KEY");
     }
+  } else {
+    info!("ℹ️ [AI会话] 本次请求不包含图片");
   }
   
   // 6. 调用 ChatClient 进行流式聊天
