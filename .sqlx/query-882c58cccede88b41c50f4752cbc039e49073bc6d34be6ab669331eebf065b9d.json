@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n      INSERT INTO af_collab_member (oid, uid, permission_id)\n      VALUES ($1, $2, $3)\n      ON CONFLICT (oid, uid) DO NOTHING\n      ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "882c58cccede88b41c50f4752cbc039e49073bc6d34be6ab669331eebf065b9d"
+}

@@ -1514,6 +1514,21 @@ pub struct EditCollabMemberParams {
   pub permission_id:i32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JoinRequest {
+  #[serde(with = "uuid_str")]
+  pub id: Uuid,
+  #[serde(with = "uuid_str")]
+  pub workspace_id: Uuid,
+  #[serde(with = "uuid_str")]
+  pub space_id: Uuid,
+  pub requester_id: i64,
+  pub reason: Option<String>,
+  pub status: String,
+  pub created_at: i64,
+  pub updated_at: i64,
+}
+
 #[cfg(test)]
 mod test {
   use crate::dto::{CreateCollabData, CreateCollabDataV0};

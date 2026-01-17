@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n    DELETE FROM join_requests\n    WHERE workspace_id = $1 AND space_id = $2 AND requester_id = $3 AND status = 'pending'\n    ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "248b47b08955c7579351298f1fd6aacb99f219e06366f04528933e35f41100c9"
+}

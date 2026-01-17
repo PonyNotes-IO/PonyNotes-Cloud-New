@@ -14,6 +14,9 @@ use crate::biz::workspace::invite::{
   delete_workspace_invite_code, generate_workspace_invite_token, get_invite_code_for_workspace,
   join_workspace_invite_by_code,
 };
+use crate::biz::workspace::join_request::{
+  create_join_request, list_join_requests, handle_join_request, cancel_join_request,
+};
 use crate::biz::workspace::ops::{
   create_comment_on_published_view, create_reaction_on_comment, get_comments_on_published_view,
   get_reactions_on_published_view, get_workspace_owner, remove_comment_on_published_view,
@@ -69,6 +72,7 @@ use indexer::scheduler::{UnindexedCollabTask, UnindexedData};
 use itertools::Itertools;
 use prost::Message as ProstMessage;
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::biz::collab::me::{get_received_collab_list, get_send_collab_list};
 use crate::biz::workspace::collab_member::{add_collab_member, edit_collab_member_permission};
@@ -217,6 +221,16 @@ pub fn workspace_scope() -> Scope {
         .service(web::resource("/{workspace_id}/space").route(web::post().to(post_space_handler)))
         .service(
             web::resource("/{workspace_id}/space/{view_id}").route(web::patch().to(update_space_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/spaces/{space_id}/join-requests")
+                .route(web::post().to(post_join_request_handler))
+                .route(web::get().to(get_join_requests_handler))
+                .route(web::delete().to(cancel_join_request_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/spaces/{space_id}/join-requests/{request_id}")
+                .route(web::post().to(handle_join_request_handler)),
         )
         .service(
             web::resource("/{workspace_id}/folder-view").route(web::post().to(post_folder_view_handler)),
@@ -3200,4 +3214,76 @@ async fn list_received_collab_handler(
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
   let list = get_received_collab_list(&state.pg_pool, uid).await?;
   Ok(Json(AppResponse::Ok().with_data(list)))
+}
+
+#[derive(Debug, Clone, Validate, Serialize, Deserialize)]
+pub struct CreateJoinRequestPayload {
+  pub requester_id: i64,
+  pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Validate, Serialize, Deserialize)]
+pub struct HandleJoinRequestPayload {
+  pub approve: bool,
+}
+
+/// Create a join request for a space
+async fn post_join_request_handler(
+  user_uuid: UserUuid,
+  path: web::Path<(Uuid, Uuid)>,
+  payload: Json<CreateJoinRequestPayload>,
+  state: Data<AppState>,
+) -> Result<JsonAppResponse<JoinRequest>> {
+  let (workspace_id, space_id) = path.into_inner();
+  let join_request = create_join_request(
+    &state,
+    &user_uuid,
+    &workspace_id,
+    &space_id,
+    payload.reason.clone(),
+  )
+  .await?;
+  Ok(Json(AppResponse::Ok().with_data(join_request)))
+}
+
+/// List join requests for a space (space owner only)
+async fn get_join_requests_handler(
+  user_uuid: UserUuid,
+  path: web::Path<(Uuid, Uuid)>,
+  state: Data<AppState>,
+) -> Result<JsonAppResponse<Vec<JoinRequest>>> {
+  let (workspace_id, space_id) = path.into_inner();
+  let requests = list_join_requests(&state, &user_uuid, &workspace_id, &space_id).await?;
+  Ok(Json(AppResponse::Ok().with_data(requests)))
+}
+
+/// Handle join request (approve/reject) - space owner only
+async fn handle_join_request_handler(
+  user_uuid: UserUuid,
+  path: web::Path<(Uuid, Uuid, Uuid)>,
+  payload: Json<HandleJoinRequestPayload>,
+  state: Data<AppState>,
+) -> Result<JsonAppResponse<()>> {
+  let (workspace_id, space_id, request_id) = path.into_inner();
+  handle_join_request(
+    &state,
+    &user_uuid,
+    &workspace_id,
+    &space_id,
+    &request_id,
+    payload.approve,
+  )
+  .await?;
+  Ok(Json(AppResponse::Ok()))
+}
+
+/// Cancel join request - requester only
+async fn cancel_join_request_handler(
+  user_uuid: UserUuid,
+  path: web::Path<(Uuid, Uuid)>,
+  state: Data<AppState>,
+) -> Result<JsonAppResponse<()>> {
+  let (workspace_id, space_id) = path.into_inner();
+  cancel_join_request(&state, &user_uuid, &workspace_id, &space_id).await?;
+  Ok(Json(AppResponse::Ok()))
 }

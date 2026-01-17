@@ -1,5 +1,6 @@
 pub mod duplicate;
 pub mod invite;
+pub mod join_request;
 pub mod ops;
 pub mod page_view;
 pub mod publish;
