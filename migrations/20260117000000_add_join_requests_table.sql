@@ -18,3 +18,4 @@ CREATE INDEX IF NOT EXISTS idx_join_requests_requester ON join_requests(requeste
 CREATE INDEX IF NOT EXISTS idx_join_requests_status ON join_requests(status);
 -- Ensure only one pending request per user per space
 CREATE UNIQUE INDEX IF NOT EXISTS idx_join_requests_unique_pending ON join_requests(space_id, requester_id) WHERE status = 'pending';
+

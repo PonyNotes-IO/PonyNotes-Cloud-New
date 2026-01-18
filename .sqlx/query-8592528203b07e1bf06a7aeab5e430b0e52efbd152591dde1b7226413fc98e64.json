@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n    SELECT\n      au.uid,\n      COALESCE(au.name, au.email) AS name,\n      au.email,\n      au.metadata ->> 'icon_url' AS avatar_url,\n      acm.permission_id\n    FROM public.af_collab_member acm\n    JOIN public.af_user au ON acm.uid = au.uid\n    WHERE acm.oid = $1\n    ORDER BY acm.created_at ASC\n    ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "uid",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "email",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "avatar_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "permission_id",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      true,
+      null,
+      false
+    ]
+  },
+  "hash": "8592528203b07e1bf06a7aeab5e430b0e52efbd152591dde1b7226413fc98e64"
+}

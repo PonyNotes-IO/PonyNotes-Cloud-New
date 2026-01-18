@@ -20,6 +20,7 @@ use collab_stream::model::UpdateStreamMessage;
 use database::collab::CollabStore;
 use database::file::s3_client_impl::S3BucketStorage;
 use database::pg_row::AFWorkspaceMemberRow;
+use database::pg_row::AFExplicitCollabMemberRow;
 use database::user::{select_uid_from_email, select_uid_from_email_or_phone};
 use database::workspace::*;
 use database::subscription::aggregate_user_usage;
@@ -707,6 +708,16 @@ pub async fn get_workspace_member(
     .await?
     .ok_or(AppError::RecordNotFound("user does not exists".to_string()))?;
   Ok(member)
+}
+
+/// Get members who have joined a collab (space) identified by object_id (oid).
+pub async fn get_collab_members(
+  pg_pool: &PgPool,
+  object_id: &Uuid,
+) -> Result<Vec<AFExplicitCollabMemberRow>, AppError> {
+  let oid = object_id.to_string();
+  let members = database::workspace::select_collab_member_list_by_oid(pg_pool, &oid).await?;
+  Ok(members)
 }
 
 pub async fn get_workspace_owner(

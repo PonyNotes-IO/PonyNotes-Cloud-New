@@ -15,7 +15,7 @@ use crate::pg_row::{
   AFCollabMemberPermRow, AFGlobalCommentRow, AFImportTask, AFPermissionRow, AFReactionRow,
   AFUserProfileRow, AFWebUserWithEmailColumn, AFWorkspaceInvitationMinimal,
   AFWorkspaceMemberPermRow, AFWorkspaceMemberRow, AFWorkspaceRow,
-  AFWorkspaceRowWithMemberCountAndRole,
+  AFWorkspaceRowWithMemberCountAndRole, AFExplicitCollabMemberRow,
 };
 use crate::user::select_uid_from_email;
 use app_error::AppError;
@@ -2222,6 +2222,33 @@ pub async fn insert_collab_member(
   .await?;
   tx.commit().await?;
   Ok(())
+}
+
+/// Select members who have been added to a collab (space) by oid.
+#[inline]
+pub async fn select_collab_member_list_by_oid(
+  pg_pool: &PgPool,
+  oid: &str,
+) -> Result<Vec<AFExplicitCollabMemberRow>, AppError> {
+  let rows = sqlx::query_as!(
+    AFExplicitCollabMemberRow,
+    r#"
+    SELECT
+      au.uid,
+      COALESCE(au.name, au.email) AS name,
+      au.email,
+      au.metadata ->> 'icon_url' AS avatar_url,
+      acm.permission_id
+    FROM public.af_collab_member acm
+    JOIN public.af_user au ON acm.uid = au.uid
+    WHERE acm.oid = $1
+    ORDER BY acm.created_at ASC
+    "#,
+    oid
+  )
+  .fetch_all(pg_pool)
+  .await?;
+  Ok(rows)
 }
 
 pub async fn update_collab_member_permission(

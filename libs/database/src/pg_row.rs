@@ -271,6 +271,15 @@ pub struct AFCollabMemberRow {
   pub permission_id: i64,
 }
 
+#[derive(Debug, FromRow, Serialize, Deserialize)]
+pub struct AFExplicitCollabMemberRow {
+  pub uid: i64,
+  pub name: Option<String>,
+  pub email: Option<String>,
+  pub avatar_url: Option<String>,
+  pub permission_id: i32,
+}
+
 #[derive(Serialize, Deserialize, Eq, PartialEq, Debug, Clone)]
 #[repr(i16)]
 pub enum AFBlobStatus {

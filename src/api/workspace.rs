@@ -177,6 +177,10 @@ pub fn workspace_scope() -> Scope {
                 .route(web::delete().to(delete_collab_handler)),
         )
         .service(
+            web::resource("/{workspace_id}/collab/{object_id}/members")
+                .route(web::get().to(get_collab_members_handler)),
+        )
+        .service(
             // 添加协作成员（给自己或别人）
             web::resource("/{workspace_id}/collab/{object_id}/members/{member_user_id}")
                 .route(web::post().to(add_collab_member_handler)),
@@ -732,6 +736,24 @@ async fn get_workspace_members_handler(
       .collect()
   };
 
+  Ok(AppResponse::Ok().with_data(members).into())
+}
+
+#[instrument(skip_all, err)]
+async fn get_collab_members_handler(
+  user_uuid: UserUuid,
+  state: Data<AppState>,
+  path: web::Path<(Uuid, Uuid)>, // (workspace_id, object_id)
+) -> Result<JsonAppResponse<Vec<database::pg_row::AFExplicitCollabMemberRow>>> {
+  let uid = state.user_cache.get_user_uid(&user_uuid).await?;
+  let (workspace_id, object_id) = path.into_inner();
+  // Require requester to be at least a workspace member
+  state
+    .workspace_access_control
+    .enforce_role_weak(&uid, &workspace_id, AFRole::Guest)
+    .await?;
+
+  let members = workspace::ops::get_collab_members(&state.pg_pool, &object_id).await?;
   Ok(AppResponse::Ok().with_data(members).into())
 }
 
