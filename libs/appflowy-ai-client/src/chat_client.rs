@@ -295,6 +295,7 @@ impl ChatClient {
     let body = json!({
       "model": self.doubao_model,
       "input": input,
+      "stream": true,  // 【关键修复】必须添加stream参数启用流式响应
     });
 
     info!("🎨 [豆包多模态] 请求URL: {}", url);
