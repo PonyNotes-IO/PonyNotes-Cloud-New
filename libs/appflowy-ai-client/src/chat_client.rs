@@ -285,6 +285,10 @@ impl ChatClient {
   }
 
   /// 调用豆包多模态 API（使用 /responses 接口）
+  /// 
+  /// 豆包 /responses 接口返回的SSE格式与OpenAI不同，需要转换：
+  /// - 豆包格式：`event: response.output_text.delta\ndata: {"delta":"内容",...}`
+  /// - OpenAI格式：`data: {"choices":[{"delta":{"content":"内容"}}]}`
   async fn stream_doubao_multimodal(
     &self,
     params: &ChatRequestParams,
@@ -320,11 +324,88 @@ impl ChatClient {
 
     info!("✅ [豆包多模态] API响应成功: {}", status);
 
+    // 将豆包 /responses 接口的响应格式转换为 OpenAI 标准格式
     Ok(Box::pin(
       response
         .bytes_stream()
-        .map(|result| result.map_err(|e| anyhow!("Stream error: {}", e))),
+        .map(|result| {
+          result
+            .map(|bytes| Self::convert_doubao_responses_to_openai(&bytes))
+            .map_err(|e| anyhow!("Stream error: {}", e))
+        }),
     ))
+  }
+
+  /// 将豆包 /responses 接口的SSE格式转换为 OpenAI 标准格式
+  /// 
+  /// 输入格式（豆包）：
+  /// ```
+  /// event: response.output_text.delta
+  /// data: {"type":"response.output_text.delta","delta":"内容","..."}
+  /// ```
+  /// 
+  /// 输出格式（OpenAI）：
+  /// ```
+  /// data: {"choices":[{"delta":{"content":"内容"}}]}
+  /// ```
+  fn convert_doubao_responses_to_openai(bytes: &Bytes) -> Bytes {
+    let text = String::from_utf8_lossy(bytes);
+    let mut output = String::new();
+    
+    // 按行处理SSE数据
+    for line in text.lines() {
+      let line = line.trim();
+      
+      // 跳过空行和event行
+      if line.is_empty() || line.starts_with("event:") {
+        continue;
+      }
+      
+      // 处理data行
+      if let Some(data_str) = line.strip_prefix("data:") {
+        let data_str = data_str.trim();
+        
+        // 尝试解析JSON
+        if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(data_str) {
+          // 获取type字段
+          if let Some(event_type) = json_value.get("type").and_then(|v| v.as_str()) {
+            match event_type {
+              // 处理实际内容增量
+              "response.output_text.delta" => {
+                if let Some(delta) = json_value.get("delta").and_then(|v| v.as_str()) {
+                  // 转换为OpenAI格式
+                  let openai_json = json!({
+                    "choices": [{
+                      "delta": {
+                        "content": delta
+                      }
+                    }]
+                  });
+                  output.push_str(&format!("data: {}\n\n", openai_json));
+                  debug!("🔄 [豆包多模态] 转换内容增量: {}", delta);
+                }
+              }
+              // 处理响应完成
+              "response.done" | "response.completed" => {
+                output.push_str("data: [DONE]\n\n");
+                info!("✅ [豆包多模态] 响应完成");
+              }
+              // 忽略其他事件类型（reasoning、created等）
+              _ => {
+                debug!("⏭️ [豆包多模态] 跳过事件类型: {}", event_type);
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    if output.is_empty() {
+      // 如果没有转换出任何内容，返回空bytes
+      Bytes::new()
+    } else {
+      Bytes::from(output)
+    }
   }
 
   /// 构建消息列表 (OpenAI兼容格式，支持历史对话、多模态和文件)
