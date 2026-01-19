@@ -20,6 +20,7 @@ use actix_session::storage::RedisSessionStore;
 use actix_session::SessionMiddleware;
 use actix_web::cookie::Key;
 use actix_web::middleware::NormalizePath;
+use actix_web::web::JsonConfig;
 use actix_web::{dev::Server, web, web::Data, App, HttpResponse, HttpServer, Responder};
 use anyhow::{Context, Error};
 use aws_sdk_s3::config::{Credentials, Region, SharedCredentialsProvider};
@@ -187,6 +188,8 @@ pub async fn run_actix_server(
       .app_data(Data::new(state.clone()))
       .app_data(Data::new(storage.clone()))
       .app_data(Data::new(state.published_collab_store.clone()))
+      // 设置JSON body大小限制为20MB，支持AI图片上传
+      .app_data(JsonConfig::default().limit(20 * 1024 * 1024))
   });
 
   server = server.listen(listener)?;

@@ -161,8 +161,9 @@ echo "  ssh root@8.152.101.166 \"docker exec -it docker-compose-appflowy_cloud-1
 echo ""
 
 # 健康检查
+# 使用域名访问API，通过系统nginx(443)转发到appflowy_cloud服务
 echo -e "${YELLOW}[健康检查] 测试AI聊天模型API...${NC}"
-RESPONSE=$(curl -s http://8.152.101.166/api/ai/chat/models || echo "")
+RESPONSE=$(curl -s https://api.xiaomabiji.com/api/ai/chat/models || echo "")
 
 if [ -n "$RESPONSE" ]; then
     echo -e "${BLUE}API响应数据：${NC}"
@@ -182,7 +183,7 @@ echo ""
 
 # 订阅计划接口测试
 echo -e "${YELLOW}[健康检查] 测试订阅计划API...${NC}"
-PLANS_RESPONSE=$(curl -s http://8.152.101.166/api/subscription/plans || echo "")
+PLANS_RESPONSE=$(curl -s https://api.xiaomabiji.com/api/subscription/plans || echo "")
 
 if [ -n "$PLANS_RESPONSE" ]; then
     echo -e "${BLUE}订阅计划API响应数据：${NC}"
