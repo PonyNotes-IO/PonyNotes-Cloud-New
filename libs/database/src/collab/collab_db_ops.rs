@@ -93,7 +93,7 @@ pub async fn insert_into_af_collab(
       DO UPDATE SET permission_id = excluded.permission_id;
     "#,
     uid,
-    params.object_id,
+    params.object_id.to_string(),
   )
   .execute(tx.deref_mut())
   .await
