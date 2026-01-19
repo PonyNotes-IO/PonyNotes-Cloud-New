@@ -79,6 +79,31 @@ pub async fn insert_into_af_collab(
     ))
   })?;
 
+  // Ensure the collab creator is a member of the collab (Owner permission).
+  // This mirrors previous DB stored-procedure behavior: insert owner into af_collab_member.
+  // Use ON CONFLICT DO UPDATE to keep permission_id in sync if row exists.
+  sqlx::query!(
+    r#"
+      INSERT INTO af_collab_member (uid, oid, permission_id)
+      SELECT $1, $2, rp.permission_id
+      FROM af_role_permissions rp
+      JOIN af_roles ON rp.role_id = af_roles.id
+      WHERE af_roles.name = 'Owner'
+      ON CONFLICT (uid, oid)
+      DO UPDATE SET permission_id = excluded.permission_id;
+    "#,
+    uid,
+    params.object_id,
+  )
+  .execute(tx.deref_mut())
+  .await
+  .map_err(|err| {
+    AppError::Internal(anyhow!(
+      "Insert af_collab_member for owner failed: workspace_id:{}, uid:{}, object_id:{}, error: {:?}",
+      workspace_id, uid, params.object_id, err,
+    ))
+  })?;
+
   Ok(())
 }
 
