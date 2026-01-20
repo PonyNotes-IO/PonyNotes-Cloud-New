@@ -92,8 +92,7 @@ pub struct AvailableModelsResponse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AIModel {
   DeepSeek,
-  QwenTurbo,
-  QwenMax,
+  Qwen3VlPlus,
   Doubao,
 }
 
@@ -101,8 +100,7 @@ impl AIModel {
   pub fn from_str(s: &str) -> Option<Self> {
     match s {
       "deepseek-chat" | "deepseek" => Some(AIModel::DeepSeek),
-      "qwen-turbo" => Some(AIModel::QwenTurbo),
-      "qwen-max" => Some(AIModel::QwenMax),
+      "qwen3-vl-plus" | "qwen3vlplus" => Some(AIModel::Qwen3VlPlus),
       "doubao" | "doubao-pro" => Some(AIModel::Doubao),
       _ => None,
     }
@@ -111,8 +109,7 @@ impl AIModel {
   pub fn to_str(&self) -> &'static str {
     match self {
       AIModel::DeepSeek => "deepseek-chat",
-      AIModel::QwenTurbo => "qwen-turbo",
-      AIModel::QwenMax => "qwen-max",
+      AIModel::Qwen3VlPlus => "qwen3-vl-plus",
       AIModel::Doubao => "doubao",
     }
   }

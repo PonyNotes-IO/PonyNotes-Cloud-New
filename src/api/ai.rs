@@ -342,8 +342,7 @@ async fn stream_chat_handler(
     
     match plan {
       SubscriptionPlan::Free | SubscriptionPlan::Basic => AIModel::DeepSeek,
-      SubscriptionPlan::Pro => AIModel::QwenTurbo,
-      SubscriptionPlan::Team | SubscriptionPlan::AiMax => AIModel::QwenMax,
+      SubscriptionPlan::Pro | SubscriptionPlan::Team | SubscriptionPlan::AiMax => AIModel::Qwen3VlPlus,
       _ => AIModel::DeepSeek,
     }
   };
@@ -482,20 +481,11 @@ async fn list_chat_models_handler(
     });
   }
   
-  if available_models.contains(&AIModel::QwenTurbo) {
+  if available_models.contains(&AIModel::Qwen3VlPlus) {
     models.push(AIModelInfo {
-      id: "qwen-turbo".to_string(),
-      name: "通义千问 Turbo".to_string(),
-      description: "阿里云通义千问快速版".to_string(),
-      is_default: false,
-    });
-  }
-  
-  if available_models.contains(&AIModel::QwenMax) {
-    models.push(AIModelInfo {
-      id: "qwen-max".to_string(),
-      name: "通义千问 Max".to_string(),
-      description: "阿里云通义千问旗舰版".to_string(),
+      id: "qwen3-vl-plus".to_string(),
+      name: "通义千问 VL Plus".to_string(),
+      description: "阿里云通义千问多模态模型（支持图片和文件分析）".to_string(),
       is_default: false,
     });
   }

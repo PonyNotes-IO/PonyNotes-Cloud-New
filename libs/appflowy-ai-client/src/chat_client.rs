@@ -19,8 +19,7 @@ pub struct ChatClient {
   // 通义千问配置
   qwen_api_key: String,
   qwen_api_base: String,
-  qwen_turbo_model: String,
-  qwen_max_model: String,
+  qwen3_vl_plus_model: String,
   // 豆包配置
   doubao_api_key: String,
   doubao_api_base: String,
@@ -60,10 +59,8 @@ impl ChatClient {
       qwen_api_base: std::env::var("AI_CHAT_QWEN_API_BASE").unwrap_or_else(|_| {
         "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()
       }),
-      qwen_turbo_model: std::env::var("AI_CHAT_QWEN_TURBO_MODEL")
-        .unwrap_or_else(|_| "qwen-turbo".to_string()),
-      qwen_max_model: std::env::var("AI_CHAT_QWEN_MAX_MODEL")
-        .unwrap_or_else(|_| "qwen-max".to_string()),
+      qwen3_vl_plus_model: std::env::var("AI_CHAT_QWEN3_VL_PLUS_MODEL")
+        .unwrap_or_else(|_| "qwen3-vl-plus".to_string()),
       doubao_api_key,
       doubao_api_base: std::env::var("AI_CHAT_DOUBAO_API_BASE")
         .unwrap_or_else(|_| "https://ark.cn-beijing.volces.com/api/v3".to_string()),
@@ -86,8 +83,7 @@ impl ChatClient {
 
     match model {
       AIModel::DeepSeek => self.stream_deepseek(params).await,
-      AIModel::QwenTurbo => self.stream_qwen(params, &self.qwen_turbo_model).await,
-      AIModel::QwenMax => self.stream_qwen(params, &self.qwen_max_model).await,
+      AIModel::Qwen3VlPlus => self.stream_qwen(params, &self.qwen3_vl_plus_model).await,
       AIModel::Doubao => self.stream_doubao(params).await,
     }
   }
@@ -148,7 +144,7 @@ impl ChatClient {
     ))
   }
 
-  /// 调用通义千问 API
+  /// 调用通义千问 API（支持多模态，qwen3-vl-plus 支持图片和文件分析）
   async fn stream_qwen(
     &self,
     params: &ChatRequestParams,
@@ -156,6 +152,21 @@ impl ChatClient {
   ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>> {
     if self.qwen_api_key.is_empty() {
       return Err(anyhow!("Qwen API key not configured"));
+    }
+
+    // 检查是否有图片（多模态支持）
+    let has_images = params.has_images && params.images.is_some() && !params.images.as_ref().unwrap().is_empty();
+    
+    info!("🤖 [通义千问] 模型: {}, has_images: {}, images_count: {}", 
+      model_name,
+      params.has_images, 
+      params.images.as_ref().map(|v| v.len()).unwrap_or(0)
+    );
+    
+    if has_images {
+      info!("🎨 [通义千问] 检测到图片，使用多模态格式");
+    } else {
+      info!("💬 [通义千问] 纯文本消息");
     }
 
     let url = format!("{}/chat/completions", self.qwen_api_base);
@@ -177,7 +188,13 @@ impl ChatClient {
       body["enable_thinking"] = json!(true);
     }
 
-    debug!("Qwen request URL: {}", url);
+    info!("🎨 [通义千问] 请求URL: {}", url);
+    info!("🎨 [通义千问] 模型: {}", model_name);
+    if has_images {
+      info!("🎨 [通义千问] 请求体（多模态）: {}", serde_json::to_string_pretty(&body)?);
+    } else {
+      debug!("💬 [通义千问] 请求体: {}", serde_json::to_string_pretty(&body)?);
+    }
 
     let response = self
       .http_client
@@ -191,11 +208,15 @@ impl ChatClient {
     let status = response.status();
     if !status.is_success() {
       let error_text = response.text().await?;
-      error!("Qwen API error: {} - {}", status, error_text);
+      error!("❌ [通义千问] API错误: {} - {}", status, error_text);
       return Err(anyhow!("Qwen API error: {} - {}", status, error_text));
     }
 
-    info!("Qwen API response status: {}", status);
+    if has_images {
+      info!("✅ [通义千问] 多模态API响应成功: {}", status);
+    } else {
+      info!("✅ [通义千问] API响应成功: {}", status);
+    }
 
     Ok(Box::pin(
       response
@@ -593,7 +614,7 @@ impl ChatClient {
   pub fn is_model_available(&self, model: AIModel) -> bool {
     match model {
       AIModel::DeepSeek => !self.deepseek_api_key.is_empty(),
-      AIModel::QwenTurbo | AIModel::QwenMax => !self.qwen_api_key.is_empty(),
+      AIModel::Qwen3VlPlus => !self.qwen_api_key.is_empty(),
       AIModel::Doubao => !self.doubao_api_key.is_empty(),
     }
   }
@@ -605,8 +626,10 @@ impl ChatClient {
       models.push(AIModel::DeepSeek);
     }
     if !self.qwen_api_key.is_empty() {
-      models.push(AIModel::QwenTurbo);
-      models.push(AIModel::QwenMax);
+      // 检查 qwen3-vl-plus 模型是否配置（通过环境变量判断）
+      if !self.qwen3_vl_plus_model.is_empty() {
+        models.push(AIModel::Qwen3VlPlus);
+      }
     }
     if !self.doubao_api_key.is_empty() {
       models.push(AIModel::Doubao);
