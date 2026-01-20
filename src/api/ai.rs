@@ -484,8 +484,8 @@ async fn list_chat_models_handler(
   if available_models.contains(&AIModel::Qwen3VlPlus) {
     models.push(AIModelInfo {
       id: "qwen3-vl-plus".to_string(),
-      name: "通义千问 VL Plus".to_string(),
-      description: "阿里云通义千问多模态模型（支持图片和文件分析）".to_string(),
+      name: "通义千问".to_string(),
+      description: "阿里云通义千问qwen3".to_string(),
       is_default: false,
     });
   }
