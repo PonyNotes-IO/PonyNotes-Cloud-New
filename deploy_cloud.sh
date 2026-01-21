@@ -30,15 +30,15 @@ echo ""
 # 步骤1：本地构建Docker镜像
 echo -e "${YELLOW}[步骤 1/7] 构建Docker镜像...${NC}"
 cd "$PROJECT_DIR"
-# docker compose --file "$COMPOSE_FILE" build appflowy_cloud
+cd /Users/kuncao/github.com/PonyNotes-IO/PonyNotes-Cloud-New && DOCKER_BUILDKIT=1 docker buildx build --platform linux/amd64 -f /Users/kuncao/github.com/PonyNotes-IO/PonyNotes-Cloud-New/Dockerfile -t appflowyinc/appflowy_cloud:latest --build-arg CARGO_BUILD_JOBS=16 --build-arg ENABLE_SCCACHE=true --cache-from=type=local,src=/tmp/.buildx-cache --cache-to=type=local,dest=/tmp/.buildx-cache,mode=max --load /Users/kuncao/github.com/PonyNotes-IO/PonyNotes-Cloud-New
 
-# if [ $? -eq 0 ]; then
-#     echo -e "${GREEN}✅ Docker镜像构建成功${NC}"
-# else
-#     echo -e "${RED}❌ Docker镜像构建失败，退出部署${NC}"
-#     exit 1
-# fi
-# echo ""
+if [ $? -eq 0 ]; then
+    echo -e "${GREEN}✅ Docker镜像构建成功${NC}"
+else
+    echo -e "${RED}❌ Docker镜像构建失败，退出部署${NC}"
+    exit 1
+fi
+echo ""
 
 # 步骤2：导出镜像为tar文件
 echo -e "${YELLOW}[步骤 2/7] 导出镜像到tar文件...${NC}"
