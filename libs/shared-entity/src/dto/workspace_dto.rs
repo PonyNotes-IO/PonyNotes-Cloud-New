@@ -450,6 +450,8 @@ impl Default for ViewLayout {
 pub enum SpacePermission {
   PublicToAll = 0,
   Private = 1,
+  /// Closed: visible but requires approval/invite to join.
+  Closed = 2,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize)]

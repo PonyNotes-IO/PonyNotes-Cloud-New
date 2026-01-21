@@ -542,5 +542,10 @@ pub fn to_space_permission(space_permission: &workspace_dto::SpacePermission) ->
   match space_permission {
     workspace_dto::SpacePermission::PublicToAll => SpacePermission::PublicToAll,
     workspace_dto::SpacePermission::Private => SpacePermission::Private,
+    // The collab_folder::SpacePermission in this workspace may not support a
+    // distinct 'Closed' variant. Map 'Closed' to 'Private' to preserve safety
+    // (no public listing/join) until collab-folder crate is updated to support
+    // a separate Closed semantic.
+    workspace_dto::SpacePermission::Closed => SpacePermission::Private,
   }
 }
