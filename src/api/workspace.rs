@@ -2520,7 +2520,7 @@ async fn get_workspace_usage_handler(
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
   state
     .workspace_access_control
-    .enforce_role_weak(&uid, &workspace_id, AFRole::Owner)
+    .enforce_role_weak(&uid, &workspace_id, AFRole::Member)
     .await?;
   let res =
     biz::workspace::ops::get_workspace_document_total_bytes(&state.pg_pool, &workspace_id).await?;
@@ -2536,7 +2536,7 @@ async fn get_workspace_usage_and_limit_handler(
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
   state
     .workspace_access_control
-    .enforce_role_weak(&uid, &workspace_id, AFRole::Owner)
+    .enforce_role_weak(&uid, &workspace_id, AFRole::Member)
     .await?;
   let res =
     biz::workspace::ops::get_workspace_usage_and_limit(&state.pg_pool, &workspace_id).await?;
