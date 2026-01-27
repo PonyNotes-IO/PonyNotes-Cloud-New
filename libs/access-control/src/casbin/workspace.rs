@@ -66,7 +66,7 @@ impl WorkspaceAccessControl for WorkspaceAccessControlImpl {
   ) -> Result<(), AppError> {
     let result = self
       .access_control
-      .enforce_immediately(uid, ObjectType::Workspace(workspace_id.to_string()), action)
+      .enforce_strong(uid, ObjectType::Workspace(workspace_id.to_string()), action)
       .await;
     match result {
       Ok(true) => Ok(()),
