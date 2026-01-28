@@ -11,11 +11,15 @@ use actix_web::{web, HttpRequest, HttpResponse, Scope};
 use app_error::AppError;
 use appflowy_ai_client::dto::{
   CalculateSimilarityParams, LocalAIConfig, ModelList, SimilarityResponse, TranslateRowParams,
-  TranslateRowResponse,
+  TranslateRowResponse, STREAM_ANSWER_KEY,
 };
 use appflowy_ai_client::{AIModel, AIModelInfo, AvailableModelsResponse, ChatRequestParams};
 
-use futures_util::{stream, StreamExt, TryStreamExt};
+use futures_util::{stream, Stream, StreamExt, TryStreamExt};
+use bytes::Bytes;
+use serde_json::Value;
+use std::pin::Pin;
+use appflowy_ai_client::error::AIError;
 
 use database::ai_usage::{get_workspace_ai_usage_this_month, increment_ai_usage};
 use serde::Deserialize;
@@ -109,6 +113,151 @@ async fn stream_complete_text_handler(
   }
 }
 
+/// 将OpenAI格式的SSE流转换为客户端期望的JSON格式的流转换器
+/// OpenAI格式: data: {"choices":[{"delta":{"content":"text"}}]}\n\n
+/// 客户端期望: {"1": "text"} 或 {"4": "comment"}
+fn convert_openai_stream_to_json_stream(
+  stream: impl Stream<Item = Result<Bytes, AIError>> + Send + 'static,
+) -> impl Stream<Item = Result<Bytes, AppError>> + Send {
+  use futures_util::stream::unfold;
+  
+  struct StreamState {
+    stream: Pin<Box<dyn Stream<Item = Result<Bytes, AIError>> + Send>>,
+    buffer: String,
+  }
+  
+  let state = StreamState {
+    stream: Box::pin(stream),
+    buffer: String::new(),
+  };
+  
+  unfold(state, |mut state| async move {
+    use futures_util::StreamExt;
+    
+    // 从底层流获取下一个chunk
+    match state.stream.next().await {
+      Some(Ok(bytes)) => {
+        // 将字节转换为字符串
+        let text = match String::from_utf8(bytes.to_vec()) {
+          Ok(s) => s,
+          Err(_) => {
+            // 如果不是UTF-8，直接返回原始字节（可能是二进制数据）
+            return Some((Ok(bytes), state));
+          }
+        };
+        
+        // 将新数据追加到缓冲区
+        state.buffer.push_str(&text);
+        
+        // 尝试从缓冲区提取完整的SSE事件
+        let mut json_output = String::new();
+        let mut processed_len = 0;
+        
+        // 按行处理
+        let lines: Vec<&str> = state.buffer.lines().collect();
+        let mut i = 0;
+        while i < lines.len() {
+          let line = lines[i].trim();
+          
+          // 跳过空行和event行
+          if line.is_empty() || line.starts_with("event:") {
+            i += 1;
+            continue;
+          }
+          
+          // 处理data行
+          if let Some(data_str) = line.strip_prefix("data:") {
+            let data_str = data_str.trim();
+            
+            // 检查是否是结束标记
+            if data_str == "[DONE]" {
+              i += 1;
+              continue;
+            }
+            
+            // 尝试解析JSON
+            match serde_json::from_str::<Value>(data_str) {
+              Ok(json) => {
+                // 从OpenAI兼容格式转换为内部格式
+                // OpenAI格式: {"choices":[{"delta":{"content":"text"}}]}
+                // 内部格式: {"1": "text"} 或 {"4": "comment"}
+                if let Value::Object(ref obj) = json {
+                  if let Some(choices) = obj.get("choices").and_then(|c| c.as_array()) {
+                    if let Some(first_choice) = choices.first() {
+                      if let Some(delta) = first_choice.get("delta").and_then(|d| d.as_object()) {
+                        // 优先使用 content，如果没有或为空则使用 reasoning_content（豆包模型的思考过程）
+                        let content = delta.get("content")
+                          .and_then(|c| c.as_str())
+                          .filter(|s| !s.is_empty())
+                          .or_else(|| {
+                            delta.get("reasoning_content")
+                              .and_then(|c| c.as_str())
+                              .filter(|s| !s.is_empty())
+                          });
+                        
+                        if let Some(content_text) = content {
+                          // 转换为内部格式
+                          let mut internal_obj = serde_json::Map::new();
+                          internal_obj.insert(STREAM_ANSWER_KEY.to_string(), Value::String(content_text.to_string()));
+                          
+                          // 序列化为JSON字符串
+                          if let Ok(json_str) = serde_json::to_string(&Value::Object(internal_obj)) {
+                            json_output.push_str(&json_str);
+                            json_output.push('\n');
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              Err(e) => {
+                // 如果解析失败，记录错误但继续处理
+                trace!("Failed to parse SSE JSON: {} - {}", e, data_str);
+              }
+            }
+          }
+          
+          // 计算已处理的数据长度（包括换行符）
+          if i < lines.len() - 1 {
+            // 不是最后一行，可以安全处理
+            processed_len += lines[i].len() + 1; // +1 for newline
+          } else {
+            // 最后一行，可能不完整，保留在缓冲区
+            break;
+          }
+          
+          i += 1;
+        }
+        
+        // 移除已处理的数据
+        if processed_len > 0 {
+          state.buffer.drain(0..processed_len);
+        }
+        
+        // 如果有转换后的JSON输出，返回它；否则返回空字节（等待更多数据）
+        if !json_output.is_empty() {
+          Some((Ok(Bytes::from(json_output)), state))
+        } else {
+          // 返回空字节，表示需要等待更多数据
+          Some((Ok(Bytes::new()), state))
+        }
+      },
+      Some(Err(e)) => {
+        Some((Err(AppError::AIServiceUnavailable(e.to_string())), state))
+      },
+      None => {
+        // 流结束，处理剩余的缓冲区数据
+        if !state.buffer.trim().is_empty() {
+          // 尝试处理剩余的缓冲区数据
+          // 这里可以添加最后的处理逻辑
+        }
+        None
+      }
+    }
+  })
+}
+
 async fn stream_complete_v2_handler(
   _user_uuid: UserUuid,
   workspace_id: web::Path<Uuid>,
@@ -138,10 +287,14 @@ async fn stream_complete_v2_handler(
         error!("Failed to increment AI usage: {:?}", e);
       }
       
+      // 转换OpenAI格式的流为客户端期望的JSON格式
+      let converted_stream = convert_openai_stream_to_json_stream(stream)
+        .map(|result| result.map_err(|e| actix_web::error::ErrorInternalServerError(e)));
+      
       Ok(
         HttpResponse::Ok()
           .content_type("text/event-stream")
-          .streaming(stream.map_err(AppError::from)),
+          .streaming(converted_stream),
       )
     },
     Err(err) => Ok(

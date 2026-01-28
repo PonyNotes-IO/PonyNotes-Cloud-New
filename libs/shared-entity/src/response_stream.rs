@@ -23,13 +23,30 @@ where
   ) -> Result<impl Stream<Item = Result<T, AppResponseError>>, AppResponseError> {
     let status_code = resp.status();
     if status_code.is_server_error() {
-      let body = resp.text().await?;
-      return Err(AppError::AIServiceUnavailable(body).into());
+      let body = resp.text().await.unwrap_or_else(|_| "无法读取错误信息".to_string());
+      // 对于502/503/504网关错误，返回友好的错误消息
+      let error_message = if status_code == 502 || status_code == 503 || status_code == 504 {
+        format!("AI 服务暂时不可用（网关错误 {}），请稍后重试。", status_code)
+      } else {
+        // 其他服务器错误，尝试清洗HTML错误页面
+        if body.len() > 500 && (body.contains('<') || body.contains('>')) {
+          format!("AI 服务暂时不可用（服务器错误 {}），请稍后重试。", status_code)
+        } else {
+          body
+        }
+      };
+      return Err(AppError::AIServiceUnavailable(error_message).into());
     }
 
     if !status_code.is_success() {
-      let body = resp.text().await?;
-      return Err(AppResponseError::new(ErrorCode::AIResponseError, body));
+      let body = resp.text().await.unwrap_or_else(|_| "无法读取错误信息".to_string());
+      // 清洗可能的HTML错误页面
+      let error_message = if body.len() > 500 && (body.contains('<') || body.contains('>')) {
+        format!("AI 服务错误（状态码 {}），请稍后重试。", status_code)
+      } else {
+        body
+      };
+      return Err(AppResponseError::new(ErrorCode::AIResponseError, error_message));
     }
 
     let stream = resp.bytes_stream().map_err(|err| {
@@ -61,8 +78,22 @@ where
   ) -> Result<impl Stream<Item = Result<Bytes, AppResponseError>>, AppResponseError> {
     let status_code = resp.status();
     if !status_code.is_success() {
-      let body = resp.text().await?;
-      return Err(AppResponseError::new(ErrorCode::Internal, body));
+      let body = resp.text().await.unwrap_or_else(|_| "无法读取错误信息".to_string());
+      // 清洗可能的HTML错误页面
+      let error_message = if status_code.is_server_error() {
+        if status_code == 502 || status_code == 503 || status_code == 504 {
+          format!("AI 服务暂时不可用（网关错误 {}），请稍后重试。", status_code)
+        } else if body.len() > 500 && (body.contains('<') || body.contains('>')) {
+          format!("AI 服务暂时不可用（服务器错误 {}），请稍后重试。", status_code)
+        } else {
+          body
+        }
+      } else if body.len() > 500 && (body.contains('<') || body.contains('>')) {
+        format!("AI 服务错误（状态码 {}），请稍后重试。", status_code)
+      } else {
+        body
+      };
+      return Err(AppResponseError::new(ErrorCode::Internal, error_message));
     }
 
     let stream = resp.bytes_stream().map_err(AppResponseError::from);
