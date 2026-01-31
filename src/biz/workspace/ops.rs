@@ -352,6 +352,8 @@ pub async fn accept_workspace_invite(
   let invited_uid = inv
     .invitee_uid
     .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Invitee uid is missing for {:?}", inv)))?;
+  // 保存 role 用于后续通知创建（因为 insert_role 会移动 inv.role）
+  let role_str = format!("{:?}", inv.role);
   workspace_access_control
     .insert_role(&invited_uid, &inv.workspace_id, inv.role)
     .await?;
@@ -363,7 +365,7 @@ pub async fn accept_workspace_invite(
     "message": format!("用户已接受邀请并加入工作空间"),
     "invitee_uid": invited_uid,
     "inviter_uid": inv.inviter_uid,
-    "role": format!("{:?}", inv.role),
+    "role": role_str,
     "accepted_at": chrono::Utc::now().timestamp(),
   });
   if let Err(err) = create_workspace_notification(
