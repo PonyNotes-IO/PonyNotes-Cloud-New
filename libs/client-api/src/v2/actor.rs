@@ -728,6 +728,9 @@ impl WorkspaceControllerActor {
           self.unbind(object_id).await;
         }
       },
+      WorkspaceNotification::SystemNotification { .. } => {
+        // 系统通知将通过 notification_tx 发送给订阅者处理
+      },
     }
 
     if let Err(err) = self.notification_tx.send(notification) {

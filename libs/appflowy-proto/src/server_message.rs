@@ -1,7 +1,9 @@
 use crate::pb;
 use crate::pb::collab_message::Data;
 use crate::pb::message::Payload;
-use crate::pb::notification::{PermissionChanged, SystemNotification as PbSystemNotification, UserProfileChange};
+use crate::pb::notification::{
+  PermissionChanged, SystemNotification as PbSystemNotification, UserProfileChange,
+};
 #[rustfmt::skip]
 use crate::pb::{SyncRequest, message};
 use crate::shared::{Error, ObjectId, Rid, UpdateFlags};
@@ -252,16 +254,18 @@ impl From<ServerMessage> for pb::Message {
         } => pb::Message {
           payload: Some(message::Payload::Notification(
             pb::notification::WorkspaceNotification {
-              payload: Some(NotificationPayload::SystemNotification(PbSystemNotification {
-                id,
-                workspace_id,
-                notification_type,
-                title,
-                message,
-                payload_json,
-                created_at,
-                recipient_uid,
-              })),
+              payload: Some(NotificationPayload::SystemNotification(
+                PbSystemNotification {
+                  id,
+                  workspace_id,
+                  notification_type,
+                  title,
+                  message,
+                  payload_json,
+                  created_at,
+                  recipient_uid,
+                },
+              )),
             },
           )),
         },
