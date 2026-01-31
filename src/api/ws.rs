@@ -14,7 +14,7 @@ use appflowy_collaborate::actix_ws::client::rt_client::RealtimeClient;
 use appflowy_collaborate::actix_ws::server::RealtimeServerActor;
 use appflowy_collaborate::ws2::{SessionInfo, WsSession};
 use appflowy_proto::{ServerMessage, WorkspaceNotification};
-use collab_rt_entity::user::{AFUserChange, RealtimeUser, UserMessage};
+use collab_rt_entity::user::{AFSystemNotification, AFUserChange, RealtimeUser, UserMessage};
 use collab_rt_entity::{max_sync_message_size, RealtimeMessage};
 use collab_stream::model::MessageId;
 use secrecy::Secret;
@@ -133,11 +133,14 @@ pub async fn establish_ws_connection_v2(
   );
 
   let (tx, rx) = mpsc::channel(10);
+
+  // 订阅用户资料变更通知
+  let tx_user = tx.clone();
   let mut user_change_recv = state.pg_listeners.subscribe_user_change(uid);
   actix::spawn(async move {
     while let Some(notification) = user_change_recv.recv().await {
       if let Some(user) = notification.payload {
-        let _ = tx
+        let _ = tx_user
           .send(ServerMessage::Notification {
             notification: WorkspaceNotification::UserProfileChange {
               uid: user.uid,
@@ -150,6 +153,37 @@ pub async fn establish_ws_connection_v2(
     }
   });
 
+  // 订阅系统通知
+  let tx_system = tx.clone();
+  let mut system_notification_recv = state.pg_listeners.subscribe_system_notification(uid);
+  actix::spawn(async move {
+    while let Some(notification) = system_notification_recv.recv().await {
+      trace!(
+        "Pushing system notification to WebSocket: uid={}, type={}, id={}",
+        uid,
+        notification.notification_type,
+        notification.id
+      );
+      let _ = tx_system
+        .send(ServerMessage::Notification {
+          notification: WorkspaceNotification::SystemNotification {
+            id: notification.id.to_string(),
+            workspace_id: notification
+              .workspace_id
+              .map(|id| id.to_string())
+              .unwrap_or_default(),
+            notification_type: notification.notification_type,
+            title: extract_title_from_payload(&notification.payload),
+            message: extract_message_from_payload(&notification.payload),
+            payload_json: notification.payload.to_string(),
+            created_at: notification.created_at.timestamp(),
+            recipient_uid: notification.recipient_uid.unwrap_or(0),
+          },
+        })
+        .await;
+    }
+  });
+
   ws::WsResponseBuilder::new(
     WsSession::new(workspace_id, info, ws_server, rx),
     &request,
@@ -157,6 +191,24 @@ pub async fn establish_ws_connection_v2(
   )
   .frame_size(max_sync_message_size())
   .start()
+}
+
+/// 从通知 payload 中提取标题
+fn extract_title_from_payload(payload: &serde_json::Value) -> String {
+  payload
+    .get("title")
+    .and_then(|v| v.as_str())
+    .unwrap_or("系统通知")
+    .to_string()
+}
+
+/// 从通知 payload 中提取消息内容
+fn extract_message_from_payload(payload: &serde_json::Value) -> String {
+  payload
+    .get("message")
+    .and_then(|v| v.as_str())
+    .unwrap_or("")
+    .to_string()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -203,7 +255,10 @@ async fn start_connect(
       );
 
       // Receive user change notifications and send them to the client.
-      listen_on_user_change(state, uid, tx);
+      listen_on_user_change(state, uid, tx.clone());
+
+      // Receive system notifications and send them to the client.
+      listen_on_system_notification(state, uid, tx);
 
       match ws::WsResponseBuilder::new(client, request, payload)
         .frame_size(MAX_FRAME_SIZE * 2)
@@ -249,6 +304,38 @@ fn listen_on_user_change(state: &Data<AppState>, uid: i64, tx: Sender<RealtimeMe
         if tx.send(RealtimeMessage::User(msg)).await.is_err() {
           break;
         }
+      }
+    }
+  });
+}
+
+/// 监听系统通知并发送给客户端（v1 版本 WebSocket）
+fn listen_on_system_notification(state: &Data<AppState>, uid: i64, tx: Sender<RealtimeMessage>) {
+  let mut notification_recv = state.pg_listeners.subscribe_system_notification(uid);
+  actix::spawn(async move {
+    while let Some(notification) = notification_recv.recv().await {
+      trace!(
+        "Receive system notification for v1 ws: uid={}, type={}, id={}",
+        uid,
+        notification.notification_type,
+        notification.id
+      );
+      // 构造 AFSystemNotification 并通过 UserMessage 发送
+      let msg = UserMessage::SystemNotification(AFSystemNotification {
+        id: notification.id.to_string(),
+        workspace_id: notification
+          .workspace_id
+          .map(|id| id.to_string())
+          .unwrap_or_default(),
+        notification_type: notification.notification_type,
+        title: extract_title_from_payload(&notification.payload),
+        message: extract_message_from_payload(&notification.payload),
+        payload_json: notification.payload.to_string(),
+        created_at: notification.created_at.timestamp(),
+        recipient_uid: notification.recipient_uid.unwrap_or(0),
+      });
+      if tx.send(RealtimeMessage::User(msg)).await.is_err() {
+        break;
       }
     }
   });

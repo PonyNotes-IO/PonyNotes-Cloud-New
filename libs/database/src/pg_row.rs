@@ -338,6 +338,24 @@ pub struct AFUserNotification {
   pub payload: Option<AFUserRow>,
 }
 
+/// 系统通知行结构，对应 af_notification 表
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct AFNotificationRow {
+  pub id: Uuid,
+  pub workspace_id: Option<Uuid>,
+  pub notification_type: String,
+  pub payload: serde_json::Value,
+  pub recipient_uid: Option<i64>,
+  pub created_at: DateTime<Utc>,
+  pub processed: bool,
+}
+
+/// 用于 PostgreSQL NOTIFY 的系统通知消息
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct AFSystemNotification {
+  pub payload: Option<AFNotificationRow>,
+}
+
 #[derive(FromRow, Serialize, Deserialize, Debug, Clone)]
 pub struct AFPermissionRow {
   pub id: i32,

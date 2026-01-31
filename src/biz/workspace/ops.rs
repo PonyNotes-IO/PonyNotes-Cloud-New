@@ -34,6 +34,7 @@ use crate::biz::subscription::ops::fetch_current_subscription;
 use chrono::{Datelike, Utc};
 
 use crate::biz::authentication::jwt::OptionalUserUuid;
+use crate::biz::notification::ops::create_workspace_notification;
 use crate::biz::user::user_init::{
   create_user_awareness, create_workspace_collab, create_workspace_database_collab,
   initialize_workspace_for_user,
@@ -355,6 +356,31 @@ pub async fn accept_workspace_invite(
     .insert_role(&invited_uid, &inv.workspace_id, inv.role)
     .await?;
   txn.commit().await?;
+
+  // 创建系统通知：新成员接受邀请加入工作空间
+  let notification_payload = json!({
+    "title": "新成员加入",
+    "message": format!("用户已接受邀请并加入工作空间"),
+    "invitee_uid": invited_uid,
+    "inviter_uid": inv.inviter_uid,
+    "role": format!("{:?}", inv.role),
+    "accepted_at": chrono::Utc::now().timestamp(),
+  });
+  if let Err(err) = create_workspace_notification(
+    pg_pool,
+    &inv.workspace_id,
+    "workspace_invitation_accepted",
+    &notification_payload,
+    None, // 广播给所有工作空间成员
+  )
+  .await
+  {
+    tracing::warn!(
+      "Failed to create workspace invitation accepted notification: {:?}",
+      err
+    );
+  }
+
   Ok(())
 }
 

@@ -7,6 +7,8 @@ use std::hash::Hash;
 pub enum UserMessage {
   ProfileChange(AFUserChange),
   WorkspaceMemberChange(AFWorkspaceMemberChange),
+  /// 系统通知：用于工作空间级别的通知（成员加入、权限变更、@提及等）
+  SystemNotification(AFSystemNotification),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, Eq, PartialEq)]
@@ -22,6 +24,27 @@ pub struct AFWorkspaceMemberChange {
   added: Vec<AFWorkspaceMember>,
   updated: Vec<AFWorkspaceMember>,
   removed: Vec<AFWorkspaceMember>,
+}
+
+/// 系统通知结构体
+#[derive(Debug, Clone, Serialize, Deserialize, Hash, Eq, PartialEq)]
+pub struct AFSystemNotification {
+  /// 通知唯一ID
+  pub id: String,
+  /// 工作空间ID
+  pub workspace_id: String,
+  /// 通知类型：workspace_member_joined, permission_changed, mention, etc.
+  pub notification_type: String,
+  /// 通知标题
+  pub title: String,
+  /// 通知内容
+  pub message: String,
+  /// 额外的JSON载荷
+  pub payload_json: String,
+  /// 创建时间戳（秒）
+  pub created_at: i64,
+  /// 接收者用户ID（0表示广播）
+  pub recipient_uid: i64,
 }
 
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]

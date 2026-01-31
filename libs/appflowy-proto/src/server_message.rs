@@ -1,7 +1,7 @@
 use crate::pb;
 use crate::pb::collab_message::Data;
 use crate::pb::message::Payload;
-use crate::pb::notification::{PermissionChanged, UserProfileChange};
+use crate::pb::notification::{PermissionChanged, SystemNotification as PbSystemNotification, UserProfileChange};
 #[rustfmt::skip]
 use crate::pb::{SyncRequest, message};
 use crate::shared::{Error, ObjectId, Rid, UpdateFlags};
@@ -240,6 +240,31 @@ impl From<ServerMessage> for pb::Message {
             },
           )),
         },
+        WorkspaceNotification::SystemNotification {
+          id,
+          workspace_id,
+          notification_type,
+          title,
+          message,
+          payload_json,
+          created_at,
+          recipient_uid,
+        } => pb::Message {
+          payload: Some(message::Payload::Notification(
+            pb::notification::WorkspaceNotification {
+              payload: Some(NotificationPayload::SystemNotification(PbSystemNotification {
+                id,
+                workspace_id,
+                notification_type,
+                title,
+                message,
+                payload_json,
+                created_at,
+                recipient_uid,
+              })),
+            },
+          )),
+        },
       },
     }
   }
@@ -316,6 +341,18 @@ impl TryFrom<pb::Message> for ServerMessage {
                 },
               })
             },
+            NotificationPayload::SystemNotification(value) => Ok(ServerMessage::Notification {
+              notification: WorkspaceNotification::SystemNotification {
+                id: value.id,
+                workspace_id: value.workspace_id,
+                notification_type: value.notification_type,
+                title: value.title,
+                message: value.message,
+                payload_json: value.payload_json,
+                created_at: value.created_at,
+                recipient_uid: value.recipient_uid,
+              },
+            }),
           },
         },
       },
@@ -333,6 +370,17 @@ pub enum WorkspaceNotification {
   ObjectAccessChanged {
     object_id: Uuid,
     reason: AccessChangedReason,
+  },
+  /// 系统通知：用于工作空间级别的通知（成员加入、权限变更、@提及等）
+  SystemNotification {
+    id: String,
+    workspace_id: String,
+    notification_type: String,
+    title: String,
+    message: String,
+    payload_json: String,
+    created_at: i64,
+    recipient_uid: i64,
   },
 }
 
