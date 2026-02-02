@@ -28,13 +28,14 @@ use database_entity::dto::{
   AFRole, AFWorkspace, AFWorkspaceInvitation, AFWorkspaceInvitationStatus, AFWorkspaceSettings,
   GlobalComment, Reaction, WorkspaceMemberProfile, WorkspaceUsage,
 };
+
+use crate::biz::notification::ops::create_workspace_notification;
 use shared_entity::dto::billing_dto::{SubscriptionPlan, WorkspaceUsageAndLimit};
 use crate::biz::workspace::subscription_plan_limits::PlanLimits;
 use crate::biz::subscription::ops::fetch_current_subscription;
 use chrono::{Datelike, Utc};
 
 use crate::biz::authentication::jwt::OptionalUserUuid;
-use crate::biz::notification::ops::create_workspace_notification;
 use crate::biz::user::user_init::{
   create_user_awareness, create_workspace_collab, create_workspace_database_collab,
   initialize_workspace_for_user,
@@ -500,6 +501,33 @@ pub async fn invite_workspace_members(
           .bind(invite_id)
           .execute(txn.deref_mut())
           .await?;
+
+          // 发送站内通知给被邀请的用户
+          if let Ok(invitee_uid) = invitee_uid_result {
+            let payload = serde_json::json!({
+              "invite_id": invite_id.to_string(),
+              "workspace_id": workspace_id.to_string(),
+              "inviter_name": inviter_name,
+              "workspace_name": workspace_name,
+              "role": match invitation.role {
+                AFRole::Owner => "Owner",
+                AFRole::Member => "Member",
+                AFRole::Guest => "Guest",
+              },
+              "message": format!("{} 邀请你加入工作空间 {}，可以点击账号左上角切换空间。", inviter_name, workspace_name)
+            });
+            // 使用 reminder 类型，确保前端能正确显示在"提醒" tab 中
+            // 文案：提醒用户被邀请加入工作空间
+            if let Err(err) = create_workspace_notification(
+              pg_pool,
+              workspace_id,
+              "reminder", // 使用 reminder 类型
+              &payload,
+              Some(invitee_uid),
+            ).await {
+              tracing::warn!("Failed to create notification for invited user {}: {:?}", invitation.email, err);
+            }
+          }
         } else {
           // 用户未注册，创建pending邀请记录
           insert_workspace_invitation(
@@ -558,9 +586,36 @@ pub async fn invite_workspace_members(
             .bind(invite_id)
             .execute(txn.deref_mut())
             .await?;
+
+            // 发送站内通知给被邀请的用户
+            if let Ok(invitee_uid) = invitee_uid_result {
+          let payload = serde_json::json!({
+            "invite_id": invite_id.to_string(),
+            "workspace_id": workspace_id.to_string(),
+            "inviter_name": inviter_name,
+            "workspace_name": workspace_name,
+            "role": match invitation.role {
+              AFRole::Owner => "Owner",
+              AFRole::Member => "Member",
+              AFRole::Guest => "Guest",
+            },
+            "message": format!("{} 邀请你加入工作空间 {}，可以点击账号左上角切换空间。", inviter_name, workspace_name)
+          });
+              // 使用 reminder 类型，确保前端能正确显示在"提醒" tab 中
+              // 文案：提醒用户被邀请加入工作空间
+              if let Err(err) = create_workspace_notification(
+                pg_pool,
+                workspace_id,
+                "reminder", // 使用 reminder 类型
+                &payload,
+                Some(invitee_uid),
+              ).await {
+                tracing::warn!("Failed to create notification for invited user {}: {:?}", invitation.email, err);
+              }
+            }
           }
         }
-        
+
         *invite_id
       },
     };
