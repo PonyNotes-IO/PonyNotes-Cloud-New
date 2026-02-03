@@ -16,6 +16,7 @@ pub async fn add_collab_member(
   view_id: &Uuid,
   send_uid: i64,
   received_uid: i64,
+  view_name: &str,
 ) -> Result<(), AppError> {
   let mut tx = pg_pool.begin().await?;
 
@@ -27,7 +28,7 @@ pub async fn add_collab_member(
     ));
   }
 
-  insert_collab_member(&mut tx, view_id, send_uid, received_uid).await?;
+  insert_collab_member(&mut tx, view_id, send_uid, received_uid, view_name).await?;
 
   access_control
     .update_access_level_policy(&received_uid, &view_id, AFAccessLevel::ReadOnly)

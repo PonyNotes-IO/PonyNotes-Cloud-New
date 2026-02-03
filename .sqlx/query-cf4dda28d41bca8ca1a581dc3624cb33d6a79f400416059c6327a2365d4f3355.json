@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n      INSERT INTO af_collab_member_invite (oid, send_uid, received_uid, name)\n      VALUES ($1, $2, $3, $4)\n    ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cf4dda28d41bca8ca1a581dc3624cb33d6a79f400416059c6327a2365d4f3355"
+}

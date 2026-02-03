@@ -48,6 +48,7 @@ use app_error::{AppError, ErrorCode};
 use appflowy_collaborate::actix_ws::entities::{
   ClientGenerateEmbeddingMessage, ClientHttpStreamMessage, ClientHttpUpdateMessage,
 };
+use appflowy_collaborate::ws2::WorkspaceCollabInstanceCache;
 
 use bytes::BytesMut;
 use chrono::{DateTime, Duration, Utc};
@@ -3177,6 +3178,14 @@ async fn add_collab_member_handler(
   // 找到这个笔记的拥有者
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
   let received_uid = state.user_cache.get_user_uid(&received_uid).await?;
+
+  // 获取视图名称
+  let folder = state.ws_server.get_folder(workspace_id).await?;
+  let view_name = folder
+    .get_view(&view_id.to_string(), uid)
+    .map(|v| v.name.clone())
+    .unwrap_or_else(|| format!("共享文档 {}", &view_id.to_string()[..8]));
+
   add_collab_member(
     &state.pg_pool,
     state.collab_access_control.clone(),
@@ -3184,6 +3193,7 @@ async fn add_collab_member_handler(
     &view_id,
     uid,
     received_uid,
+    &view_name,
   )
   .await?;
   Ok(Json(AppResponse::Ok()))

@@ -868,6 +868,7 @@ pub struct AFCollabMemberInvite {
   pub send_uid: i64,
   pub received_uid: i64,
   pub created_at: DateTime<Utc>,
+  pub name: String,
 }
 
 #[cfg(test)]
