@@ -274,6 +274,7 @@ pub struct AFCollabMemberRow {
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct AFExplicitCollabMemberRow {
   pub uid: i64,
+  pub uuid: Option<Uuid>,
   pub name: Option<String>,
   pub email: Option<String>,
   pub avatar_url: Option<String>,

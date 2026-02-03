@@ -2237,6 +2237,7 @@ pub async fn select_collab_member_list_by_oid(
     r#"
     SELECT
       au.uid,
+      au.uuid,
       COALESCE(au.name, au.email) AS name,
       au.email,
       au.metadata ->> 'icon_url' AS avatar_url,
