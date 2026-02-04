@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT workspace_id, file_id, file_size\n        FROM af_blob_metadata\n        WHERE workspace_id IN (\n            SELECT workspace_id FROM af_workspace WHERE owner_uid = $1\n        )\n        ORDER BY modified_at ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "workspace_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "file_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "file_size",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f24151f746ba3aec141510d1ab5572506695c4fdfc41bbe5117b4c370e6438e7"
+}

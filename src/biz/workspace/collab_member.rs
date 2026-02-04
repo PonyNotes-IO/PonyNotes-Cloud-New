@@ -39,6 +39,7 @@ pub async fn add_collab_member(
 
 pub async fn edit_collab_member_permission(
   pg_pool: &PgPool,
+  access_control: Arc<dyn CollabAccessControl>,
   workspace_id: &Uuid,
   view_id: &Uuid,
   owner_uid: i64,
@@ -52,15 +53,22 @@ pub async fn edit_collab_member_permission(
       "不能修改笔记所有者的权限".to_string(),
     ));
   }
-  if owner_uid == uid {
+  
+  // 检查是否有权修改权限
+  if owner_uid != owner_id {
     return Err(AppError::NotEnoughPermissions);
   }
 
-  let _ = select_permission(pg_pool, new_permission_id)
+  let permission = select_permission(pg_pool, new_permission_id)
     .await?
     .ok_or(AppError::InvalidRequest("无效的权限id".to_string()))?;
 
   update_collab_member_permission(pg_pool, view_id, uid, new_permission_id).await?;
+
+  // 同步更新 Casbin 权限策略
+  access_control
+    .update_access_level_policy(&uid, &view_id, permission.access_level)
+    .await?;
 
   Ok(())
 }

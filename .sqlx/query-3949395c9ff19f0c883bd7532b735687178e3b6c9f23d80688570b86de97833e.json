@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM af_blob_metadata WHERE workspace_id = $1 AND file_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3949395c9ff19f0c883bd7532b735687178e3b6c9f23d80688570b86de97833e"
+}

@@ -2444,6 +2444,33 @@ pub async fn update_page_mention(
   update: &PageMentionUpdate,
 ) -> Result<(), AppError> {
   upsert_page_mention(pg_pool, workspace_id, view_id, uid, update).await?;
+
+  if update.require_notification {
+    let payload = serde_json::json!({
+      "view_id": view_id,
+      "view_name": update.view_name,
+      "block_id": update.block_id,
+      "mentioned_by": uid,
+      "title": "有人提到你",
+      "message": format!("他在笔记“{}”中提到了你", update.view_name),
+    });
+
+    // 获取被提到的人的 UID
+    let recipient_uid = database::user::select_uid_from_uuid(pg_pool, &update.person_id).await?;
+
+    use crate::biz::notification::ops::create_workspace_notification;
+    if let Err(err) = create_workspace_notification(
+      pg_pool,
+      workspace_id,
+      "mention",
+      &payload,
+      Some(recipient_uid),
+    )
+    .await {
+      tracing::error!("Failed to create mention notification: {:?}", err);
+    }
+  }
+
   Ok(())
 }
 

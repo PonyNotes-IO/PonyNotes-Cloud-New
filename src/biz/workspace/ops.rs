@@ -10,7 +10,7 @@ use sqlx::{types::uuid, PgPool};
 use std::ops::DerefMut;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::instrument;
+use tracing::{info, warn, instrument};
 use uuid::Uuid;
 
 use access_control::workspace::WorkspaceAccessControl;
@@ -23,7 +23,7 @@ use database::pg_row::AFWorkspaceMemberRow;
 use database::pg_row::AFExplicitCollabMemberRow;
 use database::user::{select_uid_from_email, select_uid_from_email_or_phone};
 use database::workspace::*;
-use database::subscription::aggregate_user_usage;
+use database::subscription::{aggregate_user_usage, get_user_owned_workspace_count};
 use database_entity::dto::{
   AFRole, AFWorkspace, AFWorkspaceInvitation, AFWorkspaceInvitationStatus, AFWorkspaceSettings,
   GlobalComment, Reaction, WorkspaceMemberProfile, WorkspaceUsage,
@@ -32,7 +32,7 @@ use database_entity::dto::{
 use crate::biz::notification::ops::create_workspace_notification;
 use shared_entity::dto::billing_dto::{SubscriptionPlan, WorkspaceUsageAndLimit};
 use crate::biz::workspace::subscription_plan_limits::PlanLimits;
-use crate::biz::subscription::ops::fetch_current_subscription;
+use crate::biz::subscription::ops::{fetch_current_subscription, get_user_resource_limit_status};
 use chrono::{Datelike, Utc};
 
 use crate::biz::authentication::jwt::OptionalUserUuid;
@@ -82,6 +82,13 @@ pub async fn create_empty_workspace(
   user_uid: i64,
   workspace_name: &str,
 ) -> Result<AFWorkspace, AppResponseError> {
+  let resource_status = get_user_resource_limit_status(pg_pool, user_uid).await?;
+  let current_count = get_user_owned_workspace_count(pg_pool, user_uid).await?;
+  
+  if current_count >= resource_status.workspace_limit {
+      return Err(AppResponseError::new(ErrorCode::PlanLimitExceeded, format!("Workspace limit reached (Limit: {}). Please upgrade your subscription.", resource_status.workspace_limit)));
+  }
+
   let new_workspace_row =
     insert_user_workspace(pg_pool, user_uuid, workspace_name, "", false).await?;
   workspace_access_control
@@ -133,6 +140,13 @@ pub async fn create_workspace_for_user(
   workspace_name: &str,
   workspace_icon: &str,
 ) -> Result<AFWorkspace, AppResponseError> {
+  let resource_status = get_user_resource_limit_status(pg_pool, user_uid).await?;
+  let current_count = get_user_owned_workspace_count(pg_pool, user_uid).await?;
+  
+  if current_count >= resource_status.workspace_limit {
+      return Err(AppResponseError::new(ErrorCode::PlanLimitExceeded, format!("Workspace limit reached (Limit: {}). Please upgrade your subscription.", resource_status.workspace_limit)));
+  }
+
   let new_workspace_row =
     insert_user_workspace(pg_pool, user_uuid, workspace_name, workspace_icon, true).await?;
 
@@ -418,19 +432,17 @@ pub async fn invite_workspace_members(
       .collect();
   let pending_invitations =
     database::workspace::select_workspace_pending_invitations(pg_pool, workspace_id).await?;
+  
+  let inviter_uid = database::user::select_uid_from_uuid(pg_pool, inviter).await?;
 
   // Check subscription plan limits
-  let workspace = database::workspace::select_workspace(pg_pool, workspace_id).await?;
-  let plan = SubscriptionPlan::try_from(workspace.workspace_type)
-    .map_err(|e| AppError::Internal(anyhow!("Invalid workspace type: {}", e)))?;
-  let limits = PlanLimits::from_plan(&plan);
-
-  // Check if adding new members would exceed the limit
-  if !limits.can_add_members(workspace_member_count, invitations.len() as i64) {
-    return Err(AppError::PlanLimitExceeded(format!(
-      "Member limit exceeded. Plan: {:?}, Current: {}, Limit: {}, Trying to add: {}. Please upgrade your subscription plan.",
-      plan, workspace_member_count, limits.member_limit, invitations.len()
-    )));
+  let resource_status = get_user_resource_limit_status(pg_pool, inviter_uid).await?;
+  
+  if workspace_member_count + invitations.len() as i64 > resource_status.workspace_limit {
+      return Err(AppError::PlanLimitExceeded(format!(
+        "Member limit exceeded. Plan: {}, Current: {}, Limit: {}, Trying to add: {}. Please upgrade your subscription.",
+        resource_status.plan_code, workspace_member_count, resource_status.workspace_limit, invitations.len()
+      )));
   }
 
   // check if any of the invited users are already members of the workspace

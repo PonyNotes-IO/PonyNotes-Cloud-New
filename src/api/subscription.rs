@@ -1,7 +1,5 @@
-use actix_web::{
-  web::{self, Data, Json, Query},
-  Result, Scope,
-};
+use actix_web::web::{Data, Json, Query};
+use actix_web::{web, Result, Scope};
 use serde::Deserialize;
 
 use crate::biz::authentication::jwt::UserUuid;

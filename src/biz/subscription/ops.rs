@@ -4,8 +4,9 @@ use app_error::AppError;
 use chrono::{Datelike, Months, NaiveDate, Utc};
 use database::subscription::{
   aggregate_user_usage, calculate_addon_period_end, get_subscription_addon, get_subscription_plan,
-  get_user_active_subscription, insert_user_addon, list_daily_usage, list_subscription_addons,
+  get_user_active_subscription, insert_user_addon, list_subscription_addons,
   list_user_addons, list_subscription_plans, upsert_usage_record, upsert_user_subscription,
+  get_user_total_storage_usage, get_user_owned_workspace_count,
   SubscriptionAddonRow, SubscriptionPlanRow, UserAddonRow, UserSubscriptionRow,
 };
 use rust_decimal::prelude::ToPrimitive;
@@ -13,7 +14,7 @@ use rust_decimal::Decimal;
 use shared_entity::dto::subscription_dto::{
   AddonStatus, AddonType, BillingType, CancelSubscriptionRequest, PurchaseAddonRequest,
   SubscribeRequest, SubscriptionAddonInfo, SubscriptionAddonUsage, SubscriptionCurrentResponse,
-  SubscriptionCurrentUsage, SubscriptionDailyUsage, SubscriptionPlanInfo, SubscriptionStatus,
+  SubscriptionCurrentUsage, SubscriptionPlanInfo, SubscriptionStatus,
   SubscriptionUsageLimits, SubscriptionUsageMetrics, SubscriptionUsageQuery,
   SubscriptionUsageRemaining, SubscriptionUsageResponse, UsageRecordRequest, UsageType,
   UserAddonRecord, UserSubscriptionRecord,
@@ -21,6 +22,24 @@ use shared_entity::dto::subscription_dto::{
 use sqlx::PgPool;
 
 const STORAGE_GB_IN_BYTES: f64 = 1024.0 * 1024.0 * 1024.0;
+const STORAGE_MB_IN_BYTES: f64 = 1024.0 * 1024.0;
+
+fn format_storage_bytes(bytes: i64) -> String {
+  let mb = bytes as f64 / STORAGE_MB_IN_BYTES;
+  if mb < 1024.0 {
+    format!("{:.2} MB", mb)
+  } else {
+    format!("{:.2} GB", mb / 1024.0)
+  }
+}
+
+fn format_storage_mb(mb: f64) -> String {
+  if mb < 1024.0 {
+    format!("{:.2} MB", mb)
+  } else {
+    format!("{:.2} GB", mb / 1024.0)
+  }
+}
 
 pub async fn fetch_subscription_plans(pg_pool: &PgPool) -> Result<Vec<SubscriptionPlanInfo>, AppError> {
   let plans = list_subscription_plans(pg_pool).await?;
@@ -147,23 +166,49 @@ async fn build_current_subscription(
 }
 
 async fn build_current_subscription_with_plan(
-  _pg_pool: &PgPool,
-  _uid: i64,
+  pg_pool: &PgPool,
+  uid: i64,
   subscription: UserSubscriptionRow,
   plan: SubscriptionPlanRow,
 ) -> Result<SubscriptionCurrentResponse, AppError> {
   let plan_info = to_plan_info(plan.clone());
   let limits = PlanLimitsContext::from(&plan);
 
-  let (start_date, end_date) = month_range(Utc::now());
-  // 注意：这里简化了，不再获取 addon 信息
+  let (usage_start_date, usage_end_date) = (
+    subscription.start_date.date_naive(),
+    subscription.end_date.date_naive(),
+  );
+  
+  // Real AI Usage
+  let usage = aggregate_user_usage(pg_pool, uid, usage_start_date, usage_end_date).await?;
+  let ai_chat_used = usage.iter().find(|u| u.usage_type == "ai_chat").map(|u| u.total).unwrap_or(0);
+  let ai_image_used = usage.iter().find(|u| u.usage_type == "ai_image").map(|u| u.total).unwrap_or(0);
+  
+  // Real Storage Usage
+  let storage_used_bytes = get_user_total_storage_usage(pg_pool, uid).await?;
+  let storage_total_mb = plan.cloud_storage_gb.to_f64().unwrap_or(0.0);
+  let storage_total_bytes = (storage_total_mb * STORAGE_MB_IN_BYTES) as i64;
+  let storage_remaining_bytes = storage_total_bytes - storage_used_bytes;
+  
+  // Real Workspace Usage
+  let workspace_used = get_user_owned_workspace_count(pg_pool, uid).await?;
+  let workspace_total = plan.collaborative_workspace_limit as i64;
+
   let current_usage = SubscriptionCurrentUsage {
-    ai_chat_used_this_month: 0,
-    ai_chat_remaining_this_month: limits.ai_chat_limit,
-    ai_image_used_this_month: 0,
-    ai_image_remaining_this_month: limits.ai_image_limit,
-    storage_used_gb: 0.0,
+    ai_chat_used_this_month: ai_chat_used,
+    ai_chat_remaining_this_month: limits.ai_chat_limit.map(|l| (l - ai_chat_used).max(0)),
+    ai_image_used_this_month: ai_image_used,
+    ai_image_remaining_this_month: limits.ai_image_limit.map(|l| (l - ai_image_used).max(0)),
+    
+    storage_used: format_storage_bytes(storage_used_bytes),
+    storage_total: format_storage_mb(storage_total_mb),
+    storage_remaining: format_storage_bytes(storage_remaining_bytes.max(0)),
+    storage_used_gb: bytes_to_gb(storage_used_bytes),
     storage_total_gb: limits.storage_limit_gb,
+    
+    collaborative_workspace_used: workspace_used,
+    collaborative_workspace_total: workspace_total,
+    collaborative_workspace_remaining: (workspace_total - workspace_used).max(0),
   };
 
   Ok(SubscriptionCurrentResponse {
@@ -220,6 +265,62 @@ async fn build_usage_response(
     addon_usage,
     daily_usage: vec![],
   })
+}
+
+pub async fn get_user_resource_limit_status(
+  pg_pool: &PgPool,
+  uid: i64,
+) -> Result<ResourceLimitStatus, AppError> {
+  let now = Utc::now();
+  let subscription = get_user_active_subscription(pg_pool, uid).await?;
+  
+  match subscription {
+    Some(sub) => {
+      let plan = get_subscription_plan(pg_pool, sub.plan_id).await?;
+      Ok(ResourceLimitStatus {
+        plan_code: plan.plan_code,
+        storage_limit_mb: plan.cloud_storage_gb.to_f64().unwrap_or(0.0),
+        workspace_limit: plan.collaborative_workspace_limit as i64,
+        is_grace_period: false,
+        grace_period_end: None,
+      })
+    }
+    None => {
+      // Check for recently expired subscription (within 15 days)
+      let expired_sub = database::subscription::get_user_recently_expired_subscription(pg_pool, uid).await?;
+      if let Some(sub) = expired_sub {
+          let grace_end = sub.end_date + chrono::Duration::days(15);
+          if now <= grace_end {
+              let plan = get_subscription_plan(pg_pool, sub.plan_id).await?;
+              return Ok(ResourceLimitStatus {
+                  plan_code: plan.plan_code,
+                  storage_limit_mb: plan.cloud_storage_gb.to_f64().unwrap_or(0.0),
+                  workspace_limit: plan.collaborative_workspace_limit as i64,
+                  is_grace_period: true,
+                  grace_period_end: Some(grace_end),
+              });
+          }
+      }
+      
+      // Default Free plan limits
+      Ok(ResourceLimitStatus {
+        plan_code: "free".to_string(),
+        storage_limit_mb: 300.0,
+        workspace_limit: 2,
+        is_grace_period: false,
+        grace_period_end: None,
+      })
+    }
+  }
+}
+
+#[derive(Debug, Clone)]
+pub struct ResourceLimitStatus {
+  pub plan_code: String,
+  pub storage_limit_mb: f64,
+  pub workspace_limit: i64,
+  pub is_grace_period: bool,
+  pub grace_period_end: Option<chrono::DateTime<Utc>>,
 }
 
 fn resolve_date_range(query: SubscriptionUsageQuery) -> (NaiveDate, NaiveDate) {

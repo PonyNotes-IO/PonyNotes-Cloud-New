@@ -183,6 +183,42 @@ pub async fn get_subscription_plan(
   })
 }
 
+#[instrument(skip_all, err)]
+pub async fn get_user_recently_expired_subscription(
+  pg_pool: &PgPool,
+  uid: i64,
+) -> Result<Option<UserSubscriptionRow>, AppError> {
+  let row = sqlx::query(
+    r#"
+    SELECT id, uid, plan_id, billing_type, status,
+           start_date, end_date, canceled_at, cancel_reason
+    FROM af_user_subscriptions
+    WHERE uid = $1 AND (status = 'active' OR status = 'canceled') AND end_date <= NOW()
+    ORDER BY end_date DESC
+    LIMIT 1
+    "#,
+  )
+  .bind(uid)
+  .fetch_optional(pg_pool)
+  .await?;
+
+  if let Some(row) = row {
+    Ok(Some(UserSubscriptionRow {
+      id: row.get(0),
+      uid: row.get(1),
+      plan_id: row.get(2),
+      billing_type: row.get(3),
+      status: row.get(4),
+      start_date: row.get(5),
+      end_date: row.get(6),
+      canceled_at: row.get(7),
+      cancel_reason: row.get(8),
+    }))
+  } else {
+    Ok(None)
+  }
+}
+
 // User Subscriptions
 #[instrument(skip_all, err)]
 pub async fn get_user_active_subscription(
@@ -572,6 +608,46 @@ pub async fn upsert_usage_record(
   .await?;
 
   Ok(())
+}
+
+#[instrument(skip_all, err)]
+pub async fn get_user_total_storage_usage(
+  pg_pool: &PgPool,
+  uid: i64,
+) -> Result<i64, AppError> {
+  let row: (Option<i64>,) = sqlx::query_as(
+    r#"
+    SELECT SUM(file_size)::BIGINT
+    FROM af_blob_metadata
+    WHERE workspace_id IN (
+      SELECT workspace_id FROM af_workspace WHERE owner_uid = $1
+    )
+    "#,
+  )
+  .bind(uid)
+  .fetch_one(pg_pool)
+  .await?;
+
+  Ok(row.0.unwrap_or(0))
+}
+
+#[instrument(skip_all, err)]
+pub async fn get_user_owned_workspace_count(
+  pg_pool: &PgPool,
+  uid: i64,
+) -> Result<i64, AppError> {
+  let count: (i64,) = sqlx::query_as(
+    r#"
+    SELECT COUNT(*)::BIGINT
+    FROM af_workspace
+    WHERE owner_uid = $1
+    "#,
+  )
+  .bind(uid)
+  .fetch_one(pg_pool)
+  .await?;
+
+  Ok(count.0)
 }
 
 #[instrument(skip_all)]

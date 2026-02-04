@@ -203,8 +203,14 @@ pub struct SubscriptionCurrentUsage {
   pub ai_chat_remaining_this_month: Option<i64>,
   pub ai_image_used_this_month: i64,
   pub ai_image_remaining_this_month: Option<i64>,
+  pub storage_used: String,
+  pub storage_total: String,
+  pub storage_remaining: String,
   pub storage_used_gb: f64,
   pub storage_total_gb: Option<f64>,
+  pub collaborative_workspace_used: i64,
+  pub collaborative_workspace_total: i64,
+  pub collaborative_workspace_remaining: i64,
 }
 
 // Usage Response DTOs

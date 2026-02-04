@@ -3215,6 +3215,7 @@ async fn update_collab_member_permission_handler(
   let user_uid = state.user_cache.get_user_uid(&user_uuid).await?;
   edit_collab_member_permission(
     &state.pg_pool,
+    state.collab_access_control.clone(),
     &workspace_id,
     &view_id,
     user_uid,
