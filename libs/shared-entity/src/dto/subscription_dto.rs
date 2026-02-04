@@ -126,7 +126,7 @@ pub struct SubscriptionPlanInfo {
   pub plan_name_cn: String,
   pub monthly_price_yuan: f64,
   pub yearly_price_yuan: f64,
-  pub cloud_storage_gb: i32,
+  pub cloud_storage_gb: f64,  // 单位改为 MB，f64 支持小数
   pub has_inbox: bool,
   pub has_multi_device_sync: bool,
   pub has_api_support: bool,
@@ -151,7 +151,7 @@ pub struct SubscriptionAddonInfo {
   pub addon_name_cn: String,
   pub addon_type: AddonType,
   pub price_yuan: f64,
-  pub storage_gb: Option<i32>,
+  pub storage_gb: Option<f64>,  // 单位改为 MB，f64 支持小数
   pub ai_chat_count: Option<i32>,
   pub ai_image_count: Option<i32>,
   pub is_active: bool,
@@ -181,7 +181,7 @@ pub struct UserAddonRecord {
   pub addon_type: AddonType,
   pub quantity: i32,
   pub price_yuan: f64,
-  pub storage_gb: Option<i32>,
+  pub storage_gb: Option<f64>,  // 单位改为 MB，f64 支持小数
   pub ai_chat_count: Option<i32>,
   pub ai_image_count: Option<i32>,
   pub start_date: DateTime<Utc>,

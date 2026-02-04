@@ -6,14 +6,14 @@ use serde::Deserialize;
 
 use crate::biz::authentication::jwt::UserUuid;
 use crate::biz::subscription::ops::{
-  cancel_subscription, fetch_current_subscription, fetch_usage, fetch_user_addons,
-  fetch_subscription_plans, list_addons, purchase_addon, record_usage, subscribe_plan,
+  cancel_subscription, fetch_current_subscription, fetch_usage,
+  fetch_subscription_plans, record_usage, subscribe_plan,
 };
 use crate::state::AppState;
 use shared_entity::dto::subscription_dto::{
-  AddonStatus, AddonType, CancelSubscriptionRequest, PurchaseAddonRequest, SubscribeRequest,
-  SubscriptionAddonInfo, SubscriptionCurrentResponse, SubscriptionPlanInfo, SubscriptionUsageQuery,
-  SubscriptionUsageResponse, UsageRecordRequest, UserAddonRecord, UserSubscriptionRecord,
+  CancelSubscriptionRequest, SubscribeRequest,
+  SubscriptionCurrentResponse, SubscriptionPlanInfo, SubscriptionUsageQuery,
+  SubscriptionUsageResponse, UsageRecordRequest, UserSubscriptionRecord,
 };
 use shared_entity::response::{AppResponse, JsonAppResponse};
 
@@ -23,11 +23,6 @@ pub fn subscription_scope() -> Scope {
     .service(web::resource("/current").route(web::get().to(get_current_subscription_handler)))
     .service(web::resource("/subscribe").route(web::post().to(post_subscribe_handler)))
     .service(web::resource("/cancel").route(web::post().to(post_cancel_handler)))
-    .service(web::resource("/addons").route(web::get().to(get_addons_handler)))
-    .service(
-      web::resource("/addons/purchase").route(web::post().to(post_purchase_addon_handler)),
-    )
-    .service(web::resource("/addons/my").route(web::get().to(get_user_addons_handler)))
     .service(web::resource("/usage").route(web::get().to(get_usage_handler)))
     .service(web::resource("/usage/record").route(web::post().to(post_usage_record_handler)))
 }
@@ -68,46 +63,6 @@ async fn post_cancel_handler(
   Ok(Json(AppResponse::Ok().with_data(record)))
 }
 
-#[derive(Debug, Deserialize)]
-struct AddonListQuery {
-  #[serde(default)]
-  addon_type: Option<AddonType>,
-}
-
-async fn get_addons_handler(
-  state: Data<AppState>,
-  query: Query<AddonListQuery>,
-) -> Result<JsonAppResponse<Vec<SubscriptionAddonInfo>>> {
-  let addons = list_addons(&state.pg_pool, query.addon_type.clone()).await?;
-  Ok(Json(AppResponse::Ok().with_data(addons)))
-}
-
-async fn post_purchase_addon_handler(
-  user_uuid: UserUuid,
-  state: Data<AppState>,
-  payload: Json<PurchaseAddonRequest>,
-) -> Result<JsonAppResponse<UserAddonRecord>> {
-  let uid = state.user_cache.get_user_uid(&user_uuid).await?;
-  let addon = purchase_addon(&state.pg_pool, uid, payload.into_inner()).await?;
-  Ok(Json(AppResponse::Ok().with_data(addon)))
-}
-
-#[derive(Debug, Deserialize)]
-struct UserAddonQuery {
-  #[serde(default)]
-  status: Option<AddonStatus>,
-}
-
-async fn get_user_addons_handler(
-  user_uuid: UserUuid,
-  state: Data<AppState>,
-  query: Query<UserAddonQuery>,
-) -> Result<JsonAppResponse<Vec<UserAddonRecord>>> {
-  let uid = state.user_cache.get_user_uid(&user_uuid).await?;
-  let addons = fetch_user_addons(&state.pg_pool, uid, query.status.clone()).await?;
-  Ok(Json(AppResponse::Ok().with_data(addons)))
-}
-
 async fn get_usage_handler(
   user_uuid: UserUuid,
   state: Data<AppState>,
@@ -127,4 +82,3 @@ async fn post_usage_record_handler(
   record_usage(&state.pg_pool, uid, payload.into_inner()).await?;
   Ok(Json(AppResponse::Ok()))
 }
-

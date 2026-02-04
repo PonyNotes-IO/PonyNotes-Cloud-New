@@ -13,7 +13,7 @@ pub struct SubscriptionPlanRow {
   pub plan_name_cn: String,
   pub monthly_price_yuan: Decimal,
   pub yearly_price_yuan: Decimal,
-  pub cloud_storage_gb: i32,
+  pub cloud_storage_gb: Decimal,  // 改为 Decimal 类型，支持 MB 单位（300表示300MB）
   pub has_inbox: bool,
   pub has_multi_device_sync: bool,
   pub has_api_support: bool,

@@ -68,6 +68,7 @@ pub async fn cancel_subscription(
   convert_subscription_row(subscription, &plan)?.into_record()
 }
 
+// 以下 addon 相关函数保留，但不再通过 API 暴露
 pub async fn list_addons(
   pg_pool: &PgPool,
   addon_type: Option<AddonType>,
@@ -146,22 +147,24 @@ async fn build_current_subscription(
 }
 
 async fn build_current_subscription_with_plan(
-  pg_pool: &PgPool,
-  uid: i64,
+  _pg_pool: &PgPool,
+  _uid: i64,
   subscription: UserSubscriptionRow,
   plan: SubscriptionPlanRow,
 ) -> Result<SubscriptionCurrentResponse, AppError> {
   let plan_info = to_plan_info(plan.clone());
   let limits = PlanLimitsContext::from(&plan);
-  let active_addons = list_user_addons(pg_pool, uid, Some("active")).await?;
-  let addon_ctx = AddonContext::from_rows(&active_addons);
 
   let (start_date, end_date) = month_range(Utc::now());
-  let usage_aggregates = aggregate_user_usage(pg_pool, uid, start_date, end_date).await?;
-  let usage = UsageAggregate::from_rows(&usage_aggregates);
-
-  let current_usage =
-    build_current_usage_summary(&limits, &addon_ctx, &usage);
+  // 注意：这里简化了，不再获取 addon 信息
+  let current_usage = SubscriptionCurrentUsage {
+    ai_chat_used_this_month: 0,
+    ai_chat_remaining_this_month: limits.ai_chat_limit,
+    ai_image_used_this_month: 0,
+    ai_image_remaining_this_month: limits.ai_image_limit,
+    storage_used_gb: 0.0,
+    storage_total_gb: limits.storage_limit_gb,
+  };
 
   Ok(SubscriptionCurrentResponse {
     subscription: convert_subscription_row(subscription, &plan)?.into_record()?,
@@ -171,15 +174,13 @@ async fn build_current_subscription_with_plan(
 }
 
 async fn build_usage_response(
-  pg_pool: &PgPool,
-  uid: i64,
+  _pg_pool: &PgPool,
+  _uid: i64,
   subscription: UserSubscriptionRow,
   plan: SubscriptionPlanRow,
   query: SubscriptionUsageQuery,
 ) -> Result<SubscriptionUsageResponse, AppError> {
   let plan_limits = PlanLimitsContext::from(&plan);
-  let active_addons = list_user_addons(pg_pool, uid, Some("active")).await?;
-  let addon_ctx = AddonContext::from_rows(&active_addons);
 
   let (start_date, end_date) = resolve_date_range(query);
   if start_date > end_date {
@@ -188,25 +189,36 @@ async fn build_usage_response(
     ));
   }
 
-  let aggregates = aggregate_user_usage(pg_pool, uid, start_date, end_date).await?;
-  let daily_usage_rows = list_daily_usage(pg_pool, uid, start_date, end_date).await?;
-
-  let usage = UsageAggregate::from_rows(&aggregates);
-  let subscription_limits = plan_limits.combine_with_addons(&addon_ctx);
-  let current_usage = usage.to_metrics();
-  let remaining = calculate_remaining(&subscription_limits, &usage);
-  let addon_usage = addon_ctx.to_usage(&plan_limits, &usage);
-  let daily_usage = daily_usage_rows.into_iter().map(convert_daily_usage_row).collect();
+  // 简化：返回空的 addon usage
+  let addon_usage = SubscriptionAddonUsage {
+    storage_addon_total_gb: 0.0,
+    ai_token_addon_chat_count: 0,
+    ai_token_addon_image_count: 0,
+    ai_token_addon_chat_used: 0,
+    ai_token_addon_image_used: 0,
+  };
 
   // ensure subscription still valid? for now just return
   let _ = convert_subscription_row(subscription, &plan)?;
 
   Ok(SubscriptionUsageResponse {
-    subscription_limits,
-    current_usage,
-    remaining,
+    subscription_limits: SubscriptionUsageLimits {
+      ai_chat_count_per_month: plan_limits.ai_chat_limit,
+      ai_image_generation_per_month: plan_limits.ai_image_limit,
+      cloud_storage_gb: plan_limits.storage_limit_gb,
+    },
+    current_usage: SubscriptionUsageMetrics {
+      ai_chat_used_this_month: 0,
+      ai_image_used_this_month: 0,
+      storage_used_gb: 0.0,
+    },
+    remaining: SubscriptionUsageRemaining {
+      ai_chat_remaining_this_month: plan_limits.ai_chat_limit,
+      ai_image_remaining_this_month: plan_limits.ai_image_limit,
+      storage_remaining_gb: plan_limits.storage_limit_gb,
+    },
     addon_usage,
-    daily_usage,
+    daily_usage: vec![],
   })
 }
 
@@ -217,39 +229,6 @@ fn resolve_date_range(query: SubscriptionUsageQuery) -> (NaiveDate, NaiveDate) {
   let start = query.start_date.unwrap_or(default_start);
   let end = query.end_date.unwrap_or(today);
   (start, end)
-}
-
-fn build_current_usage_summary(
-  limits: &PlanLimitsContext,
-  addon_ctx: &AddonContext,
-  usage: &UsageAggregate,
-) -> SubscriptionCurrentUsage {
-  let plan_storage = limits.storage_gb();
-  let total_storage_gb = match (plan_storage, addon_ctx.storage_gb()) {
-    (Some(plan), Some(addon)) => Some(plan + addon),
-    (Some(plan), None) => Some(plan),
-    (None, Some(addon)) => Some(addon),
-    (None, None) => None,
-  };
-
-  let remaining_chat = limits
-    .ai_chat_limit
-    .map(|limit| (limit + addon_ctx.ai_chat_total()).saturating_sub(usage.ai_chat));
-
-  let remaining_image = limits
-    .ai_image_limit
-    .map(|limit| (limit + addon_ctx.ai_image_total()).saturating_sub(usage.ai_image));
-
-  let _remaining_storage = total_storage_gb.map(|total| (total - usage.storage_gb).max(0.0));
-
-  SubscriptionCurrentUsage {
-    ai_chat_used_this_month: usage.ai_chat,
-    ai_chat_remaining_this_month: remaining_chat,
-    ai_image_used_this_month: usage.ai_image,
-    ai_image_remaining_this_month: remaining_image,
-    storage_used_gb: usage.storage_gb,
-    storage_total_gb: total_storage_gb,
-  }
 }
 
 fn convert_subscription_row(
@@ -278,7 +257,7 @@ fn convert_user_addon(row: UserAddonRow) -> Result<UserAddonRecord, AppError> {
     addon_type,
     quantity: row.quantity,
     price_yuan: decimal_to_f64(&row.price_yuan),
-    storage_gb: row.storage_gb,
+    storage_gb: row.storage_gb.map(|v| v as f64),
     ai_chat_count: row.ai_chat_count,
     ai_image_count: row.ai_image_count,
     start_date: row.start_date,
@@ -295,7 +274,7 @@ fn to_plan_info(plan: SubscriptionPlanRow) -> SubscriptionPlanInfo {
     plan_name_cn: plan.plan_name_cn,
     monthly_price_yuan: decimal_to_f64(&plan.monthly_price_yuan),
     yearly_price_yuan: decimal_to_f64(&plan.yearly_price_yuan),
-    cloud_storage_gb: plan.cloud_storage_gb,
+    cloud_storage_gb: decimal_to_f64(&plan.cloud_storage_gb),
     has_inbox: plan.has_inbox,
     has_multi_device_sync: plan.has_multi_device_sync,
     has_api_support: plan.has_api_support,
@@ -321,7 +300,7 @@ fn to_addon_info(addon: SubscriptionAddonRow) -> SubscriptionAddonInfo {
     addon_name_cn: addon.addon_name_cn,
     addon_type: parse_addon_type(addon.addon_type.as_str()).unwrap_or(AddonType::Storage),
     price_yuan: decimal_to_f64(&addon.price_yuan),
-    storage_gb: addon.storage_gb,
+    storage_gb: addon.storage_gb.map(|v| v as f64),
     ai_chat_count: addon.ai_chat_count,
     ai_image_count: addon.ai_image_count,
     is_active: addon.is_active,
@@ -437,180 +416,17 @@ impl From<&SubscriptionPlanRow> for PlanLimitsContext {
   fn from(plan: &SubscriptionPlanRow) -> Self {
     let ai_chat_limit = normalize_limit(plan.ai_chat_count_per_month);
     let ai_image_limit = normalize_limit(plan.ai_image_generation_per_month);
-    let storage_limit_gb = match plan.cloud_storage_gb {
-      x if x < 0 => None,
-      0 => None,
-      other => Some(other as f64),
+    // cloud_storage_gb 现在是 Decimal 类型（单位为MB），转换为 GB
+    let storage_mb = plan.cloud_storage_gb.to_f64().unwrap_or(0.0);
+    let storage_limit_gb = match storage_mb {
+      x if x < 0.0 => None,  // -1 表示无限制
+      _ => Some(storage_mb / 1024.0),  // MB 转 GB
     };
     Self {
       ai_chat_limit,
       ai_image_limit,
       storage_limit_gb,
     }
-  }
-}
-
-impl PlanLimitsContext {
-  fn storage_gb(&self) -> Option<f64> {
-    self.storage_limit_gb
-  }
-
-  fn combine_with_addons(&self, addon: &AddonContext) -> SubscriptionUsageLimits {
-    let storage = match (self.storage_limit_gb, addon.storage_gb()) {
-      (Some(plan), Some(addon)) => Some(plan + addon),
-      (Some(plan), None) => Some(plan),
-      (None, Some(addon)) => Some(addon),
-      (None, None) => None,
-    };
-    SubscriptionUsageLimits {
-      ai_chat_count_per_month: self
-        .ai_chat_limit
-        .map(|limit| limit + addon.ai_chat_total()),
-      ai_image_generation_per_month: self
-        .ai_image_limit
-        .map(|limit| limit + addon.ai_image_total()),
-      cloud_storage_gb: storage,
-    }
-  }
-}
-
-#[derive(Debug, Clone, Default)]
-struct AddonContext {
-  storage_total_gb: f64,
-  ai_chat_total: i64,
-  ai_image_total: i64,
-}
-
-impl AddonContext {
-  fn from_rows(rows: &[UserAddonRow]) -> Self {
-    let mut ctx = Self::default();
-    for row in rows {
-      if row.status != "active" {
-        continue;
-      }
-      match row.addon_type.as_str() {
-        "storage" => {
-          if let Some(storage) = row.storage_gb {
-            ctx.storage_total_gb += (storage * row.quantity) as f64;
-          }
-        },
-        "ai_token" => {
-          if let Some(ai_chat) = row.ai_chat_count {
-            ctx.ai_chat_total += (ai_chat * row.quantity) as i64;
-          }
-          if let Some(ai_image) = row.ai_image_count {
-            ctx.ai_image_total += (ai_image * row.quantity) as i64;
-          }
-        },
-        _ => {},
-      }
-    }
-    ctx
-  }
-
-  fn storage_gb(&self) -> Option<f64> {
-    if self.storage_total_gb > 0.0 {
-      Some(self.storage_total_gb)
-    } else {
-      None
-    }
-  }
-
-  fn ai_chat_total(&self) -> i64 {
-    self.ai_chat_total
-  }
-
-  fn ai_image_total(&self) -> i64 {
-    self.ai_image_total
-  }
-
-  fn to_usage(&self, plan_limits: &PlanLimitsContext, usage: &UsageAggregate) -> SubscriptionAddonUsage {
-    let total_storage = self.storage_total_gb;
-    let total_chat = self.ai_chat_total;
-    let total_image = self.ai_image_total;
-
-    let plan_chat_limit = plan_limits.ai_chat_limit.unwrap_or(i64::MAX);
-    let plan_image_limit = plan_limits.ai_image_limit.unwrap_or(i64::MAX);
-
-    let addon_chat_used = usage.ai_chat.saturating_sub(plan_chat_limit).clamp(0, total_chat);
-    let addon_image_used = usage
-      .ai_image
-      .saturating_sub(plan_image_limit)
-      .clamp(0, total_image);
-
-    SubscriptionAddonUsage {
-      storage_addon_total_gb: total_storage,
-      ai_token_addon_chat_count: total_chat,
-      ai_token_addon_image_count: total_image,
-      ai_token_addon_chat_used: addon_chat_used,
-      ai_token_addon_image_used: addon_image_used,
-    }
-  }
-}
-
-#[derive(Debug, Default)]
-struct UsageAggregate {
-  ai_chat: i64,
-  ai_image: i64,
-  storage_bytes: i64,
-  storage_gb: f64,
-}
-
-impl UsageAggregate {
-  fn from_rows(rows: &[database::subscription::UsageAggregateRow]) -> Self {
-    let mut aggregate = UsageAggregate::default();
-    for row in rows {
-      match row.usage_type.as_str() {
-        "ai_chat" => aggregate.ai_chat += row.total,
-        "ai_image" => aggregate.ai_image += row.total,
-        "storage_bytes" => {
-          aggregate.storage_bytes += row.total;
-        },
-        _ => {},
-      }
-    }
-    aggregate.storage_gb = bytes_to_gb(aggregate.storage_bytes);
-    aggregate
-  }
-
-  fn to_metrics(&self) -> SubscriptionUsageMetrics {
-    SubscriptionUsageMetrics {
-      ai_chat_used_this_month: self.ai_chat,
-      ai_image_used_this_month: self.ai_image,
-      storage_used_gb: self.storage_gb,
-    }
-  }
-}
-
-fn calculate_remaining(
-  limits: &SubscriptionUsageLimits,
-  usage: &UsageAggregate,
-) -> SubscriptionUsageRemaining {
-  let ai_chat_remaining = limits
-    .ai_chat_count_per_month
-    .map(|limit| limit.saturating_sub(usage.ai_chat));
-  let ai_image_remaining = limits
-    .ai_image_generation_per_month
-    .map(|limit| limit.saturating_sub(usage.ai_image));
-
-  let storage_remaining = limits.cloud_storage_gb.map(|limit| {
-    let remaining = limit - usage.storage_gb;
-    if remaining < 0.0 { 0.0 } else { remaining }
-  });
-
-  SubscriptionUsageRemaining {
-    ai_chat_remaining_this_month: ai_chat_remaining,
-    ai_image_remaining_this_month: ai_image_remaining,
-    storage_remaining_gb: storage_remaining,
-  }
-}
-
-fn convert_daily_usage_row(row: database::subscription::DailyUsageRow) -> SubscriptionDailyUsage {
-  SubscriptionDailyUsage {
-    date: row.usage_date,
-    ai_chat_count: row.ai_chat_count,
-    ai_image_count: row.ai_image_count,
-    storage_bytes: row.storage_bytes,
   }
 }
 
@@ -633,4 +449,3 @@ async fn cancel_user_subscription_with_reason(
 ) -> Result<UserSubscriptionRow, AppError> {
   database::subscription::cancel_user_subscription(pg_pool, uid, reason).await
 }
-
