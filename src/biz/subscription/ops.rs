@@ -4,7 +4,8 @@ use app_error::AppError;
 use chrono::{Datelike, Months, NaiveDate, Utc};
 use database::subscription::{
   aggregate_user_usage, calculate_addon_period_end, get_subscription_addon, get_subscription_plan,
-  get_user_active_subscription, insert_user_addon, list_subscription_addons,
+  get_subscription_plan_by_code, get_user_active_subscription, get_or_create_free_subscription, 
+  insert_user_addon, list_subscription_addons,
   list_user_addons, list_subscription_plans, upsert_usage_record, upsert_user_subscription,
   get_user_total_storage_usage, get_user_owned_workspace_count,
   SubscriptionAddonRow, SubscriptionPlanRow, UserAddonRow, UserSubscriptionRow,
@@ -50,10 +51,8 @@ pub async fn fetch_current_subscription(
   pg_pool: &PgPool,
   uid: i64,
 ) -> Result<SubscriptionCurrentResponse, AppError> {
-  let subscription =
-    get_user_active_subscription(pg_pool, uid).await?.ok_or_else(|| {
-      AppError::RecordNotFound("subscription not found for current user".to_string())
-    })?;
+  // 如果用户没有订阅，自动创建免费版订阅
+  let subscription = get_or_create_free_subscription(pg_pool, uid).await?;
   build_current_subscription(pg_pool, uid, subscription).await
 }
 
@@ -273,10 +272,38 @@ pub async fn get_user_resource_limit_status(
 ) -> Result<ResourceLimitStatus, AppError> {
   let now = Utc::now();
   let subscription = get_user_active_subscription(pg_pool, uid).await?;
-  
+
   match subscription {
     Some(sub) => {
       let plan = get_subscription_plan(pg_pool, sub.plan_id).await?;
+
+      // 检查订阅是否已过期但仍在宽限期内
+      if sub.end_date < now {
+        // 检查是否在15天宽限期内（仅对过期订阅有效）
+        let grace_end = sub.end_date + chrono::Duration::days(15);
+        if now <= grace_end {
+          return Ok(ResourceLimitStatus {
+            plan_code: plan.plan_code.clone(),
+            storage_limit_mb: plan.cloud_storage_gb.to_f64().unwrap_or(0.0),
+            workspace_limit: plan.collaborative_workspace_limit as i64,
+            is_grace_period: true,
+            grace_period_end: Some(grace_end),
+          });
+        }
+
+        // 超过宽限期，应用免费版限制
+        // 检查是否有历史订阅记录，如果有，使用免费版；否则返回降级限制
+        let free_plan = get_subscription_plan_by_code(pg_pool, "mfb").await?;
+        return Ok(ResourceLimitStatus {
+          plan_code: free_plan.plan_code,
+          storage_limit_mb: free_plan.cloud_storage_gb.to_f64().unwrap_or(0.0),
+          workspace_limit: free_plan.collaborative_workspace_limit as i64,
+          is_grace_period: false,
+          grace_period_end: None,
+        });
+      }
+
+      // 订阅有效，立即应用限制（降级场景）
       Ok(ResourceLimitStatus {
         plan_code: plan.plan_code,
         storage_limit_mb: plan.cloud_storage_gb.to_f64().unwrap_or(0.0),
@@ -289,24 +316,25 @@ pub async fn get_user_resource_limit_status(
       // Check for recently expired subscription (within 15 days)
       let expired_sub = database::subscription::get_user_recently_expired_subscription(pg_pool, uid).await?;
       if let Some(sub) = expired_sub {
-          let grace_end = sub.end_date + chrono::Duration::days(15);
-          if now <= grace_end {
-              let plan = get_subscription_plan(pg_pool, sub.plan_id).await?;
-              return Ok(ResourceLimitStatus {
-                  plan_code: plan.plan_code,
-                  storage_limit_mb: plan.cloud_storage_gb.to_f64().unwrap_or(0.0),
-                  workspace_limit: plan.collaborative_workspace_limit as i64,
-                  is_grace_period: true,
-                  grace_period_end: Some(grace_end),
-              });
-          }
+        let grace_end = sub.end_date + chrono::Duration::days(15);
+        if now <= grace_end {
+          let plan = get_subscription_plan(pg_pool, sub.plan_id).await?;
+          return Ok(ResourceLimitStatus {
+            plan_code: plan.plan_code,
+            storage_limit_mb: plan.cloud_storage_gb.to_f64().unwrap_or(0.0),
+            workspace_limit: plan.collaborative_workspace_limit as i64,
+            is_grace_period: true,
+            grace_period_end: Some(grace_end),
+          });
+        }
       }
-      
-      // Default Free plan limits
+
+      // 没有订阅记录，返回免费版限制（适用于新用户或完全无订阅用户）
+      let free_plan = get_subscription_plan_by_code(pg_pool, "mfb").await?;
       Ok(ResourceLimitStatus {
-        plan_code: "free".to_string(),
-        storage_limit_mb: 300.0,
-        workspace_limit: 2,
+        plan_code: free_plan.plan_code,
+        storage_limit_mb: free_plan.cloud_storage_gb.to_f64().unwrap_or(0.0),
+        workspace_limit: free_plan.collaborative_workspace_limit as i64,
         is_grace_period: false,
         grace_period_end: None,
       })

@@ -137,6 +137,53 @@ pub async fn list_subscription_plans(pg_pool: &PgPool) -> Result<Vec<Subscriptio
 }
 
 #[instrument(skip_all, err)]
+pub async fn get_subscription_plan_by_code(
+  pg_pool: &PgPool,
+  plan_code: &str,
+) -> Result<SubscriptionPlanRow, AppError> {
+  let row = sqlx::query(
+    r#"
+    SELECT id, plan_code, plan_name, plan_name_cn,
+           monthly_price_yuan, yearly_price_yuan,
+           cloud_storage_gb, has_inbox, has_multi_device_sync, has_api_support,
+           version_history_days, ai_chat_count_per_month, ai_image_generation_per_month,
+           has_share_link, has_publish, workspace_member_limit,
+           collaborative_workspace_limit, page_permission_guest_editors,
+           has_space_member_management, has_space_member_grouping, is_active
+    FROM af_subscription_plans
+    WHERE plan_code = $1
+    "#,
+  )
+  .bind(plan_code)
+  .fetch_one(pg_pool)
+  .await?;
+
+  Ok(SubscriptionPlanRow {
+    id: row.get(0),
+    plan_code: row.get(1),
+    plan_name: row.get(2),
+    plan_name_cn: row.get(3),
+    monthly_price_yuan: row.get(4),
+    yearly_price_yuan: row.get(5),
+    cloud_storage_gb: row.get(6),
+    has_inbox: row.get(7),
+    has_multi_device_sync: row.get(8),
+    has_api_support: row.get(9),
+    version_history_days: row.get(10),
+    ai_chat_count_per_month: row.get(11),
+    ai_image_generation_per_month: row.get(12),
+    has_share_link: row.get(13),
+    has_publish: row.get(14),
+    workspace_member_limit: row.get(15),
+    collaborative_workspace_limit: row.get(16),
+    page_permission_guest_editors: row.get(17),
+    has_space_member_management: row.get(18),
+    has_space_member_grouping: row.get(19),
+    is_active: row.get(20),
+  })
+}
+
+#[instrument(skip_all, err)]
 pub async fn get_subscription_plan(
   pg_pool: &PgPool,
   plan_id: i64,
@@ -180,6 +227,66 @@ pub async fn get_subscription_plan(
     has_space_member_management: row.get(18),
     has_space_member_grouping: row.get(19),
     is_active: row.get(20),
+  })
+}
+
+/// 获取免费版订阅计划ID (plan_code = 'mfb')
+#[instrument(skip_all, err)]
+pub async fn get_free_plan_id(pg_pool: &PgPool) -> Result<i64, AppError> {
+  let plan_id: i64 = sqlx::query_scalar!(
+    r#"
+    SELECT id FROM af_subscription_plans WHERE plan_code = 'mfb' AND is_active = TRUE
+    "#,
+  )
+  .fetch_one(pg_pool)
+  .await?;
+
+  Ok(plan_id)
+}
+
+/// 为用户创建免费版订阅（如果不存在）
+#[instrument(skip_all, err)]
+pub async fn get_or_create_free_subscription(
+  pg_pool: &PgPool,
+  uid: i64,
+) -> Result<UserSubscriptionRow, AppError> {
+  // 首先检查是否已有活跃订阅
+  if let Some(existing_sub) = get_user_active_subscription(pg_pool, uid).await? {
+    return Ok(existing_sub);
+  }
+
+  // 获取免费版计划ID
+  let free_plan_id = get_free_plan_id(pg_pool).await?;
+
+  // 创建免费版订阅，有效期为1年
+  let start_date = Utc::now();
+  let end_date = start_date + chrono::Duration::days(365);
+
+  // 插入新订阅
+  let row = sqlx::query!(
+    r#"
+    INSERT INTO af_user_subscriptions (uid, plan_id, billing_type, status, start_date, end_date)
+    VALUES ($1, $2, 'monthly', 'active', $3, $4)
+    RETURNING id, uid, plan_id, billing_type, status, start_date, end_date, canceled_at, cancel_reason
+    "#,
+    uid,
+    free_plan_id,
+    start_date,
+    end_date
+  )
+  .fetch_one(pg_pool)
+  .await?;
+
+  Ok(UserSubscriptionRow {
+    id: row.id,
+    uid: row.uid,
+    plan_id: row.plan_id,
+    billing_type: row.billing_type,
+    status: row.status,
+    start_date: row.start_date,
+    end_date: row.end_date,
+    canceled_at: row.canceled_at,
+    cancel_reason: row.cancel_reason,
   })
 }
 
