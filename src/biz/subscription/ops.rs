@@ -286,6 +286,7 @@ pub async fn get_user_resource_limit_status(
             plan_code: plan.plan_code.clone(),
             storage_limit_mb: plan.cloud_storage_gb.to_f64().unwrap_or(0.0),
             workspace_limit: plan.collaborative_workspace_limit as i64,
+            member_limit: plan.workspace_member_limit as i64,
             is_grace_period: true,
             grace_period_end: Some(grace_end),
           });
@@ -298,6 +299,7 @@ pub async fn get_user_resource_limit_status(
           plan_code: free_plan.plan_code,
           storage_limit_mb: free_plan.cloud_storage_gb.to_f64().unwrap_or(0.0),
           workspace_limit: free_plan.collaborative_workspace_limit as i64,
+          member_limit: free_plan.workspace_member_limit as i64,
           is_grace_period: false,
           grace_period_end: None,
         });
@@ -308,6 +310,7 @@ pub async fn get_user_resource_limit_status(
         plan_code: plan.plan_code,
         storage_limit_mb: plan.cloud_storage_gb.to_f64().unwrap_or(0.0),
         workspace_limit: plan.collaborative_workspace_limit as i64,
+        member_limit: plan.workspace_member_limit as i64,
         is_grace_period: false,
         grace_period_end: None,
       })
@@ -323,6 +326,7 @@ pub async fn get_user_resource_limit_status(
             plan_code: plan.plan_code,
             storage_limit_mb: plan.cloud_storage_gb.to_f64().unwrap_or(0.0),
             workspace_limit: plan.collaborative_workspace_limit as i64,
+            member_limit: plan.workspace_member_limit as i64,
             is_grace_period: true,
             grace_period_end: Some(grace_end),
           });
@@ -335,6 +339,7 @@ pub async fn get_user_resource_limit_status(
         plan_code: free_plan.plan_code,
         storage_limit_mb: free_plan.cloud_storage_gb.to_f64().unwrap_or(0.0),
         workspace_limit: free_plan.collaborative_workspace_limit as i64,
+        member_limit: free_plan.workspace_member_limit as i64,
         is_grace_period: false,
         grace_period_end: None,
       })
@@ -347,6 +352,7 @@ pub struct ResourceLimitStatus {
   pub plan_code: String,
   pub storage_limit_mb: f64,
   pub workspace_limit: i64,
+  pub member_limit: i64,
   pub is_grace_period: bool,
   pub grace_period_end: Option<chrono::DateTime<Utc>>,
 }

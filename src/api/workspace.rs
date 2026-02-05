@@ -601,6 +601,7 @@ async fn post_workspace_invite_handler(
   workspace::ops::invite_workspace_members(
     &state.mailer,
     &state.pg_pool,
+    &state.workspace_access_control,
     &user_uuid,
     &workspace_id,
     invitations,

@@ -406,6 +406,7 @@ pub async fn accept_workspace_invite(
 pub async fn invite_workspace_members(
   mailer: &AFCloudMailer,
   pg_pool: &PgPool,
+  workspace_access_control: &Arc<dyn WorkspaceAccessControl>,
   inviter: &Uuid,
   workspace_id: &Uuid,
   invitations: Vec<WorkspaceMemberInvitation>,
@@ -435,13 +436,13 @@ pub async fn invite_workspace_members(
   
   let inviter_uid = database::user::select_uid_from_uuid(pg_pool, inviter).await?;
 
-  // Check subscription plan limits
+  // Check subscription plan limits for members
   let resource_status = get_user_resource_limit_status(pg_pool, inviter_uid).await?;
   
-  if workspace_member_count + invitations.len() as i64 > resource_status.workspace_limit {
-      return Err(AppError::PlanLimitExceeded(format!(
+  if workspace_member_count + invitations.len() as i64 > resource_status.member_limit {
+      return Err(AppError::WorkspaceMemberLimitExceeded(format!(
         "Member limit exceeded. Plan: {}, Current: {}, Limit: {}, Trying to add: {}. Please upgrade your subscription.",
-        resource_status.plan_code, workspace_member_count, resource_status.workspace_limit, invitations.len()
+        resource_status.plan_code, workspace_member_count, resource_status.member_limit, invitations.len()
       )));
   }
 
@@ -476,12 +477,12 @@ pub async fn invite_workspace_members(
         let invite_id = uuid::Uuid::new_v4();
         
         // 如果用户已注册，直接添加到成员表并创建已接受的邀请记录
-        if let Ok(_invitee_uid) = invitee_uid_result {
+        if let Ok(invitee_uid) = invitee_uid_result {
           tracing::info!(
             "User {} is already registered, auto-accepting invitation and adding to workspace",
             invitation.email
           );
-          
+
           // 直接添加到成员表
           upsert_workspace_member_with_txn(
             &mut txn,
@@ -490,6 +491,11 @@ pub async fn invite_workspace_members(
             invitation.role.clone(),
           )
           .await?;
+
+          // 同步casbin权限策略
+          workspace_access_control
+            .insert_role(&invitee_uid, workspace_id, invitation.role.clone())
+            .await?;
           
           // 创建邀请记录（先创建pending状态）
           insert_workspace_invitation(
@@ -586,6 +592,13 @@ pub async fn invite_workspace_members(
               invitation.role.clone(),
             )
             .await?;
+
+            // 同步casbin权限策略
+            if let Ok(invitee_uid) = invitee_uid_result {
+              workspace_access_control
+                .insert_role(&invitee_uid, workspace_id, invitation.role.clone())
+                .await?;
+            }
             
             // 更新邀请状态为已接受
             sqlx::query(
