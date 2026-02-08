@@ -147,10 +147,11 @@ fn is_valid_email_format(email: &str) -> bool {
 }
 
 /// 简单的手机号格式验证（支持E.164格式，如+8613800138000）
+/// 与前端验证保持一致：至少6位数字，最多15位数字
 fn is_valid_phone_format(phone: &str) -> bool {
   let cleaned = phone.trim().trim_start_matches('+');
-  // 基本验证：至少10位数字
-  cleaned.len() >= 10 && cleaned.chars().all(|c| c.is_ascii_digit())
+  // 基本验证：6-15位数字
+  cleaned.len() >= 6 && cleaned.len() <= 15 && cleaned.chars().all(|c| c.is_ascii_digit())
 }
 
 /// 通过邮箱或手机号查询用户uid
