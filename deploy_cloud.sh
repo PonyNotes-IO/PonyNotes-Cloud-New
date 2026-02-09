@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # PonyNotes-Cloud-New 快速部署脚本
-# 用途：构建Docker镜像、上传到服务器、部署并检查运行状态
-# 日期：2025-11-26
+# 用途：本地构建Docker镜像并部署到服务器
+# 日期：2026-02-09
 
 set -e  # 遇到错误立即退出
 
@@ -11,6 +11,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # 配置变量
@@ -19,187 +20,161 @@ SERVER_IP="8.152.101.166"
 SERVER_USER="root"
 SERVER_DOCKER_DIR="/root/docker-compose"
 IMAGE_NAME="appflowyinc/appflowy_cloud:latest"
-TAR_FILE="/tmp/appflowy_cloud.tar"
-COMPOSE_FILE="docker-compose-dev.yml"
 
-echo -e "${BLUE}========================================${NC}"
-echo -e "${BLUE}PonyNotes-Cloud-New 自动部署开始${NC}"
-echo -e "${BLUE}========================================${NC}"
+echo -e "${CYAN}========================================${NC}"
+echo -e "${CYAN}PonyNotes-Cloud-New 自动部署开始${NC}"
+echo -e "${CYAN}========================================${NC}"
 echo ""
 
-# 步骤1：本地构建Docker镜像
-echo -e "${YELLOW}[步骤 1/7] 构建Docker镜像...${NC}"
-cd "$PROJECT_DIR"
-cd /Users/kuncao/github.com/PonyNotes-IO/PonyNotes-Cloud-New && DOCKER_BUILDKIT=1 docker buildx build --platform linux/amd64 -f /Users/kuncao/github.com/PonyNotes-IO/PonyNotes-Cloud-New/Dockerfile -t appflowyinc/appflowy_cloud:latest --build-arg CARGO_BUILD_JOBS=16 --build-arg ENABLE_SCCACHE=true --cache-from=type=local,src=/tmp/.buildx-cache --cache-to=type=local,dest=/tmp/.buildx-cache,mode=max --load /Users/kuncao/github.com/PonyNotes-IO/PonyNotes-Cloud-New
+# 从服务器获取真实的 DATABASE_URL
+echo -e "${YELLOW}[步骤 1/5] 从服务器获取数据库配置...${NC}"
+echo -e "${BLUE}连接到服务器获取 DATABASE_URL...${NC}"
 
-if [ $? -eq 0 ]; then
+# SSH 连接重试
+MAX_RETRIES=3
+RETRY_DELAY=5
+RETRY_COUNT=0
+
+while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+    REMOTE_ENV=$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 "${SERVER_USER}@${SERVER_IP}" "cat /root/docker-compose/.env 2>/dev/null" 2>&1) && break
+    RETRY_COUNT=$((RETRY_COUNT + 1))
+    if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+        echo -e "${YELLOW}SSH 连接失败，${RETRY_DELAY}秒后重试 (${RETRY_COUNT}/${MAX_RETRIES})...${NC}"
+        sleep $RETRY_DELAY
+    else
+        echo -e "${RED}SSH 连接失败: ${REMOTE_ENV}${NC}"
+        exit 1
+    fi
+done
+
+# 提取 DATABASE_URL
+DATABASE_URL=$(echo "$REMOTE_ENV" | grep '^DATABASE_URL=' | head -1 | sed 's/^DATABASE_URL=//' | tr -d '"' | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+if [ -z "$DATABASE_URL" ]; then
+    echo -e "${RED}❌ 无法从服务器获取 DATABASE_URL${NC}"
+    echo -e "${RED}服务器返回内容:${NC}${REMOTE_ENV}"
+    exit 1
+fi
+echo -e "${GREEN}✅ 已获取数据库配置 (长度: ${#DATABASE_URL})${NC}"
+echo ""
+
+# 构建Docker镜像
+echo -e "${YELLOW}[步骤 2/5] 构建Docker镜像...${NC}"
+cd "${PROJECT_DIR}"
+export DOCKER_BUILDKIT=1
+echo -e "${BLUE}开始构建 Docker 镜像...${NC}"
+
+docker buildx build \
+  --platform linux/amd64 \
+  -f Dockerfile \
+  -t "${IMAGE_NAME}" \
+  --build-arg DATABASE_URL="${DATABASE_URL}" \
+  --build-arg CARGO_BUILD_JOBS=16 \
+  --build-arg ENABLE_SCCACHE=true \
+  --cache-from=type=local,src=/tmp/.buildx-cache \
+  --cache-to=type=local,dest=/tmp/.buildx-cache,mode=max \
+  --load .
+
+BUILD_RESULT=$?
+if [ $BUILD_RESULT -eq 0 ]; then
     echo -e "${GREEN}✅ Docker镜像构建成功${NC}"
 else
-    echo -e "${RED}❌ Docker镜像构建失败，退出部署${NC}"
+    echo -e "${RED}❌ Docker镜像构建失败 (退出码: ${BUILD_RESULT})${NC}"
     exit 1
 fi
 echo ""
 
-# 步骤2：导出镜像为tar文件
-echo -e "${YELLOW}[步骤 2/7] 导出镜像到tar文件...${NC}"
-docker save "$IMAGE_NAME" -o "$TAR_FILE"
+# 导出镜像为tar文件
+echo -e "${YELLOW}[步骤 3/5] 导出镜像为tar文件...${NC}"
+TAR_FILE=$(mktemp).tar
+docker save "${IMAGE_NAME}" -o "${TAR_FILE}"
+TAR_SIZE=$(du -h "${TAR_FILE}" | cut -f1)
+echo -e "${GREEN}✅ 镜像导出成功，文件大小: ${TAR_SIZE}${NC}"
+echo ""
 
-if [ $? -eq 0 ]; then
-    TAR_SIZE=$(du -h "$TAR_FILE" | cut -f1)
-    echo -e "${GREEN}✅ 镜像导出成功，文件大小: $TAR_SIZE${NC}"
+# 上传镜像到服务器
+echo -e "${YELLOW}[步骤 4/5] 上传镜像到服务器...${NC}"
+scp -o StrictHostKeyChecking=no -o ConnectTimeout=60 "${TAR_FILE}" "${SERVER_USER}@${SERVER_IP}:${SERVER_DOCKER_DIR}/"
+rm -f "${TAR_FILE}"
+echo -e "${GREEN}✅ 镜像上传成功${NC}"
+echo ""
+
+# 停止并部署新容器
+echo -e "${YELLOW}[步骤 5/5] 部署到服务器...${NC}"
+
+# 在服务器上执行部署命令
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 "${SERVER_USER}@${SERVER_IP}" "cd '${SERVER_DOCKER_DIR}' && {
+    echo '停止旧容器...'
+    docker compose -f docker-compose-dev.yml down appflowy_cloud 2>/dev/null || true
+    echo '删除旧镜像...'
+    docker rmi '${IMAGE_NAME}' 2>/dev/null || true
+    echo '导入新镜像...'
+    docker load -i appflowy_cloud.tar
+    echo '启动新容器...'
+    docker compose -f docker-compose-dev.yml up -d appflowy_cloud
+    rm -f appflowy_cloud.tar
+    echo '部署命令执行完成'
+    echo '等待容器启动...'
+    sleep 10
+    echo '检查容器状态...'
+    docker compose -f docker-compose-dev.yml ps appflowy_cloud
+}"
+
+DEPLOY_RESULT=$?
+if [ $DEPLOY_RESULT -eq 0 ]; then
+    echo -e "${GREEN}✅ 部署成功${NC}"
 else
-    echo -e "${RED}❌ 镜像导出失败${NC}"
+    echo -e "${RED}❌ 部署失败 (退出码: ${DEPLOY_RESULT})${NC}"
     exit 1
 fi
 echo ""
 
-# 步骤3：上传镜像到服务器
-echo -e "${YELLOW}[步骤 3/7] 上传镜像到服务器...${NC}"
-scp "$TAR_FILE" "${SERVER_USER}@${SERVER_IP}:${SERVER_DOCKER_DIR}/"
-
-if [ $? -eq 0 ]; then
-    echo -e "${GREEN}✅ 镜像上传成功${NC}"
-else
-    echo -e "${RED}❌ 镜像上传失败${NC}"
-    exit 1
-fi
-echo ""
-
-# 步骤4：停止原容器
-echo -e "${YELLOW}[步骤 4/7] 停止服务器上的原容器...${NC}"
-ssh "${SERVER_USER}@${SERVER_IP}" "cd ${SERVER_DOCKER_DIR} && docker compose --file ${COMPOSE_FILE} down"
-
-if [ $? -eq 0 ]; then
-    echo -e "${GREEN}✅ 原容器已停止${NC}"
-else
-    echo -e "${RED}❌ 停止容器失败${NC}"
-    exit 1
-fi
-echo ""
-
-# 步骤5：删除原镜像
-echo -e "${YELLOW}[步骤 5/7] 删除服务器上的原镜像...${NC}"
-ssh "${SERVER_USER}@${SERVER_IP}" "docker rmi ${IMAGE_NAME} 2>/dev/null || echo '镜像不存在，跳过删除'"
-echo -e "${GREEN}✅ 原镜像处理完成${NC}"
-echo ""
-
-# 步骤6：导入新镜像
-echo -e "${YELLOW}[步骤 6/7] 导入新镜像到服务器...${NC}"
-ssh "${SERVER_USER}@${SERVER_IP}" "docker load -i ${SERVER_DOCKER_DIR}/appflowy_cloud.tar"
-
-if [ $? -eq 0 ]; then
-    echo -e "${GREEN}✅ 新镜像导入成功${NC}"
-else
-    echo -e "${RED}❌ 新镜像导入失败${NC}"
-    exit 1
-fi
-echo ""
-
-# 步骤7：启动新容器
-echo -e "${YELLOW}[步骤 7/7] 启动新容器...${NC}"
-ssh "${SERVER_USER}@${SERVER_IP}" "cd ${SERVER_DOCKER_DIR} && docker compose --file ${COMPOSE_FILE} up -d"
-
-if [ $? -eq 0 ]; then
-    echo -e "${GREEN}✅ 新容器启动成功${NC}"
-else
-    echo -e "${RED}❌ 新容器启动失败${NC}"
-    exit 1
-fi
-echo ""
-
-# 等待容器完全启动
-echo -e "${BLUE}等待容器完全启动（5秒）...${NC}"
+# 等待服务完全启动
+echo -e "${YELLOW}[等待] 等待服务完全启动...${NC}"
 sleep 5
 echo ""
 
+# 测试API接口
+echo -e "${YELLOW}[测试] 测试API接口...${NC}"
+echo -e "${BLUE}----------------------------------------${NC}"
+
+# 测试AI模型列表接口
+echo -e "${BLUE}测试1: AI模型列表接口${NC}"
+AI_MODELS_RESPONSE=$(curl -k -s https://xiaomabiji.com/api/ai/chat/models 2>&1)
+if echo "$AI_MODELS_RESPONSE" | grep -q '"models"'; then
+    echo -e "${GREEN}✅ AI模型列表接口正常${NC}"
+    echo "模型数量: $(echo "$AI_MODELS_RESPONSE" | grep -o '"id"' | wc -l | tr -d ' ') 个"
+else
+    echo -e "${RED}❌ AI模型列表接口异常${NC}"
+    echo "响应: ${AI_MODELS_RESPONSE:0:200}"
+fi
+echo ""
+
+# 测试订阅计划接口
+echo -e "${BLUE}测试2: 订阅计划接口${NC}"
+SUBSCRIPTION_RESPONSE=$(curl -k -s https://xiaomabiji.com/api/subscription/plans 2>&1)
+if echo "$SUBSCRIPTION_RESPONSE" | grep -q 'plans\|data'; then
+    echo -e "${GREEN}✅ 订阅计划接口正常${NC}"
+else
+    echo -e "${RED}❌ 订阅计划接口异常${NC}"
+    echo "响应: ${SUBSCRIPTION_RESPONSE:0:200}"
+fi
+echo ""
+
+echo -e "${BLUE}----------------------------------------${NC}"
+echo ""
+
 # 检查运行状态
-echo -e "${BLUE}========================================${NC}"
-echo -e "${BLUE}检查部署状态${NC}"
-echo -e "${BLUE}========================================${NC}"
-echo ""
+echo -e "${BLUE}容器运行状态:${NC}"
+ssh -o StrictHostKeyChecking=no "${SERVER_USER}@${SERVER_IP}" "docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | grep -E 'appflowy|cloud' || true"
 
-echo -e "${YELLOW}[状态检查 1/3] 查看容器运行状态...${NC}"
-ssh "${SERVER_USER}@${SERVER_IP}" "docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | grep appflowy"
 echo ""
-
-echo -e "${YELLOW}[状态检查 2/3] 查看容器资源使用情况...${NC}"
-ssh "${SERVER_USER}@${SERVER_IP}" "docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}' | grep appflowy"
-echo ""
-
-echo -e "${YELLOW}[状态检查 3/3] 查看最近50行日志...${NC}"
-echo -e "${BLUE}----------------------------------------${NC}"
-ssh "${SERVER_USER}@${SERVER_IP}" "docker logs --tail 50 docker-compose-appflowy_cloud-1"
-echo -e "${BLUE}----------------------------------------${NC}"
-echo ""
-
-# 清理本地tar文件
-echo -e "${YELLOW}[清理] 删除本地tar文件...${NC}"
-rm -f "$TAR_FILE"
-echo -e "${GREEN}✅ 本地tar文件已清理${NC}"
-echo ""
-
-# 部署完成
 echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}✅ 部署完成！${NC}"
+echo -e "${GREEN}部署完成！${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
-
-# 输出有用的命令提示
-echo -e "${BLUE}📋 后续操作提示：${NC}"
-echo ""
-echo -e "${YELLOW}查看完整日志：${NC}"
-echo "  ssh root@8.152.101.166 \"docker logs -f docker-compose-appflowy_cloud-1\""
-echo ""
-echo -e "${YELLOW}查看所有容器状态：${NC}"
-echo "  ssh root@8.152.101.166 \"docker ps\""
-echo ""
-echo -e "${YELLOW}重启容器：${NC}"
-echo "  ssh root@8.152.101.166 \"cd /root/docker-compose && docker compose --file docker-compose-dev.yml restart appflowy_cloud\""
-echo ""
-echo -e "${YELLOW}进入容器：${NC}"
-echo "  ssh root@8.152.101.166 \"docker exec -it docker-compose-appflowy_cloud-1 /bin/bash\""
+echo -e "${YELLOW}查看日志命令:${NC}"
+echo "  ssh ${SERVER_USER}@${SERVER_IP} 'docker logs -f docker-compose-appflowy_cloud-1'"
 echo ""
 
-# 健康检查
-# 使用域名访问API，通过系统nginx(443)转发到appflowy_cloud服务
-echo -e "${YELLOW}[健康检查] 测试AI聊天模型API...${NC}"
-RESPONSE=$(curl -s https://api.xiaomabiji.com/api/ai/chat/models || echo "")
-
-if [ -n "$RESPONSE" ]; then
-    echo -e "${BLUE}API响应数据：${NC}"
-    echo "$RESPONSE" | jq '.' 2>/dev/null || echo "$RESPONSE"
-
-    # 检查响应是否包含预期的结构
-    if echo "$RESPONSE" | grep -q '"code":0' && echo "$RESPONSE" | grep -q '"models":'; then
-        MODEL_COUNT=$(echo "$RESPONSE" | grep -o '"id":"[^"]*"' | wc -l)
-        echo -e "${GREEN}✅ AI聊天模型API健康检查通过 (返回了 $MODEL_COUNT 个模型)${NC}"
-    else
-        echo -e "${YELLOW}⚠️  API响应格式异常${NC}"
-    fi
-else
-    echo -e "${YELLOW}⚠️  无法连接到AI聊天模型API（可能还在启动中，请等待30秒后手动检查）${NC}"
-fi
-echo ""
-
-# 订阅计划接口测试
-echo -e "${YELLOW}[健康检查] 测试订阅计划API...${NC}"
-PLANS_RESPONSE=$(curl -s https://api.xiaomabiji.com/api/subscription/plans || echo "")
-
-if [ -n "$PLANS_RESPONSE" ]; then
-    echo -e "${BLUE}订阅计划API响应数据：${NC}"
-    echo "$PLANS_RESPONSE" | jq '.' 2>/dev/null || echo "$PLANS_RESPONSE"
-
-    # 检查响应是否包含预期的结构
-    if echo "$PLANS_RESPONSE" | grep -q '"code":0' && echo "$PLANS_RESPONSE" | grep -q '"data":'; then
-        PLAN_COUNT=$(echo "$PLANS_RESPONSE" | grep -o '"plan_code":"[^"]*"' | wc -l)
-        echo -e "${GREEN}✅ 订阅计划API健康检查通过 (返回了 $PLAN_COUNT 个订阅计划)${NC}"
-    else
-        echo -e "${YELLOW}⚠️  订阅计划API响应格式异常${NC}"
-    fi
-else
-    echo -e "${YELLOW}⚠️  无法连接到订阅计划API（可能还在启动中，请等待30秒后手动检查）${NC}"
-fi
-echo ""
-
-echo -e "${GREEN}部署脚本执行完毕！${NC}"
-
+exit 0

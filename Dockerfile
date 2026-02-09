@@ -16,16 +16,18 @@ RUN apt update && apt install -y protobuf-compiler lld clang
 
 # Install sccache to speed up repeated Rust compilations and configure wrapper.
 # sccache will cache rustc outputs; we also expose SCCACHE_DIR for BuildKit cache mounting.
-RUN cargo install --locked sccache || true
+RUN cargo install --locked sccache && echo "sccache installed successfully" || echo "sccache install failed, will skip cache"
+# 检查 sccache 是否安装成功
+RUN if [ -x "/root/.cargo/bin/sccache" ]; then echo "sccache found at /root/.cargo/bin/sccache"; sccache --version; else echo "sccache not installed"; fi
 ## Do not enable RUSTC_WRAPPER during cargo-chef cook step to avoid wrapper interfering with recipe probe.
 ENV RUSTC_WRAPPER=""
 ENV SCCACHE_DIR=/sccache
 
 ARG PROFILE="release"
-ARG DATABASE_URL=postgres://postgres:password@postgres:5432/postgres
+ARG DATABASE_URL="postgres://invalid:invalid@invalid:5432/invalid"
 ARG ENABLE_SCCACHE="false"
-ENV DATABASE_URL=$DATABASE_URL
-ENV ENABLE_SCCACHE=${ENABLE_SCCACHE}
+ENV DATABASE_URL="${DATABASE_URL}"
+ENV ENABLE_SCCACHE="${ENABLE_SCCACHE}"
 
 COPY --from=planner /app/recipe.json recipe.json
 ENV CARGO_BUILD_JOBS=4
@@ -48,82 +50,32 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 
 COPY . .
 
-# Try to prepare sqlx cache if database is available and sqlx-cli is installed
-# This ensures all queries are cached before building with SQLX_OFFLINE
-# Note: If .sqlx cache is incomplete, you should run `./prepare_sqlx_cache.sh` locally first
-RUN if [ -n "$DATABASE_URL" ] && (command -v cargo-sqlx >/dev/null 2>&1 || cargo install sqlx-cli --no-default-features --features postgres --quiet 2>/dev/null); then \
-      echo "Preparing SQLx cache with DATABASE_URL=$DATABASE_URL..."; \
-      if cargo sqlx prepare --workspace 2>&1; then \
-        echo "✓ SQLx cache prepared successfully"; \
-      else \
-        echo "⚠ Warning: SQLx prepare failed (database may not be accessible during build)"; \
-        echo "⚠ Using existing cache. If build fails, run './prepare_sqlx_cache.sh' locally first."; \
-      fi; \
-    else \
-      echo "⚠ Skipping SQLx cache preparation (database not available or sqlx-cli not installed)"; \
-      echo "⚠ Using existing cache. If build fails, run './prepare_sqlx_cache.sh' locally first."; \
-    fi
-
 # Build the project.
-# Attempt to prepare SQLx cache and, if successful, build with SQLX_OFFLINE in the same RUN.
-# If prepare fails (e.g. DB not reachable during docker build), fall back to building without SQLX_OFFLINE.
+# IMPORTANT: We use SQLX_OFFLINE=true to use cached query validation.
+# This avoids needing database access during Docker build time.
+# The .sqlx directory with query metadata must be committed to version control.
+ENV SQLX_OFFLINE=true
+# 配置 sccache，但让它自己查找 rustc
+ENV SCCACHE_DIR=/sccache
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/sccache \
-    echo "Building with profile: ${PROFILE}" && \
-    if [ "$PROFILE" = "release" ]; then \
-      echo "Profile is release. Checking for sqlx cache or attempting prepare..."; \
-      if cargo sqlx prepare --workspace >/dev/null 2>&1; then \
-        echo "SQLx cache prepared successfully - building with SQLX_OFFLINE=true"; \
-        # Enable sccache wrapper only if rustc is available in PATH to avoid wrapper failing
-        if [ \"$ENABLE_SCCACHE\" = \"true\" ] && command -v rustc >/dev/null 2>&1; then \
-          echo "ENABLE_SCCACHE=true and rustc found, enabling sccache wrapper"; \
-          export RUSTC_WRAPPER=/usr/local/cargo/bin/sccache; \
-        else \
-          echo "sccache disabled or rustc not found in PATH, skipping sccache wrapper"; \
-        fi; \
-        SQLX_OFFLINE=true cargo build --release --bin appflowy_cloud; \
-      elif [ -f ./sqlx-data.json ] || [ -d ./.sqlx ]; then \
-        echo "Found existing sqlx cache in workspace - building with SQLX_OFFLINE=true"; \
-        if [ \"$ENABLE_SCCACHE\" = \"true\" ] && command -v rustc >/dev/null 2>&1; then \
-          echo "ENABLE_SCCACHE=true and rustc found, enabling sccache wrapper"; \
-          export RUSTC_WRAPPER=/usr/local/cargo/bin/sccache; \
-        else \
-          echo "sccache disabled or rustc not found in PATH, skipping sccache wrapper"; \
-        fi; \
-        SQLX_OFFLINE=true cargo build --release --bin appflowy_cloud; \
-      else \
-        echo "ERROR: sqlx cache not found and 'cargo sqlx prepare' failed."; \
-        echo "Please run 'cargo sqlx prepare --workspace' locally (or run ./prepare_sqlx_cache.sh) and include the generated 'sqlx-data.json' or '.sqlx' directory in the build context."; \
-        echo "Aborting build to avoid obscure compile-time sqlx errors (see devops-docs for details)."; \
-        exit 1; \
-      fi; \
+    echo "Building with profile: ${PROFILE} (SQLX_OFFLINE=true)" && \
+    # 查找 rustc 和 sccache 的实际路径
+    RUSTC_PATH=$(command -v rustc 2>/dev/null || echo "") && \
+    if [ -n "$RUSTC_PATH" ] && [ -x "/root/.cargo/bin/sccache" ]; then \
+      echo "Using sccache at /root/.cargo/bin/sccache with rustc at $RUSTC_PATH"; \
+      export RUSTC_WRAPPER=/root/.cargo/bin/sccache; \
     else \
-      echo "Profile is debug. Checking for sqlx cache or attempting prepare..."; \
-      if cargo sqlx prepare --workspace >/dev/null 2>&1; then \
-        echo "SQLx cache prepared successfully - building with SQLX_OFFLINE=true"; \
-        if command -v rustc >/dev/null 2>&1; then \
-          echo "rustc found, enabling sccache wrapper"; \
-          export RUSTC_WRAPPER=/root/.cargo/bin/sccache; \
-        else \
-          echo "rustc not found in PATH, skipping sccache wrapper"; \
-        fi; \
-        SQLX_OFFLINE=true cargo build --bin appflowy_cloud; \
-      elif [ -f ./sqlx-data.json ] || [ -d ./.sqlx ]; then \
-        echo "Found existing sqlx cache in workspace - building with SQLX_OFFLINE=true"; \
-        if [ \"$ENABLE_SCCACHE\" = \"true\" ] && command -v rustc >/dev/null 2>&1; then \
-          echo "ENABLE_SCCACHE=true and rustc found, enabling sccache wrapper"; \
-          export RUSTC_WRAPPER=/root/.cargo/bin/sccache; \
-        else \
-          echo "sccache disabled or rustc not found in PATH, skipping sccache wrapper"; \
-        fi; \
-        SQLX_OFFLINE=true cargo build --bin appflowy_cloud; \
-      else \
-        echo "ERROR: sqlx cache not found and 'cargo sqlx prepare' failed."; \
-        echo "Please run 'cargo sqlx prepare --workspace' locally (or run ./prepare_sqlx_cache.sh) and include the generated 'sqlx-data.json' or '.sqlx' directory in the build context."; \
-        echo "Aborting build to avoid obscure compile-time sqlx errors (see devops-docs for details)."; \
-        exit 1; \
-      fi; \
+      echo "sccache not available, skipping"; \
+      export RUSTC_WRAPPER=""; \
+    fi && \
+    if [ "$PROFILE" = "release" ]; then \
+      echo "Building release binary"; \
+      cargo build --release --bin appflowy_cloud; \
+    else \
+      echo "Building debug binary"; \
+      cargo build --bin appflowy_cloud; \
     fi
 
 FROM debian:bookworm-slim AS runtime
