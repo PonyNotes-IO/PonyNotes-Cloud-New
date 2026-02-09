@@ -332,17 +332,20 @@ pub async fn insert_question_message<'a, E: Executor<'a, Database = Postgres>>(
   author: ChatAuthorWithUuid,
   chat_id: &str,
   content: String,
+  metadata: Option<serde_json::Value>,
 ) -> Result<ChatMessageWithAuthorUuid, AppError> {
   let chat_id = Uuid::from_str(chat_id)?;
+  let metadata_value = metadata.unwrap_or_default();
   let row = sqlx::query!(
     r#"
-        INSERT INTO af_chat_messages (chat_id, author, content)
-        VALUES ($1, $2, $3)
+        INSERT INTO af_chat_messages (chat_id, author, content, meta_data)
+        VALUES ($1, $2, $3, $4)
         RETURNING message_id, created_at
         "#,
     chat_id,
     json!(author),
     &content,
+    metadata_value,
   )
   .fetch_one(executor)
   .await
@@ -352,7 +355,7 @@ pub async fn insert_question_message<'a, E: Executor<'a, Database = Postgres>>(
     author,
     message_id: row.message_id,
     content,
-    metadata: json!([]),
+    metadata: metadata_value,
     created_at: row.created_at,
     reply_message_id: None,
   };

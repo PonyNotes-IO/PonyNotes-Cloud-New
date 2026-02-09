@@ -94,4 +94,6 @@ pub struct SharedViewInfo {
   pub shared_users: Vec<SharedUser>,
   pub created_at: DateTime<Utc>,
   pub last_modified: DateTime<Utc>,
+  #[serde(default)]
+  pub workspace_id: Option<Uuid>,
 }

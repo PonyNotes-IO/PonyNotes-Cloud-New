@@ -11,7 +11,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
-use tokio_retry::strategy::{ExponentialBackoff, ExponentialBackoffBuilder};
+use tokio_retry::strategy::ExponentialBackoff;
 use tokio_retry::{Action, Condition, RetryIf};
 use tokio_tungstenite::tungstenite::http::HeaderMap;
 use tracing::{debug, info, trace};
@@ -82,11 +82,9 @@ pub async fn retry_connect(
 ) -> Result<WebSocketStream, WSError> {
   // 使用指数退避策略，减少初始延迟，提高用户体验
   // 初始延迟500ms，最大延迟10秒，最多5次重试
-  let strategy = ExponentialBackoffBuilder::new()
-    .initial_delay(Duration::from_millis(500))
-    .max_delay(Duration::from_secs(10))
+  let strategy = ExponentialBackoff::from_millis(500)
     .factor(2)
-    .build()
+    .max_delay(Duration::from_secs(10))
     .take(5);
 
   let stream = RetryIf::spawn(

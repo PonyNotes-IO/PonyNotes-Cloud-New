@@ -139,6 +139,7 @@ pub async fn create_chat_message(
     ChatAuthorWithUuid::new(uid, user_uuid, ChatAuthorType::Human),
     &chat_id,
     params.content,
+    params.metadata,
   )
   .await?;
   Ok(question)

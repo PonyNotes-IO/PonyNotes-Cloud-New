@@ -36,6 +36,10 @@ pub struct CreateChatMessageParams {
   #[serde(default)]
   #[serde(skip_serializing_if = "Option::is_none")]
   pub prompt_id: Option<String>,
+  /// PonyNotes: 消息元数据，用于传递图片等信息
+  #[serde(default)]
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,6 +174,7 @@ impl CreateChatMessageParams {
       content: content.to_string(),
       message_type: ChatMessageType::System,
       prompt_id: None,
+      metadata: None,
     }
   }
 
@@ -178,6 +183,7 @@ impl CreateChatMessageParams {
       content: content.to_string(),
       message_type: ChatMessageType::User,
       prompt_id: None,
+      metadata: None,
     }
   }
 }
