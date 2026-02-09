@@ -80,6 +80,9 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 
 FROM debian:bookworm-slim AS runtime
 WORKDIR /app
+# 使用阿里云镜像源解决国内网络问题
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+    sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list 2>/dev/null || true
 RUN apt-get update -y \
   && apt-get install -y --no-install-recommends openssl ca-certificates curl \
   && update-ca-certificates \
