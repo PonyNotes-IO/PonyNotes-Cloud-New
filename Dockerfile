@@ -50,10 +50,8 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 
 COPY . .
 
-# 构建项目
-# 注意：由于修改了 SQL 查询，临时禁用 SQLX_OFFLINE 以在线验证查询
-# 构建完成后 .sqlx 缓存目录会自动更新，下次构建可以重新启用
-ENV SQLX_OFFLINE=false
+# 构建项目（使用 .sqlx 离线缓存，无需连接数据库）
+ENV SQLX_OFFLINE=true
 # 配置 sccache，但让它自己查找 rustc
 ENV SCCACHE_DIR=/sccache
 RUN --mount=type=cache,target=/root/.cargo/registry \
