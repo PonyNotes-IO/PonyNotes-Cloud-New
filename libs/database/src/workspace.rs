@@ -484,22 +484,21 @@ pub async fn upsert_workspace_member(
 pub async fn delete_workspace_members(
   txn: &mut Transaction<'_, sqlx::Postgres>,
   workspace_id: &Uuid,
-  member_email: &str,
+  user_uid: i64,
 ) -> Result<(), AppError> {
+  // 检查是否是 workspace 所有者
   let is_owner = sqlx::query_scalar!(
     r#"
-  SELECT EXISTS (
-    SELECT 1
-    FROM public.af_workspace
-    WHERE
-        workspace_id = $1
-        AND owner_uid = (
-            SELECT uid FROM public.af_user WHERE email = $2
-        )
-   ) AS "is_owner";
-  "#,
+    SELECT EXISTS (
+      SELECT 1
+      FROM public.af_workspace
+      WHERE
+          workspace_id = $1
+          AND owner_uid = $2
+    ) AS "is_owner";
+    "#,
     workspace_id,
-    member_email
+    user_uid
   )
   .fetch_one(txn.deref_mut())
   .await?
@@ -514,18 +513,14 @@ pub async fn delete_workspace_members(
     DELETE FROM public.af_workspace_member
     WHERE
     workspace_id = $1
-    AND uid = (
-        SELECT uid FROM public.af_user WHERE email = $2
-    )
+    AND uid = $2
     -- Ensure the user to be deleted is not the original owner.
-    -- 1. TODO(nathan): User must transfer ownership to another user first.
-    -- 2. User must have at least one workspace
     AND uid <> (
         SELECT owner_uid FROM public.af_workspace WHERE workspace_id = $1
     );
     "#,
     workspace_id,
-    member_email,
+    user_uid,
   )
   .execute(txn.deref_mut())
   .await?;
