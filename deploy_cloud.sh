@@ -65,7 +65,6 @@ export DOCKER_BUILDKIT=1
 echo -e "${BLUE}开始构建 Docker 镜像...${NC}"
 
 docker buildx build \
-  --platform linux/amd64 \
   -f Dockerfile \
   -t "${IMAGE_NAME}" \
   --build-arg DATABASE_URL="${DATABASE_URL}" \
@@ -84,7 +83,7 @@ else
 fi
 echo ""
 
-# 导出镜像为tar文件
+# 导出镜像为tar文件（本地临时文件名可以随机，但服务器端固定为 appflowy_cloud.tar）
 echo -e "${YELLOW}[步骤 3/5] 导出镜像为tar文件...${NC}"
 TAR_FILE=$(mktemp).tar
 docker save "${IMAGE_NAME}" -o "${TAR_FILE}"
@@ -92,9 +91,9 @@ TAR_SIZE=$(du -h "${TAR_FILE}" | cut -f1)
 echo -e "${GREEN}✅ 镜像导出成功，文件大小: ${TAR_SIZE}${NC}"
 echo ""
 
-# 上传镜像到服务器
+# 上传镜像到服务器，远端文件名固定为 appflowy_cloud.tar，和后面 docker load -i appflowy_cloud.tar 保持一致
 echo -e "${YELLOW}[步骤 4/5] 上传镜像到服务器...${NC}"
-scp -o StrictHostKeyChecking=no -o ConnectTimeout=60 "${TAR_FILE}" "${SERVER_USER}@${SERVER_IP}:${SERVER_DOCKER_DIR}/"
+scp -o StrictHostKeyChecking=no -o ConnectTimeout=60 "${TAR_FILE}" "${SERVER_USER}@${SERVER_IP}:${SERVER_DOCKER_DIR}/appflowy_cloud.tar"
 rm -f "${TAR_FILE}"
 echo -e "${GREEN}✅ 镜像上传成功${NC}"
 echo ""
