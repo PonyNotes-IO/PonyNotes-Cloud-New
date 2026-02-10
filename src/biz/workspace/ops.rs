@@ -756,7 +756,7 @@ pub async fn leave_workspace(
 pub async fn remove_workspace_members(
   pg_pool: &PgPool,
   workspace_id: &Uuid,
-  member_emails: &[String],
+  member_identifiers: &[String],
   workspace_access_control: Arc<dyn WorkspaceAccessControl>,
 ) -> Result<(), AppResponseError> {
   let mut txn = pg_pool
@@ -764,23 +764,37 @@ pub async fn remove_workspace_members(
     .await
     .context("Begin transaction to delete workspace members")?;
 
-  for email in member_emails {
-    if let Ok(uid) = select_uid_from_email(txn.deref_mut(), email)
-      .await
-      .map_err(AppResponseError::from)
-    {
-      delete_workspace_members(&mut txn, workspace_id, email.as_str()).await?;
-      workspace_access_control
-        .remove_user_from_workspace(&uid, workspace_id)
-        .await?;
+  for identifier in member_identifiers {
+    // Skip empty identifiers
+    if identifier.is_empty() {
+      tracing::warn!("Skipping empty member identifier");
+      continue;
+    }
 
-      // TODO: Add permission cache invalidation for removed user
-      // if let Some(realtime_server) = get_realtime_server_handle() {
-      //   realtime_server.send_to_workspace(
-      //     *workspace_id,
-      //     InvalidateUserPermissions { uid }
-      //   ).await;
-      // }
+    // Try to find user by email or phone (supports both email and phone number)
+    match select_uid_from_email_or_phone(txn.deref_mut(), identifier).await {
+      Ok(uid) => {
+        delete_workspace_members(&mut txn, workspace_id, identifier.as_str()).await?;
+        workspace_access_control
+          .remove_user_from_workspace(&uid, workspace_id)
+          .await?;
+
+        // TODO: Add permission cache invalidation for removed user
+        // if let Some(realtime_server) = get_realtime_server_handle() {
+        //   realtime_server.send_to_workspace(
+        //     *workspace_id,
+        //     InvalidateUserPermissions { uid }
+        //   ).await;
+        // }
+      },
+      Err(e) => {
+        tracing::warn!(
+          "Failed to find user with identifier '{}': {}. Skipping removal.",
+          identifier,
+          e
+        );
+        continue;
+      }
     }
   }
 
