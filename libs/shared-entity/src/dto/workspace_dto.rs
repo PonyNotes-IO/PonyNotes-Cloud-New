@@ -88,19 +88,33 @@ pub struct WorkspaceInviteQuery {
 
 #[derive(Deserialize, Serialize)]
 pub struct WorkspaceMemberChangeset {
-  pub email: String,
+  pub uid: Option<i64>,  // 优先使用uid，这是最准确的用户标识符
+  pub email: Option<String>,  // 保留email作为后备（用于旧版兼容）
   pub role: Option<AFRole>,
   pub name: Option<String>,
 }
 
 impl WorkspaceMemberChangeset {
-  pub fn new(email: String) -> Self {
+  /// 使用uid创建，这是最准确的标识方式
+  pub fn new_with_uid(uid: i64) -> Self {
     Self {
-      email,
+      uid: Some(uid),
+      email: None,
       role: None,
       name: None,
     }
   }
+
+  /// 使用email创建（兼容旧版）
+  pub fn new_with_email(email: String) -> Self {
+    Self {
+      uid: None,
+      email: Some(email),
+      role: None,
+      name: None,
+    }
+  }
+
   pub fn with_role<T: Into<AFRole>>(mut self, role: T) -> Self {
     self.role = Some(role.into());
     self
@@ -108,6 +122,17 @@ impl WorkspaceMemberChangeset {
   pub fn with_name(mut self, name: String) -> Self {
     self.name = Some(name);
     self
+  }
+
+  /// 获取用户uid，如果uid为空则根据email查找
+  pub async fn resolve_uid(&self, pg_pool: &sqlx::PgPool) -> Result<i64, sqlx::Error> {
+    if let Some(uid) = self.uid {
+      return Ok(uid);
+    }
+    if let Some(ref email) = self.email {
+      return database::user::select_uid_from_email(pg_pool, email).await;
+    }
+    Err(sqlx::Error::RowNotFound)
   }
 }
 

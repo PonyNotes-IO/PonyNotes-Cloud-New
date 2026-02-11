@@ -1025,11 +1025,28 @@ async fn update_workspace_member_handler(
   let changeset = payload.into_inner();
 
   if changeset.role.is_some() {
-    let changeset_uid = select_uid_from_email(&state.pg_pool, &changeset.email)
-      .await
-      .map_err(AppResponseError::from)?;
+    // 优先使用uid，如果uid为空则根据email查找
+    let target_uid = match changeset.uid {
+      Some(target_uid) => target_uid,
+      None => {
+        // 如果没有uid，使用email查找
+        match changeset.email {
+          Some(ref email) => select_uid_from_email(&state.pg_pool, email)
+            .await
+            .map_err(AppResponseError::from)?,
+          None => {
+            return Err(AppResponseError::new(
+              app_error::ErrorCode::InvalidRequest,
+              "Either uid or email must be provided to identify the member",
+            )
+            .into());
+          }
+        }
+      }
+    };
+
     workspace::ops::update_workspace_member(
-      &changeset_uid,
+      &target_uid,
       &state.pg_pool,
       &workspace_id,
       &changeset,
