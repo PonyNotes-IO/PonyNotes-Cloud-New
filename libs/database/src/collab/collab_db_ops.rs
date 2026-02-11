@@ -737,3 +737,60 @@ where
   .await?;
   Ok(list)
 }
+
+/// 从 af_collab_member 表中删除协作成员
+#[inline]
+#[instrument(level = "trace", skip_all, fields(uid=%uid, oid=%oid), err)]
+pub async fn delete_collab_member<'a, E>(executor: E, uid: i64, oid: &str) -> Result<(), AppError>
+where
+  E: Executor<'a, Database = Postgres>,
+{
+  let result = sqlx::query!(
+    "DELETE FROM af_collab_member WHERE uid = $1 AND oid = $2",
+    uid,
+    oid
+  )
+  .execute(executor)
+  .await
+  .map_err(|err| {
+    AppError::Internal(anyhow!(
+      "Delete af_collab_member failed: uid:{}, oid:{}, error: {:?}",
+      uid, oid, err,
+    ))
+  })?;
+
+  if result.rows_affected() == 0 {
+    return Err(AppError::NotFound("协作成员不存在".to_string()));
+  }
+
+  Ok(())
+}
+
+/// 从 af_collab_member_invite 表中删除协作邀请记录
+#[inline]
+#[instrument(level = "trace", skip_all, fields(send_uid=%send_uid, received_uid=%received_uid, oid=%oid), err)]
+pub async fn delete_collab_member_invite<'a, E>(executor: E, send_uid: i64, received_uid: i64, oid: &str) -> Result<(), AppError>
+where
+  E: Executor<'a, Database = Postgres>,
+{
+  let result = sqlx::query!(
+    "DELETE FROM af_collab_member_invite WHERE send_uid = $1 AND received_uid = $2 AND oid = $3",
+    send_uid,
+    received_uid,
+    oid
+  )
+  .execute(executor)
+  .await
+  .map_err(|err| {
+    AppError::Internal(anyhow!(
+      "Delete af_collab_member_invite failed: send_uid:{}, received_uid:{}, oid:{}, error: {:?}",
+      send_uid, received_uid, oid, err,
+    ))
+  })?;
+
+  if result.rows_affected() == 0 {
+    return Err(AppError::NotFound("协作邀请记录不存在".to_string()));
+  }
+
+  Ok(())
+}

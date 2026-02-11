@@ -76,7 +76,10 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::biz::collab::me::{get_received_collab_list, get_send_collab_list};
-use crate::biz::workspace::collab_member::{add_collab_member, edit_collab_member_permission};
+use crate::biz::workspace::collab_member::{
+  add_collab_member, edit_collab_member_permission, remove_collab_member, remove_collab_member_invite,
+};
+use crate::biz::workspace::ops::get_collab_owner;
 use database::pg_row::AFCollabMemberInvite;
 use semver::Version;
 use sha2::{Digest, Sha256};
@@ -190,6 +193,11 @@ pub fn workspace_scope() -> Scope {
             // 修改已有协作成员的权限
             web::resource("/{workspace_id}/collab/{object_id}/members/{member_user_id}")
                 .route(web::patch().to(update_collab_member_permission_handler)),
+        )
+        .service(
+            // 删除协作成员
+            web::resource("/{workspace_id}/collab/{object_id}/members/{member_user_id}")
+                .route(web::delete().to(remove_collab_member_handler)),
         )
         .service(
             web::resource("/v1/{workspace_id}/collab/{object_id}")
@@ -1012,36 +1020,15 @@ async fn update_workspace_member_handler(
 
   let changeset = payload.into_inner();
 
-  if changeset.role.is_some() {
-    // 优先使用uid，如果uid为空则根据email查找
-    let target_uid = match changeset.uid {
-      Some(target_uid) => target_uid,
-      None => {
-        // 如果没有uid，使用email查找
-        match changeset.email {
-          Some(ref email) => select_uid_from_email(&state.pg_pool, email)
-            .await
-            .map_err(AppResponseError::from)?,
-          None => {
-            return Err(AppResponseError::new(
-              app_error::ErrorCode::InvalidRequest,
-              "Either uid or email must be provided to identify the member",
-            )
-            .into());
-          }
-        }
-      }
-    };
-
-    workspace::ops::update_workspace_member(
-      &target_uid,
-      &state.pg_pool,
-      &workspace_id,
-      &changeset,
-      state.workspace_access_control.clone(),
-    )
-    .await?;
-  }
+  // 使用 uid 直接更新成员角色（uid 是用户的唯一标识符）
+  workspace::ops::update_workspace_member(
+    &changeset.uid,
+    &state.pg_pool,
+    &workspace_id,
+    &changeset,
+    state.workspace_access_control.clone(),
+  )
+  .await?;
 
   Ok(AppResponse::Ok().into())
 }
@@ -3167,7 +3154,10 @@ async fn post_workspace_invite_code_handler(
 }
 /// 添加协作成员到笔记
 ///
-/// 业务走到这里了就其实是加入别人的笔记。所以无需判断邀请者权限。无需验证受邀者身份。
+/// 业务逻辑：
+/// 1. 将被邀请者添加到工作区（这样协作者才能同步文档）
+/// 2. 将被邀请者添加到文档协作成员列表
+/// 3. 设置默认权限为只读
 ///
 async fn add_collab_member_handler(
   user_uuid: UserUuid,
@@ -3185,6 +3175,14 @@ async fn add_collab_member_handler(
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
   let received_uid = state.user_cache.get_user_uid(&received_uid).await?;
 
+  // 不能添加自己为协作者
+  if uid == received_uid {
+    return Err(AppResponseError::new(
+      ErrorCode::InvalidRequest,
+      "不能添加自己为协作者".to_string(),
+    ).into());
+  }
+
   // 获取视图名称
   let folder = state.ws_server.get_folder(workspace_id).await?;
   let view_name = folder
@@ -3192,6 +3190,35 @@ async fn add_collab_member_handler(
     .map(|v| v.name.clone())
     .unwrap_or_else(|| format!("共享文档 {}", &view_id.to_string()[..8]));
 
+  // Step 1: 将被邀请者添加到工作区（工作区级别）
+  // 这样协作者才能同步文档，实现实时协作
+  database::workspace::upsert_workspace_member_uid(
+    &state.pg_pool,
+    &workspace_id,
+    received_uid,
+    AFRole::Guest, // 默认作为 Guest 添加到工作区
+  )
+  .await
+  .map_err(|e| {
+    AppResponseError::new(
+      ErrorCode::Internal,
+      format!("添加工作区成员失败: {}", e),
+    )
+  })?;
+
+  // 更新工作区访问控制策略
+  state
+    .workspace_access_control
+    .insert_role(&received_uid, &workspace_id, AFRole::Guest)
+    .await
+    .map_err(|e| {
+      AppResponseError::new(
+        ErrorCode::Internal,
+        format!("更新工作区访问控制失败: {}", e),
+      )
+    })?;
+
+  // Step 2: 将被邀请者添加到文档协作成员列表
   add_collab_member(
     &state.pg_pool,
     state.collab_access_control.clone(),
@@ -3202,6 +3229,7 @@ async fn add_collab_member_handler(
     &view_name,
   )
   .await?;
+
   Ok(Json(AppResponse::Ok()))
 }
 
@@ -3230,6 +3258,72 @@ async fn update_collab_member_permission_handler(
   )
   .await?;
   // 变更权限
+  Ok(Json(AppResponse::Ok()))
+}
+
+/// 删除协作成员
+///
+/// 业务逻辑：
+/// 1. 检查操作者是否是文档拥有者
+/// 2. 不能删除自己
+/// 3. 从 af_collab_member 表中删除成员
+/// 4. 删除 Casbin 访问控制策略
+async fn remove_collab_member_handler(
+  user_uuid: UserUuid,
+  path_param: web::Path<(Uuid, Uuid, Uuid)>,
+  state: Data<AppState>,
+) -> Result<JsonAppResponse<()>> {
+  let (workspace_id, view_id, remove_uid_uuid) = path_param.into_inner();
+
+  // 1. 获取当前用户和要删除的用户的 uid
+  let user_uid = state.user_cache.get_user_uid(&user_uuid).await?;
+  let remove_uid = state.user_cache.get_user_uid(&remove_uid_uuid).await?;
+
+  // 2. 获取文档拥有者
+  let collab_owner = workspace::ops::get_collab_owner(&state.pg_pool, &workspace_id, &view_id)
+    .await
+    .map_err(|e| AppResponseError::new(ErrorCode::Internal, e.to_string()))?;
+
+  // 3. 只有文档拥有者可以删除成员
+  if user_uid != collab_owner.uid {
+    return Err(AppResponseError::new(
+      ErrorCode::NotEnoughPermissions,
+      "只有文档拥有者可以删除成员".to_string(),
+    ).into());
+  }
+
+  // 4. 不能删除自己
+  if user_uid == remove_uid {
+    return Err(AppResponseError::new(
+      ErrorCode::InvalidRequest,
+      "不能删除自己".to_string(),
+    ).into());
+  }
+
+  // 5. 获取发送者的 uid（文档拥有者）
+  let send_uid = collab_owner.uid;
+
+  // 6. 删除协作成员和邀请记录
+  workspace::collab_member::remove_collab_member(
+    &state.pg_pool,
+    state.collab_access_control.clone(),
+    &workspace_id,
+    &view_id,
+    user_uid, // 操作者 uid
+    remove_uid,
+    &view_id.to_string(),
+  )
+  .await?;
+
+  // 7. 同时删除邀请记录
+  let _ = workspace::collab_member::remove_collab_member_invite(
+    &state.pg_pool,
+    send_uid,
+    remove_uid,
+    &view_id.to_string(),
+  )
+  .await;
+
   Ok(Json(AppResponse::Ok()))
 }
 

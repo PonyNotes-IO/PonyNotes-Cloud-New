@@ -771,7 +771,6 @@ pub struct AFUserWorkspaceInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, Eq, PartialEq)]
 pub struct AFWorkspaceMember {
-  pub uid: i64,  // 用户ID
   pub name: String,
   pub email: Option<String>,
   pub role: AFRole,
