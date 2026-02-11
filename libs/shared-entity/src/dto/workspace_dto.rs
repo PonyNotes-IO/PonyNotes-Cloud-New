@@ -88,14 +88,15 @@ pub struct WorkspaceInviteQuery {
 
 #[derive(Deserialize, Serialize)]
 pub struct WorkspaceMemberChangeset {
-  pub uid: i64,              // 用户唯一标识符，必填（数据库主键）
-  pub email: Option<String>, // 邮箱联系方式，可选（手机号用户可能没有 email）
+  #[serde(default)]
+  pub uid: i64,              // 用户唯一标识符（0 表示未知，需要通过 email 查找）
+  pub email: Option<String>, // 邮箱/手机联系方式，可选
   pub role: Option<AFRole>,
   pub name: Option<String>,
 }
 
 impl WorkspaceMemberChangeset {
-  /// 使用 uid 创建，这是最准确的标识方式
+  /// 使用 uid 创建（推荐，最准确）
   pub fn new(uid: i64) -> Self {
     Self {
       uid,
@@ -105,7 +106,17 @@ impl WorkspaceMemberChangeset {
     }
   }
 
-  /// 使用 uid 和 email 创建
+  /// 使用 email/手机号创建（兼容旧客户端）
+  pub fn new_from_email(email: String) -> Self {
+    Self {
+      uid: 0,
+      email: Some(email),
+      role: None,
+      name: None,
+    }
+  }
+
+  /// 链式设置 email
   pub fn with_email(mut self, email: String) -> Self {
     self.email = Some(email);
     self

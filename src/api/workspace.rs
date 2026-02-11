@@ -1020,9 +1020,22 @@ async fn update_workspace_member_handler(
 
   let changeset = payload.into_inner();
 
-  // 使用 uid 直接更新成员角色（uid 是用户的唯一标识符）
+  // 解析目标用户 uid：优先使用 uid 字段，uid=0 时尝试从 email 查找
+  let target_uid = if changeset.uid != 0 {
+    changeset.uid
+  } else if let Some(ref email) = changeset.email {
+    select_uid_from_email(&state.pg_pool, email)
+      .await
+      .map_err(AppResponseError::from)?
+  } else {
+    return Err(AppResponseError::new(
+      app_error::ErrorCode::InvalidRequest,
+      "Either uid or email must be provided to identify the member",
+    ).into());
+  };
+
   workspace::ops::update_workspace_member(
-    &changeset.uid,
+    &target_uid,
     &state.pg_pool,
     &workspace_id,
     &changeset,
