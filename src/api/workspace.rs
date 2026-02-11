@@ -926,13 +926,7 @@ async fn get_workspace_member_handler(
         ),
       )
     })?;
-  let member = AFWorkspaceMember {
-    name: member_row.name,
-    email: member_row.email,
-    role: member_row.role,
-    avatar_url: member_row.avatar_url,
-    joined_at: member_row.created_at,
-  };
+  let member: AFWorkspaceMember = member_row.into();
 
   Ok(AppResponse::Ok().with_data(member).into())
 }
@@ -963,13 +957,7 @@ async fn get_workspace_member_v1_handler(
           ),
         )
       })?;
-  let member = AFWorkspaceMember {
-    name: member_row.name,
-    email: member_row.email,
-    role: member_row.role,
-    avatar_url: member_row.avatar_url,
-    joined_at: member_row.created_at,
-  };
+  let member: AFWorkspaceMember = member_row.into();
 
   Ok(AppResponse::Ok().with_data(member).into())
 }
