@@ -8,8 +8,9 @@ use shared_entity::{
     RevokeSharedViewAccessRequest, ShareViewWithGuestRequest, SharedViewDetails,
     SharedViewDetailsRequest, SharedView, SharedViews, ListSharedViewResponse, SharedViewInfo,
   },
-  response::{AppResponseError, JsonAppResponse},
+  response::{AppResponse, AppResponseError, JsonAppResponse},
 };
+use sqlx;
 
 use actix_web::{
   web::{self},
@@ -49,7 +50,7 @@ async fn list_shared_views_handler(
   // 我们需要查询 af_collab_member_invite 表获取所有共享给当前用户的文档
   let _workspace_id = path.into_inner();
   let uid = state.user_cache.get_user_uid(&user_uuid).await.map_err(|e| {
-    AppResponseError::new(ErrorCode::UserNotFound, e.to_string())
+    AppResponseError::new(ErrorCode::UserUnAuthorized, e.to_string())
   })?;
 
   // 从 af_collab_member_invite 获取被分享给我的所有文档（作为接收者）
@@ -66,31 +67,27 @@ async fn list_shared_views_handler(
       Err(_) => continue,
     };
     
-    // 从 af_collab 表获取文档实际所属的 workspace_id
-    let doc_workspace_id = sqlx::query_scalar!(
+    // 从 af_collab 表获取文档实际所属的 workspace_id（使用运行时查询避免 sqlx 宏缓存问题）
+    let doc_workspace_id: Uuid = sqlx::query_scalar(
       "SELECT workspace_id FROM af_collab WHERE oid = $1",
-      invite.oid
     )
+    .bind(&invite.oid)
     .fetch_one(&state.pg_pool)
     .await
-    .ok()
-    .flatten()
     .unwrap_or(_workspace_id);
     
-    // 从 af_collab_member 表获取用户的权限
-    let permission_id = sqlx::query_scalar!(
+    // 从 af_collab_member 表获取用户的权限（使用运行时查询）
+    let permission_id: i32 = sqlx::query_scalar(
       "SELECT permission_id FROM af_collab_member WHERE oid = $1 AND uid = $2",
-      invite.oid,
-      uid
     )
+    .bind(&invite.oid)
+    .bind(uid)
     .fetch_one(&state.pg_pool)
     .await
-    .ok()
-    .flatten()
     .unwrap_or(1); // 默认只读权限
     
     // 将 permission_id 转换为 AFAccessLevel
-    let access_level = match permission_id {
+    let _access_level = match permission_id {
       1 => AFAccessLevel::ReadOnly,
       2 => AFAccessLevel::ReadAndComment,
       3 => AFAccessLevel::ReadAndWrite,
@@ -100,7 +97,7 @@ async fn list_shared_views_handler(
     
     shared_views.push(SharedViewInfo {
       view_id,
-      view_name: invite.name.clone().unwrap_or_else(|| "共享文档".to_string()),
+      view_name: invite.name.clone(),
       shared_users: Vec::new(),
       created_at: invite.created_at,
       last_modified: invite.created_at,
@@ -108,9 +105,9 @@ async fn list_shared_views_handler(
     });
   }
 
-  Ok(JsonAppResponse::Ok().with_data(ListSharedViewResponse {
+  Ok(Json(AppResponse::Ok().with_data(ListSharedViewResponse {
     shared_views,
-  }))
+  })))
 }
 
 async fn put_shared_view_handler(

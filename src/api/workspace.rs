@@ -79,7 +79,7 @@ use crate::biz::collab::me::{get_received_collab_list, get_send_collab_list};
 use crate::biz::workspace::collab_member::{
   add_collab_member, edit_collab_member_permission, remove_collab_member, remove_collab_member_invite,
 };
-use crate::biz::workspace::ops::get_collab_owner;
+use database::workspace::select_collab_owner;
 use database::pg_row::AFCollabMemberInvite;
 use semver::Version;
 use sha2::{Digest, Sha256};
@@ -3280,12 +3280,12 @@ async fn remove_collab_member_handler(
   let remove_uid = state.user_cache.get_user_uid(&remove_uid_uuid).await?;
 
   // 2. 获取文档拥有者
-  let collab_owner = workspace::ops::get_collab_owner(&state.pg_pool, &workspace_id, &view_id)
+  let collab_owner_uid = select_collab_owner(&state.pg_pool, &workspace_id, &view_id)
     .await
     .map_err(|e| AppResponseError::new(ErrorCode::Internal, e.to_string()))?;
 
   // 3. 只有文档拥有者可以删除成员
-  if user_uid != collab_owner.uid {
+  if user_uid != collab_owner_uid {
     return Err(AppResponseError::new(
       ErrorCode::NotEnoughPermissions,
       "只有文档拥有者可以删除成员".to_string(),
@@ -3301,7 +3301,7 @@ async fn remove_collab_member_handler(
   }
 
   // 5. 获取发送者的 uid（文档拥有者）
-  let send_uid = collab_owner.uid;
+  let send_uid = collab_owner_uid;
 
   // 6. 删除协作成员和邀请记录
   workspace::collab_member::remove_collab_member(

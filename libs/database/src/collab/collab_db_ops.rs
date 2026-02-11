@@ -760,7 +760,7 @@ where
   })?;
 
   if result.rows_affected() == 0 {
-    return Err(AppError::NotFound("协作成员不存在".to_string()));
+    return Err(AppError::RecordNotFound("协作成员不存在".to_string()));
   }
 
   Ok(())
@@ -789,7 +789,7 @@ where
   })?;
 
   if result.rows_affected() == 0 {
-    return Err(AppError::NotFound("协作邀请记录不存在".to_string()));
+    return Err(AppError::RecordNotFound("协作邀请记录不存在".to_string()));
   }
 
   Ok(())

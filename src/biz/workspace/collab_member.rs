@@ -9,7 +9,7 @@ use std::ops::DerefMut;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::biz::collab::collab_db_ops::{delete_collab_member, delete_collab_member_invite};
+use database::collab::{delete_collab_member, delete_collab_member_invite};
 
 pub async fn add_collab_member(
   pg_pool: &PgPool,
@@ -111,7 +111,7 @@ pub async fn remove_collab_member(
 
   // 4. 删除 Casbin 访问控制策略
   access_control
-    .remove_access_level_policy(&uid, oid)
+    .remove_access_level(&uid, view_id)
     .await?;
 
   Ok(())
