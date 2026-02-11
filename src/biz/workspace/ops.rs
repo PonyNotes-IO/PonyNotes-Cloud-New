@@ -865,7 +865,18 @@ pub async fn update_workspace_member(
   workspace_access_control: Arc<dyn WorkspaceAccessControl>,
 ) -> Result<(), AppError> {
   if let Some(role) = &changeset.role {
-    upsert_workspace_member(pg_pool, workspace_id, &changeset.email, role.clone()).await?;
+    // 使用已解析的 uid 直接更新成员角色，不再依赖 email
+    let role_id: i32 = role.clone().into();
+    sqlx::query(
+      "UPDATE af_workspace_member SET role_id = $1 WHERE workspace_id = $2 AND uid = $3",
+    )
+    .bind(role_id)
+    .bind(workspace_id)
+    .bind(*uid)
+    .execute(pg_pool)
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to update workspace member role: {}", e)))?;
+
     workspace_access_control
       .insert_role(uid, workspace_id, role.clone())
       .await?;
