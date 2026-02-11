@@ -130,42 +130,192 @@ echo ""
 
 # 等待服务完全启动
 echo -e "${YELLOW}[等待] 等待服务完全启动...${NC}"
-sleep 5
+sleep 8
 echo ""
 
-# 测试API接口
-echo -e "${YELLOW}[测试] 测试API接口...${NC}"
-echo -e "${BLUE}----------------------------------------${NC}"
+# ============================================================
+# API 接口全面测试
+# ============================================================
+API_BASE="http://${SERVER_IP}:8000"
+GOTRUE_BASE="http://${SERVER_IP}:9999"
+TEST_PHONE="13436574850"
+TEST_PASSWORD='qwer1234!'
 
-# 测试AI模型列表接口
-echo -e "${BLUE}测试1: AI模型列表接口${NC}"
-AI_MODELS_RESPONSE=$(curl -k -s https://xiaomabiji.com/api/ai/chat/models 2>&1)
-if echo "$AI_MODELS_RESPONSE" | grep -q '"models"'; then
-    echo -e "${GREEN}✅ AI模型列表接口正常${NC}"
-    echo "模型数量: $(echo "$AI_MODELS_RESPONSE" | grep -o '"id"' | wc -l | tr -d ' ') 个"
+PASS_COUNT=0
+FAIL_COUNT=0
+TOTAL_COUNT=0
+
+# 通用测试函数
+# 参数: $1=测试名称 $2=请求方法 $3=URL $4=期望的JSON key $5...=额外curl参数
+test_api() {
+    local name="$1"
+    local method="$2"
+    local url="$3"
+    local expect_key="$4"
+    shift 4
+    local extra_args=("$@")
+
+    TOTAL_COUNT=$((TOTAL_COUNT + 1))
+    local body
+    body=$(curl -s -m 10 -X "$method" "$url" "${extra_args[@]}" 2>/dev/null)
+    local http_code
+    http_code=$(curl -s -m 10 -o /dev/null -w "%{http_code}" -X "$method" "$url" "${extra_args[@]}" 2>/dev/null)
+
+    if [ "$http_code" -ge 200 ] 2>/dev/null && [ "$http_code" -lt 300 ] 2>/dev/null && echo "$body" | grep -q "\"${expect_key}\""; then
+        PASS_COUNT=$((PASS_COUNT + 1))
+        echo -e "  ${GREEN}✅ ${name}${NC} [HTTP ${http_code}]"
+        local summary
+        summary=$(echo "$body" | python3 -c "
+import sys,json
+try:
+    d=json.load(sys.stdin)
+    if 'data' in d:
+        val=d['data']
+        if isinstance(val, list):
+            print(f'  返回 {len(val)} 条数据')
+        elif isinstance(val, dict):
+            keys=list(val.keys())[:5]
+            print(f'  字段: {keys}')
+        else:
+            print(f'  值: {str(val)[:80]}')
+    else:
+        print(f'  keys: {list(d.keys())[:5]}')
+except:
+    pass
+" 2>/dev/null)
+        [ -n "$summary" ] && echo -e "    ${CYAN}${summary}${NC}"
+    else
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        echo -e "  ${RED}❌ ${name}${NC} [HTTP ${http_code}]"
+        echo -e "    ${RED}响应: ${body:0:150}${NC}"
+    fi
+}
+
+echo -e "${CYAN}========================================${NC}"
+echo -e "${CYAN}[测试] API 接口全面测试${NC}"
+echo -e "${CYAN}========================================${NC}"
+echo ""
+
+# ─── 公共接口（无需登录）───
+echo -e "${YELLOW}▶ 公共接口（无需认证）${NC}"
+
+TOTAL_COUNT=$((TOTAL_COUNT + 1))
+HEALTH=$(curl -s -m 10 "${API_BASE}/health" 2>/dev/null)
+if [ "$HEALTH" = "OK" ]; then
+    PASS_COUNT=$((PASS_COUNT + 1))
+    echo -e "  ${GREEN}✅ 健康检查 /health${NC} [OK]"
 else
-    echo -e "${RED}❌ AI模型列表接口异常${NC}"
-    echo "响应: ${AI_MODELS_RESPONSE:0:200}"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    echo -e "  ${RED}❌ 健康检查 /health${NC} [${HEALTH:0:50}]"
 fi
+
+test_api "服务器信息 /api/server" GET "${API_BASE}/api/server" "data"
+test_api "订阅计划列表 /api/subscription/plans" GET "${API_BASE}/api/subscription/plans" "data"
+test_api "GoTrue 健康检查" GET "${GOTRUE_BASE}/health" "version"
+
 echo ""
 
-# 测试订阅计划接口
-echo -e "${BLUE}测试2: 订阅计划接口${NC}"
-SUBSCRIPTION_RESPONSE=$(curl -k -s https://xiaomabiji.com/api/subscription/plans 2>&1)
-if echo "$SUBSCRIPTION_RESPONSE" | grep -q 'plans\|data'; then
-    echo -e "${GREEN}✅ 订阅计划接口正常${NC}"
+# ─── 登录获取 Token ───
+echo -e "${YELLOW}▶ 用户登录认证${NC}"
+
+LOGIN_BODY=$(curl -s -m 10 -X POST "${GOTRUE_BASE}/token?grant_type=password" \
+    -H "Content-Type: application/json" \
+    -d "{\"phone\":\"${TEST_PHONE}\",\"password\":\"${TEST_PASSWORD}\"}" 2>/dev/null)
+ACCESS_TOKEN=$(echo "$LOGIN_BODY" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)
+REFRESH_TOKEN=$(echo "$LOGIN_BODY" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("refresh_token",""))' 2>/dev/null)
+
+TOTAL_COUNT=$((TOTAL_COUNT + 1))
+if [ -n "$ACCESS_TOKEN" ] && [ ${#ACCESS_TOKEN} -gt 20 ]; then
+    PASS_COUNT=$((PASS_COUNT + 1))
+    echo -e "  ${GREEN}✅ 手机号密码登录${NC} [token长度: ${#ACCESS_TOKEN}]"
+    AUTH_HEADER=(-H "Authorization: Bearer ${ACCESS_TOKEN}")
+
+    # ─── 用户接口 ───
+    echo ""
+    echo -e "${YELLOW}▶ 用户接口（需要认证）${NC}"
+    test_api "用户资料 /api/user/profile" GET "${API_BASE}/api/user/profile" "data" "${AUTH_HEADER[@]}"
+    test_api "用户工作区信息 /api/user/workspace" GET "${API_BASE}/api/user/workspace" "data" "${AUTH_HEADER[@]}"
+
+    WORKSPACE_ID=$(curl -s -m 10 "${API_BASE}/api/user/workspace" "${AUTH_HEADER[@]}" 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["visiting_workspace"]["workspace_id"])' 2>/dev/null)
+
+    # ─── 工作区接口 ───
+    echo ""
+    echo -e "${YELLOW}▶ 工作区接口${NC}"
+    test_api "工作区列表 /api/workspace" GET "${API_BASE}/api/workspace" "data" "${AUTH_HEADER[@]}"
+    if [ -n "$WORKSPACE_ID" ]; then
+        echo -e "    ${CYAN}使用工作区: ${WORKSPACE_ID}${NC}"
+        test_api "工作区成员列表" GET "${API_BASE}/api/workspace/${WORKSPACE_ID}/member" "data" "${AUTH_HEADER[@]}"
+        test_api "工作区设置" GET "${API_BASE}/api/workspace/${WORKSPACE_ID}/settings" "data" "${AUTH_HEADER[@]}"
+        test_api "文档使用量" GET "${API_BASE}/api/workspace/${WORKSPACE_ID}/usage" "data" "${AUTH_HEADER[@]}"
+    fi
+
+    # ─── 订阅与账单接口 ───
+    echo ""
+    echo -e "${YELLOW}▶ 订阅与账单接口${NC}"
+    test_api "当前订阅 /api/subscription/current" GET "${API_BASE}/api/subscription/current" "data" "${AUTH_HEADER[@]}"
+    test_api "使用量 /api/subscription/usage" GET "${API_BASE}/api/subscription/usage" "data" "${AUTH_HEADER[@]}"
+    test_api "订阅状态列表 /billing" GET "${API_BASE}/billing/api/v1/subscription-status" "data" "${AUTH_HEADER[@]}"
+    if [ -n "$WORKSPACE_ID" ]; then
+        test_api "工作区订阅状态" GET "${API_BASE}/billing/api/v1/subscription-status/${WORKSPACE_ID}" "data" "${AUTH_HEADER[@]}"
+    fi
+
+    # ─── 协作接口 ───
+    echo ""
+    echo -e "${YELLOW}▶ 协作接口${NC}"
+    test_api "收到的协作邀请" GET "${API_BASE}/api/collab/me/received" "data" "${AUTH_HEADER[@]}"
+    test_api "发出的协作邀请" GET "${API_BASE}/api/collab/me/sent" "data" "${AUTH_HEADER[@]}"
+
+    # ─── 文件存储接口 ───
+    if [ -n "$WORKSPACE_ID" ]; then
+        echo ""
+        echo -e "${YELLOW}▶ 文件存储接口${NC}"
+        test_api "文件使用量" GET "${API_BASE}/api/file_storage/${WORKSPACE_ID}/usage" "data" "${AUTH_HEADER[@]}"
+        test_api "文件列表" GET "${API_BASE}/api/file_storage/${WORKSPACE_ID}/blobs" "data" "${AUTH_HEADER[@]}"
+    fi
+
+    # ─── 共享接口 ───
+    if [ -n "$WORKSPACE_ID" ]; then
+        echo ""
+        echo -e "${YELLOW}▶ 共享接口${NC}"
+        test_api "共享文档列表" GET "${API_BASE}/api/sharing/workspace/${WORKSPACE_ID}/view" "data" "${AUTH_HEADER[@]}"
+    fi
+
+    # ─── Token 刷新 ───
+    echo ""
+    echo -e "${YELLOW}▶ Token 刷新${NC}"
+    REFRESH_BODY=$(curl -s -m 10 -X POST "${GOTRUE_BASE}/token?grant_type=refresh_token" \
+        -H "Content-Type: application/json" \
+        -d "{\"refresh_token\":\"${REFRESH_TOKEN}\"}" 2>/dev/null)
+    NEW_TOKEN=$(echo "$REFRESH_BODY" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)
+    TOTAL_COUNT=$((TOTAL_COUNT + 1))
+    if [ -n "$NEW_TOKEN" ] && [ ${#NEW_TOKEN} -gt 20 ]; then
+        PASS_COUNT=$((PASS_COUNT + 1))
+        echo -e "  ${GREEN}✅ Token 刷新成功${NC} [新token长度: ${#NEW_TOKEN}]"
+    else
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        echo -e "  ${RED}❌ Token 刷新失败${NC}"
+    fi
+
 else
-    echo -e "${RED}❌ 订阅计划接口异常${NC}"
-    echo "响应: ${SUBSCRIPTION_RESPONSE:0:200}"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    echo -e "  ${RED}❌ 登录失败，跳过所有需要认证的接口测试${NC}"
+    echo -e "    ${RED}响应: ${LOGIN_BODY:0:200}${NC}"
 fi
-echo ""
 
-echo -e "${BLUE}----------------------------------------${NC}"
+# ─── 测试结果汇总 ───
+echo ""
+echo -e "${CYAN}========================================${NC}"
+if [ $FAIL_COUNT -eq 0 ]; then
+    echo -e "${GREEN}🎉 全部测试通过！ (${PASS_COUNT}/${TOTAL_COUNT})${NC}"
+else
+    echo -e "${YELLOW}📊 测试结果: ${GREEN}${PASS_COUNT} 通过${NC} / ${RED}${FAIL_COUNT} 失败${NC} / 共 ${TOTAL_COUNT} 项"
+fi
+echo -e "${CYAN}========================================${NC}"
 echo ""
 
 # 检查运行状态
 echo -e "${BLUE}容器运行状态:${NC}"
-ssh -o StrictHostKeyChecking=no "${SERVER_USER}@${SERVER_IP}" "docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | grep -E 'appflowy|cloud' || true"
+ssh -o StrictHostKeyChecking=no "${SERVER_USER}@${SERVER_IP}" "docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | grep -E 'appflowy|cloud|gotrue|postgres' || true"
 
 echo ""
 echo -e "${GREEN}========================================${NC}"
@@ -176,4 +326,7 @@ echo -e "${YELLOW}查看日志命令:${NC}"
 echo "  ssh ${SERVER_USER}@${SERVER_IP} 'docker logs -f docker-compose-appflowy_cloud-1'"
 echo ""
 
+if [ $FAIL_COUNT -gt 0 ]; then
+    exit 1
+fi
 exit 0
