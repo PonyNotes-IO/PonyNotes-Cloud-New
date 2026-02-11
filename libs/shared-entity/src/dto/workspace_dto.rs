@@ -123,17 +123,6 @@ impl WorkspaceMemberChangeset {
     self.name = Some(name);
     self
   }
-
-  /// 获取用户uid，如果uid为空则根据email查找
-  pub async fn resolve_uid(&self, pg_pool: &sqlx::PgPool) -> Result<i64, sqlx::Error> {
-    if let Some(uid) = self.uid {
-      return Ok(uid);
-    }
-    if let Some(ref email) = self.email {
-      return database::user::select_uid_from_email(pg_pool, email).await;
-    }
-    Err(sqlx::Error::RowNotFound)
-  }
 }
 
 #[derive(Deserialize, Serialize)]
