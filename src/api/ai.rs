@@ -658,34 +658,63 @@ async fn list_chat_models_handler(
   }).into())
 }
 
-/// 检查用户剩余AI调用次数
-async fn check_user_ai_remaining(
+/// 检查用户剩余AI调用次数（按uid检查）
+async fn check_ai_remaining_by_uid(
   state: &AppState,
-  user_uuid: &UserUuid,
+  uid: i64,
 ) -> Result<i64, AppError> {
-  // 1. 获取用户 uid
-  let uid = state.user_cache.get_user_uid(user_uuid).await?;
-  
-  // 2. 获取用户当前订阅信息
+  // 获取用户当前订阅信息
   let subscription_response = fetch_current_subscription(&state.pg_pool, uid).await?;
   
-  // 3. 获取剩余次数
+  // 获取剩余次数
   let remaining = subscription_response.usage.ai_chat_remaining_this_month;
   
-  // 4. 如果为 None，表示无限制，返回最大值；否则返回剩余次数
+  // 如果为 None，表示无限制，返回最大值；否则返回剩余次数
   match remaining {
     Some(count) => Ok(count),
     None => Ok(i64::MAX), // 无限制
   }
 }
 
-/// 记录AI聊天使用情况
-async fn record_ai_chat_usage(
+/// 根据workspace_id获取资源应消耗的目标用户uid
+/// 协作区场景：消耗workspace owner的资源配额
+async fn get_resource_owner_uid(
   state: &AppState,
   user_uuid: &UserUuid,
-) -> Result<(), AppError> {
-  let uid = state.user_cache.get_user_uid(user_uuid).await?;
+  workspace_id_str: Option<&str>,
+) -> Result<i64, AppError> {
+  if let Some(ws_id_str) = workspace_id_str {
+    // 解析workspace_id
+    if let Ok(ws_id) = Uuid::parse_str(ws_id_str) {
+      // 获取workspace信息，找到owner_uid
+      match database::workspace::select_workspace(&state.pg_pool, &ws_id).await {
+        Ok(workspace) => {
+          if let Some(owner_uid) = workspace.owner_uid {
+            info!(
+              "🔍 [资源归属] workspace_id: {}, owner_uid: {}, 协作区资源消耗归属workspace owner",
+              ws_id, owner_uid
+            );
+            return Ok(owner_uid);
+          }
+        },
+        Err(e) => {
+          warn!("⚠️ [资源归属] 查询workspace失败: {:?}, 回退为使用当前用户", e);
+        }
+      }
+    }
+  }
   
+  // 回退: 使用当前请求用户
+  let uid = state.user_cache.get_user_uid(user_uuid).await?;
+  info!("🔍 [资源归属] 未提供workspace_id或查询失败，使用当前用户 uid: {}", uid);
+  Ok(uid)
+}
+
+/// 记录AI聊天使用情况（按uid记录）
+async fn record_ai_chat_usage_by_uid(
+  state: &AppState,
+  uid: i64,
+) -> Result<(), AppError> {
   record_usage(
     &state.pg_pool,
     uid,
@@ -701,6 +730,7 @@ async fn record_ai_chat_usage(
 }
 
 /// 聊天会话接口 (需要JWT认证，根据订阅计划限制使用次数)
+/// 协作区场景：当用户B在用户A的协作区使用AI时，消耗A的AI配额
 #[instrument(level = "debug", skip(state, payload, user_uuid), err)]
 async fn public_chat_session_handler(
   user_uuid: UserUuid,
@@ -710,10 +740,11 @@ async fn public_chat_session_handler(
   let params = payload.into_inner();
   
   info!(
-    "🔍 [AI会话] 收到用户请求 - user: {}, message_len: {}, model: {:?}", 
+    "🔍 [AI会话] 收到用户请求 - user: {}, message_len: {}, model: {:?}, workspace_id: {:?}", 
     *user_uuid,
     params.message.len(),
-    params.preferred_model
+    params.preferred_model,
+    params.workspace_id
   );
   info!(
     "🔍 [AI会话] 请求参数 - has_images: {}, images_count: {}, has_files: {}, thinking: {}, search: {}", 
@@ -724,21 +755,41 @@ async fn public_chat_session_handler(
     params.enable_web_search
   );
   
-  // 1. 检查用户剩余AI调用次数
-  let remaining = match check_user_ai_remaining(&state, &user_uuid).await {
+  // 1. 确定资源消耗的目标用户（协作区场景：消耗workspace owner的配额）
+  let resource_owner_uid = match get_resource_owner_uid(
+    &state,
+    &user_uuid,
+    params.workspace_id.as_deref(),
+  ).await {
+    Ok(uid) => uid,
+    Err(err) => {
+      error!("Failed to determine resource owner: {:?}", err);
+      // 回退为使用当前用户
+      state.user_cache.get_user_uid(&user_uuid).await
+        .map_err(|e| actix_web::error::ErrorInternalServerError(e))?
+    }
+  };
+  
+  info!(
+    "🔍 [AI会话] 资源消耗归属 - resource_owner_uid: {}, calling_user: {}", 
+    resource_owner_uid, *user_uuid
+  );
+  
+  // 2. 检查资源owner的剩余AI调用次数
+  let remaining = match check_ai_remaining_by_uid(&state, resource_owner_uid).await {
     Ok(count) => count,
     Err(AppError::RecordNotFound(_)) => {
-      error!("User {} has no active subscription", *user_uuid);
+      error!("Resource owner uid {} has no active subscription", resource_owner_uid);
       return Ok(
         HttpResponse::NotFound()
           .json(serde_json::json!({
             "code": "SUBSCRIPTION_NOT_FOUND",
-            "message": "抱歉，您还未开启订阅计划，问AI功能暂时不可用。",
+            "message": "抱歉，该工作空间的所有者还未开启订阅计划，问AI功能暂时不可用。",
           }))
       );
     },
     Err(err) => {
-      error!("Failed to check AI remaining for user {}: {:?}", *user_uuid, err);
+      error!("Failed to check AI remaining for resource owner uid {}: {:?}", resource_owner_uid, err);
       return Ok(
         HttpResponse::InternalServerError()
           .json(serde_json::json!({
@@ -749,9 +800,9 @@ async fn public_chat_session_handler(
     },
   };
   
-  // 2. 检查剩余次数是否足够（>= 1）
+  // 3. 检查剩余次数是否足够（>= 1）
   if remaining < 1 {
-    error!("User {} AI limit exceeded, remaining: {}", *user_uuid, remaining);
+    error!("Resource owner uid {} AI limit exceeded, remaining: {}", resource_owner_uid, remaining);
     return Ok(
       HttpResponse::PaymentRequired()
         .json(serde_json::json!({
@@ -761,7 +812,7 @@ async fn public_chat_session_handler(
     );
   }
   
-  trace!("User {} has {} remaining AI calls", *user_uuid, remaining);
+  trace!("Resource owner uid {} has {} remaining AI calls", resource_owner_uid, remaining);
   
   // 3. 确定使用的模型（必须指定，或使用默认的 DeepSeek）
   let model = if let Some(model_id) = &params.preferred_model {
@@ -859,12 +910,12 @@ async fn public_chat_session_handler(
   // 6. 调用 ChatClient 进行流式聊天
   match state.chat_client.stream_chat(&params, model).await {
     Ok(stream) => {
-      // 7. 异步记录使用情况（不阻塞响应）
+      // 7. 异步记录使用情况（记录在workspace owner名下，不阻塞响应）
       let state_clone = state.clone();
-      let user_uuid_clone = user_uuid.clone();
+      let resource_owner_uid_clone = resource_owner_uid;
       tokio::spawn(async move {
-        if let Err(e) = record_ai_chat_usage(&state_clone, &user_uuid_clone).await {
-          error!("Failed to record AI chat usage for user {}: {:?}", *user_uuid_clone, e);
+        if let Err(e) = record_ai_chat_usage_by_uid(&state_clone, resource_owner_uid_clone).await {
+          error!("Failed to record AI chat usage for resource owner uid {}: {:?}", resource_owner_uid_clone, e);
         }
       });
       

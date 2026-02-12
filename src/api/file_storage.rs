@@ -568,22 +568,25 @@ async fn put_blob_handler_v1(
   let content_length = content_length.into_inner().into_inner();
   let content_type = content_type.into_inner().to_string();
 
-  // Check subscription plan limits for file upload
-  let resource_status = get_user_resource_limit_status(&state.pg_pool, uid).await?;
+  // 协作区场景：文件上传消耗workspace owner的云空间配额
+  // 获取workspace owner的uid来检查存储限制
+  let workspace = database::workspace::select_workspace(&state.pg_pool, &path.workspace_id).await?;
+  let owner_uid = workspace.owner_uid.ok_or_else(|| {
+    AppError::Internal(anyhow!("Workspace owner_uid is missing for workspace {}", path.workspace_id))
+  })?;
+
+  info!(
+    "📦 [文件上传] 资源消耗归属 - workspace_id: {}, owner_uid: {}, uploading_user_uid: {}",
+    path.workspace_id, owner_uid, uid
+  );
+
+  // Check subscription plan limits for file upload (使用workspace owner的订阅配额)
+  let resource_status = get_user_resource_limit_status(&state.pg_pool, owner_uid).await?;
 
   // Check single file upload size limit
-  let single_limit_bytes = match resource_status.plan_code.as_str() {
-      "free" => 0, // No upload allowed on free? No, wait, user said "300M portion retained".
-      // Actually, I should use the PlanLimits mapping for single upload limit, 
-      // but the requirement says "保留最早期300M数据". 
-      // I'll use the existing PlanLimits for individual file size, but resource_status for total.
-      _ => {
-        let workspace = database::workspace::select_workspace(&state.pg_pool, &path.workspace_id).await?;
-        let plan = SubscriptionPlan::try_from(workspace.workspace_type)
-          .map_err(|e| AppError::Internal(anyhow!("Invalid workspace type: {}", e)))?;
-        PlanLimits::from_plan(&plan).single_upload_limit
-      },
-  };
+  let plan = SubscriptionPlan::try_from(workspace.workspace_type)
+    .map_err(|e| AppError::Internal(anyhow!("Invalid workspace type: {}", e)))?;
+  let single_limit_bytes = PlanLimits::from_plan(&plan).single_upload_limit;
 
   if content_length as i64 > single_limit_bytes {
     return Err(
@@ -595,8 +598,8 @@ async fn put_blob_handler_v1(
     );
   }
 
-  // Check total storage limit
-  let current_total_usage = get_user_total_storage_usage(&state.pg_pool, uid)
+  // Check total storage limit (使用workspace owner的存储使用量)
+  let current_total_usage = get_user_total_storage_usage(&state.pg_pool, owner_uid)
     .await? as i64;
   let total_limit_bytes = (resource_status.storage_limit_mb * 1024.0 * 1024.0) as i64;
 

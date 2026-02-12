@@ -37,6 +37,8 @@ pub struct ChatRequestParams {
   /// 是否启用全网搜索模式
   #[serde(default)]
   pub enable_web_search: bool,
+  /// 当前工作空间ID (用于协作区场景，消耗workspace owner的资源配额)
+  pub workspace_id: Option<String>,
 }
 
 /// 聊天文件附件
