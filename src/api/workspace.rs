@@ -15,7 +15,7 @@ use crate::biz::workspace::invite::{
   join_workspace_invite_by_code,
 };
 use crate::biz::workspace::join_request::{
-  create_join_request, list_join_requests, handle_join_request, cancel_join_request,
+  cancel_join_request, create_join_request, handle_join_request, list_join_requests,
 };
 use crate::biz::workspace::ops::{
   create_comment_on_published_view, create_reaction_on_comment, get_comments_on_published_view,
@@ -32,7 +32,6 @@ use crate::biz::workspace::page_view::{
 };
 use crate::biz::workspace::publish::get_workspace_default_publish_view_info_meta;
 use crate::biz::workspace::publish::list_collab_publish_info;
-use database::publish::select_all_published_collab_info_global;
 use database::publish::{
   insert_received_published_collab, select_received_published_collabs,
 };
@@ -54,6 +53,7 @@ use appflowy_collaborate::actix_ws::entities::{
   ClientGenerateEmbeddingMessage, ClientHttpStreamMessage, ClientHttpUpdateMessage,
 };
 use appflowy_collaborate::ws2::WorkspaceCollabInstanceCache;
+use database::publish::select_all_published_collab_info_global;
 
 use bytes::BytesMut;
 use chrono::{DateTime, Duration, Utc};
@@ -82,11 +82,14 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::biz::collab::me::{get_received_collab_list, get_send_collab_list};
+use crate::biz::subscription::ops::{check_user_storage_limit, get_user_resource_limit_status};
 use crate::biz::workspace::collab_member::{
   add_collab_member, edit_collab_member_permission, remove_collab_member, remove_collab_member_invite,
 };
 use crate::biz::workspace::ops::get_collab_owner;
 use database::pg_row::AFCollabMemberInvite;
+use database::subscription::get_user_total_usage_bytes;
+use database::workspace::select_collab_owner;
 use semver::Version;
 use sha2::{Digest, Sha256};
 use shared_entity::dto::publish_dto::DuplicatePublishedPageResponse;
@@ -1091,6 +1094,21 @@ async fn create_collab_handler(
     );
   }
 
+  // 容量检查
+  let content_size = params.encoded_collab_v1.len() as i64;
+  let resource_status = get_user_resource_limit_status(&state.pg_pool, uid).await?;
+  let total_limit_bytes = (resource_status.storage_limit_mb * 1024.0 * 1024.0) as i64;
+  let current_usage = get_user_total_usage_bytes(&state.pg_pool, uid).await?;
+  if current_usage + content_size > total_limit_bytes {
+    return Err(
+      AppError::PlanLimitExceeded(format!(
+        "Storage limit exceeded. Current: {} bytes, Limit: {} bytes, Data: {} bytes",
+        current_usage, total_limit_bytes, content_size
+      ))
+      .into(),
+    );
+  }
+
   let collab = collab_from_encode_collab(&params.object_id, &params.encoded_collab_v1)
     .await
     .map_err(|err| {
@@ -1251,6 +1269,9 @@ async fn batch_create_collab_handler(
     collab_params_list.len(),
     start.elapsed()
   );
+
+  // 云空间容量检查
+  check_user_storage_limit(&state.pg_pool, uid, total_size as i64).await?;
 
   let mut pending_undexed_collabs = vec![];
   if state
@@ -2566,6 +2587,12 @@ async fn post_publish_collabs_handler(
       AppError::InvalidRequest(String::from("did not receive any data to publish")).into(),
     );
   }
+
+  // 云空间容量检查
+  let uid = state.user_cache.get_user_uid(&user_uuid).await?;
+  let total_data_size: i64 = accumulator.iter().map(|item| item.data.len() as i64).sum();
+  check_user_storage_limit(&state.pg_pool, uid, total_data_size).await?;
+
   state
     .published_collab_store
     .publish_collabs(accumulator, &workspace_id, &user_uuid)
@@ -3134,6 +3161,9 @@ async fn collab_full_sync_handler(
     .get_user_uid(&user_uuid)
     .await
     .map_err(AppResponseError::from)?;
+
+  // 云空间容量检查
+  check_user_storage_limit(&state.pg_pool, uid, doc_state.len() as i64).await?;
 
   let user = RealtimeUser {
     uid,

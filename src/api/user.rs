@@ -5,6 +5,7 @@ use crate::biz::user::user_delete::delete_user;
 use crate::biz::user::user_info::{get_profile, get_user_workspace_info, update_user};
 use crate::biz::user::user_search::{get_uid_by_email_or_phone, search_users_by_email};
 use crate::biz::user::user_verify::{send_phone_otp, verify_and_bind_phone, verify_token};
+use crate::biz::subscription::ops::check_user_storage_limit;
 use crate::state::AppState;
 use actix_http::StatusCode;
 use actix_multipart::form::bytes::Bytes;
@@ -168,9 +169,19 @@ async fn post_user_image_asset_handler(
   state: Data<AppState>,
   MultipartForm(form): MultipartForm<UploadUserImageAssetForm>,
 ) -> Result<JsonAppResponse<UserImageAssetSource>> {
+  // 云空间容量限制
+  let uid = state.user_cache.get_user_uid(&user_uuid).await?;
+  check_user_storage_limit(&state.pg_pool, uid, form.asset.data.len() as i64).await?;
+
   let file_id =
     upload_user_image_asset(state.bucket_client.clone(), &form.asset, &user_uuid).await?;
-
+  let avatar_file_size = form.asset.data.len() as i64;
+  database::user::update_user(
+    &state.pg_pool,
+    &user_uuid,
+    None, None, None,
+    Some(json!({"avatar_file_size": avatar_file_size})),
+  ).await?;
   Ok(
     AppResponse::Ok()
       .with_data(UserImageAssetSource { file_id })

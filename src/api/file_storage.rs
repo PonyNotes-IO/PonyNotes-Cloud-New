@@ -23,8 +23,8 @@ use database_entity::file_dto::{
 use crate::biz::authentication::jwt::UserUuid;
 use crate::biz::data_import::LimitedPayload;
 use crate::biz::workspace::subscription_plan_limits::PlanLimits;
-use crate::biz::subscription::ops::get_user_resource_limit_status;
-use database::subscription::get_user_total_storage_usage;
+use crate::biz::subscription::ops::{check_user_storage_limit, get_user_resource_limit_status};
+use database::subscription::{get_user_total_storage_usage, get_user_total_usage_bytes};
 use crate::state::AppState;
 use anyhow::anyhow;
 use appflowy_ai_client::client::AppFlowyAIClient;
@@ -112,6 +112,12 @@ async fn create_upload(
     .workspace_access_control
     .enforce_action(&uid, &workspace_id, Action::Write)
     .await?;
+
+  // 云空间容量检查
+  let file_size = req.file_size.ok_or_else(|| {
+    AppError::InvalidRequest("file_size is required".to_string())
+  })?;
+  check_user_storage_limit(&state.pg_pool, uid, file_size as i64).await?;
 
   let key = BlobPathV1 {
     workspace_id,
@@ -243,6 +249,9 @@ async fn put_blob_handler(
     .await?;
 
   let content_length = content_length.into_inner().into_inner();
+  // 云空间容量检查
+  check_user_storage_limit(&state.pg_pool, uid, content_length as i64).await?;
+
   let content_type = content_type.into_inner().to_string();
   let content = {
     let mut payload_reader = payload_to_async_read(payload);
@@ -599,7 +608,7 @@ async fn put_blob_handler_v1(
   }
 
   // Check total storage limit (使用workspace owner的存储使用量)
-  let current_total_usage = get_user_total_storage_usage(&state.pg_pool, owner_uid)
+  let current_total_usage = get_user_total_usage_bytes(&state.pg_pool, owner_uid)
     .await? as i64;
   let total_limit_bytes = (resource_status.storage_limit_mb * 1024.0 * 1024.0) as i64;
 

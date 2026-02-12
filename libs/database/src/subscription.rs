@@ -13,7 +13,7 @@ pub struct SubscriptionPlanRow {
   pub plan_name_cn: String,
   pub monthly_price_yuan: Decimal,
   pub yearly_price_yuan: Decimal,
-  pub cloud_storage_gb: Decimal,  // 改为 Decimal 类型，支持 MB 单位（300表示300MB）
+  pub cloud_storage_gb: Decimal, // 改为 Decimal 类型，支持 MB 单位（300表示300MB）
   pub has_inbox: bool,
   pub has_multi_device_sync: bool,
   pub has_api_support: bool,
@@ -91,7 +91,9 @@ pub struct DailyUsageRow {
 
 // Subscription Plans
 #[instrument(skip_all, err)]
-pub async fn list_subscription_plans(pg_pool: &PgPool) -> Result<Vec<SubscriptionPlanRow>, AppError> {
+pub async fn list_subscription_plans(
+  pg_pool: &PgPool,
+) -> Result<Vec<SubscriptionPlanRow>, AppError> {
   let rows = sqlx::query(
     r#"
     SELECT id, plan_code, plan_name, plan_name_cn,
@@ -108,32 +110,34 @@ pub async fn list_subscription_plans(pg_pool: &PgPool) -> Result<Vec<Subscriptio
   .fetch_all(pg_pool)
   .await?;
 
-  Ok(rows
-    .into_iter()
-    .map(|row| SubscriptionPlanRow {
-      id: row.get(0),
-      plan_code: row.get(1),
-      plan_name: row.get(2),
-      plan_name_cn: row.get(3),
-      monthly_price_yuan: row.get(4),
-      yearly_price_yuan: row.get(5),
-      cloud_storage_gb: row.get(6),
-      has_inbox: row.get(7),
-      has_multi_device_sync: row.get(8),
-      has_api_support: row.get(9),
-      version_history_days: row.get(10),
-      ai_chat_count_per_month: row.get(11),
-      ai_image_generation_per_month: row.get(12),
-      has_share_link: row.get(13),
-      has_publish: row.get(14),
-      workspace_member_limit: row.get(15),
-      collaborative_workspace_limit: row.get(16),
-      page_permission_guest_editors: row.get(17),
-      has_space_member_management: row.get(18),
-      has_space_member_grouping: row.get(19),
-      is_active: row.get(20),
-    })
-    .collect())
+  Ok(
+    rows
+      .into_iter()
+      .map(|row| SubscriptionPlanRow {
+        id: row.get(0),
+        plan_code: row.get(1),
+        plan_name: row.get(2),
+        plan_name_cn: row.get(3),
+        monthly_price_yuan: row.get(4),
+        yearly_price_yuan: row.get(5),
+        cloud_storage_gb: row.get(6),
+        has_inbox: row.get(7),
+        has_multi_device_sync: row.get(8),
+        has_api_support: row.get(9),
+        version_history_days: row.get(10),
+        ai_chat_count_per_month: row.get(11),
+        ai_image_generation_per_month: row.get(12),
+        has_share_link: row.get(13),
+        has_publish: row.get(14),
+        workspace_member_limit: row.get(15),
+        collaborative_workspace_limit: row.get(16),
+        page_permission_guest_editors: row.get(17),
+        has_space_member_management: row.get(18),
+        has_space_member_grouping: row.get(19),
+        is_active: row.get(20),
+      })
+      .collect(),
+  )
 }
 
 #[instrument(skip_all, err)]
@@ -475,21 +479,23 @@ pub async fn list_subscription_addons(
 
   let rows = query.fetch_all(pg_pool).await?;
 
-  Ok(rows
-    .into_iter()
-    .map(|row| SubscriptionAddonRow {
-      id: row.get(0),
-      addon_code: row.get(1),
-      addon_name: row.get(2),
-      addon_name_cn: row.get(3),
-      addon_type: row.get(4),
-      price_yuan: row.get(5),
-      storage_gb: row.get(6),
-      ai_chat_count: row.get(7),
-      ai_image_count: row.get(8),
-      is_active: row.get(9),
-    })
-    .collect())
+  Ok(
+    rows
+      .into_iter()
+      .map(|row| SubscriptionAddonRow {
+        id: row.get(0),
+        addon_code: row.get(1),
+        addon_name: row.get(2),
+        addon_name_cn: row.get(3),
+        addon_type: row.get(4),
+        price_yuan: row.get(5),
+        storage_gb: row.get(6),
+        ai_chat_count: row.get(7),
+        ai_image_count: row.get(8),
+        is_active: row.get(9),
+      })
+      .collect(),
+  )
 }
 
 #[instrument(skip_all, err)]
@@ -602,25 +608,27 @@ pub async fn list_user_addons(
 
   let rows = query.fetch_all(pg_pool).await?;
 
-  Ok(rows
-    .into_iter()
-    .map(|row| UserAddonRow {
-      id: row.get(0),
-      uid: row.get(1),
-      addon_id: row.get(2),
-      addon_code: row.get(3),
-      addon_name_cn: row.get(4),
-      addon_type: row.get(5),
-      quantity: row.get(6),
-      price_yuan: row.get(7),
-      storage_gb: row.get(8),
-      ai_chat_count: row.get(9),
-      ai_image_count: row.get(10),
-      start_date: row.get(11),
-      end_date: row.get(12),
-      status: row.get(13),
-    })
-    .collect())
+  Ok(
+    rows
+      .into_iter()
+      .map(|row| UserAddonRow {
+        id: row.get(0),
+        uid: row.get(1),
+        addon_id: row.get(2),
+        addon_code: row.get(3),
+        addon_name_cn: row.get(4),
+        addon_type: row.get(5),
+        quantity: row.get(6),
+        price_yuan: row.get(7),
+        storage_gb: row.get(8),
+        ai_chat_count: row.get(9),
+        ai_image_count: row.get(10),
+        start_date: row.get(11),
+        end_date: row.get(12),
+        status: row.get(13),
+      })
+      .collect(),
+  )
 }
 
 // Usage
@@ -645,13 +653,15 @@ pub async fn aggregate_user_usage(
   .fetch_all(pg_pool)
   .await?;
 
-  Ok(rows
-    .into_iter()
-    .map(|row| UsageAggregateRow {
-      usage_type: row.get(0),
-      total: row.get(1),
-    })
-    .collect())
+  Ok(
+    rows
+      .into_iter()
+      .map(|row| UsageAggregateRow {
+        usage_type: row.get(0),
+        total: row.get(1),
+      })
+      .collect(),
+  )
 }
 
 #[instrument(skip_all, err)]
@@ -680,15 +690,17 @@ pub async fn list_daily_usage(
   .fetch_all(pg_pool)
   .await?;
 
-  Ok(rows
-    .into_iter()
-    .map(|row| DailyUsageRow {
-      usage_date: row.get(0),
-      ai_chat_count: row.get(1),
-      ai_image_count: row.get(2),
-      storage_bytes: row.get(3),
-    })
-    .collect())
+  Ok(
+    rows
+      .into_iter()
+      .map(|row| DailyUsageRow {
+        usage_date: row.get(0),
+        ai_chat_count: row.get(1),
+        ai_image_count: row.get(2),
+        storage_bytes: row.get(3),
+      })
+      .collect(),
+  )
 }
 
 #[instrument(skip_all, err)]
@@ -718,10 +730,7 @@ pub async fn upsert_usage_record(
 }
 
 #[instrument(skip_all, err)]
-pub async fn get_user_total_storage_usage(
-  pg_pool: &PgPool,
-  uid: i64,
-) -> Result<i64, AppError> {
+pub async fn get_user_total_storage_usage(pg_pool: &PgPool, uid: i64) -> Result<i64, AppError> {
   let row: (Option<i64>,) = sqlx::query_as(
     r#"
     SELECT SUM(file_size)::BIGINT
@@ -738,11 +747,49 @@ pub async fn get_user_total_storage_usage(
   Ok(row.0.unwrap_or(0))
 }
 
+/// 获取用户的已用云空间容量
+///
+/// 应当涉及的统计范围
+/// - 笔记元数据
+/// - 笔记内图片/文件
+/// - 问ai图片
+/// - 头像
+///
+/// 目前统计逻辑
+/// af_SELECT SUM(len) FROM af_collab WHERE workspace_id = $1
+/// af_blob_metadata 的meta数据，理当含除头像外所有文件的数据大小
+///  - 笔记内图片/文件
+///  - 旧版上传
+///  - 分片上传
+/// af_user 的 metadata ->> 'avatar_file_size' 头像数据大小
+///
+/// todo 问ai的数据统计没有
 #[instrument(skip_all, err)]
-pub async fn get_user_owned_workspace_count(
-  pg_pool: &PgPool,
-  uid: i64,
-) -> Result<i64, AppError> {
+pub async fn get_user_total_usage_bytes(pg_pool: &PgPool, uid: i64) -> Result<i64, AppError> {
+  let row: (Option<i64>,) = sqlx::query_as(
+    r#"
+        WITH user_workspaces AS (SELECT workspace_id FROM af_workspace WHERE owner_uid = $1),
+             blob_sum AS (SELECT SUM(file_size)::BIGINT as total
+                          FROM af_blob_metadata
+                          WHERE workspace_id IN (SELECT workspace_id FROM user_workspaces)),
+             collab_sum AS (SELECT SUM(len)::BIGINT as total
+                            FROM af_collab
+                            WHERE workspace_id IN (SELECT workspace_id FROM user_workspaces)),
+             avatar_size AS (SELECT COALESCE((metadata ->> 'avatar_file_size')::BIGINT, 0) as total
+                             FROM af_user
+                             WHERE uid = $1)
+        SELECT COALESCE((SELECT total FROM blob_sum), 0) + COALESCE((SELECT total FROM collab_sum), 0)
+                   + (select total from avatar_size)
+            "#,
+  ).bind(uid)
+   .fetch_one(pg_pool)
+   .await?;
+
+  Ok(row.0.unwrap_or(0))
+}
+
+#[instrument(skip_all, err)]
+pub async fn get_user_owned_workspace_count(pg_pool: &PgPool, uid: i64) -> Result<i64, AppError> {
   let count: (i64,) = sqlx::query_as(
     r#"
     SELECT COUNT(*)::BIGINT
@@ -762,4 +809,3 @@ pub fn calculate_addon_period_end(start_date: DateTime<Utc>) -> DateTime<Utc> {
   // Addons are valid for 1 year from start date
   start_date + chrono::Duration::days(365)
 }
-

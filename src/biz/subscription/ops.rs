@@ -2,14 +2,7 @@ use std::cmp::Ordering;
 
 use app_error::AppError;
 use chrono::{Datelike, Months, NaiveDate, Utc};
-use database::subscription::{
-  aggregate_user_usage, calculate_addon_period_end, get_subscription_addon, get_subscription_plan,
-  get_subscription_plan_by_code, get_user_active_subscription, get_or_create_free_subscription, 
-  insert_user_addon, list_subscription_addons,
-  list_user_addons, list_subscription_plans, upsert_usage_record, upsert_user_subscription,
-  get_user_total_storage_usage, get_user_owned_workspace_count,
-  SubscriptionAddonRow, SubscriptionPlanRow, UserAddonRow, UserSubscriptionRow,
-};
+use database::subscription::{aggregate_user_usage, calculate_addon_period_end, get_or_create_free_subscription, get_subscription_addon, get_subscription_plan, get_subscription_plan_by_code, get_user_active_subscription, get_user_owned_workspace_count, get_user_total_usage_bytes, insert_user_addon, list_subscription_addons, list_subscription_plans, list_user_addons, upsert_usage_record, upsert_user_subscription, SubscriptionAddonRow, SubscriptionPlanRow, UserAddonRow, UserSubscriptionRow};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use shared_entity::dto::subscription_dto::{
@@ -184,13 +177,13 @@ async fn build_current_subscription_with_plan(
   let ai_image_used = usage.iter().find(|u| u.usage_type == "ai_image").map(|u| u.total).unwrap_or(0);
   
   // Real Storage Usage
-  let storage_used_bytes = get_user_total_storage_usage(pg_pool, uid).await?;
-  let storage_total_mb = plan.cloud_storage_gb.to_f64().unwrap_or(0.0);
-  let storage_total_bytes = (storage_total_mb * STORAGE_MB_IN_BYTES) as i64;
-  let storage_remaining_bytes = storage_total_bytes - storage_used_bytes;
+  let storage_used_bytes = get_user_total_usage_bytes(pg_pool, uid).await?; // 使用的字节 这个是对的，统计了所有的file_size  文件统计
+  let storage_total_mb = plan.cloud_storage_gb.to_f64().unwrap_or(0.0); // 总 mb
+  let storage_total_bytes = (storage_total_mb * STORAGE_MB_IN_BYTES) as i64; // 总 字节
+  let storage_remaining_bytes = storage_total_bytes - storage_used_bytes; // 剩余
   
   // Real Workspace Usage
-  let workspace_used = get_user_owned_workspace_count(pg_pool, uid).await?;
+  let workspace_used = get_user_owned_workspace_count(pg_pool, uid).await?; // 工作空间数量
   let workspace_total = plan.collaborative_workspace_limit as i64;
 
   let current_usage = SubscriptionCurrentUsage {
@@ -345,6 +338,24 @@ pub async fn get_user_resource_limit_status(
       })
     }
   }
+}
+
+/// 检查用户存储容量是否足够写入 `data_size_bytes` 字节的数据
+pub async fn check_user_storage_limit(
+  pg_pool: &PgPool,
+  uid: i64,
+  data_size_bytes: i64,
+) -> Result<(), AppError> {
+  let resource_status = get_user_resource_limit_status(pg_pool, uid).await?;
+  let total_limit_bytes = (resource_status.storage_limit_mb * STORAGE_MB_IN_BYTES) as i64;
+  let current_usage = get_user_total_usage_bytes(pg_pool, uid).await?;
+  if current_usage + data_size_bytes > total_limit_bytes {
+    return Err(AppError::PlanLimitExceeded(format!(
+      "Storage limit exceeded. Current: {} bytes, Limit: {} bytes, Data: {} bytes",
+      current_usage, total_limit_bytes, data_size_bytes
+    )));
+  }
+  Ok(())
 }
 
 #[derive(Debug, Clone)]
