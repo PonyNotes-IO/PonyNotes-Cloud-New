@@ -854,7 +854,7 @@ pub async fn insert_received_published_collab(
   workspace_id: &Uuid,
   view_id: &Uuid,
   published_by: i64,
-  published_at: &chrono::DateTime<chrono::Utc>,
+  published_at: &DateTime<Utc>,
   is_readonly: bool,
 ) -> Result<(), AppError> {
   let res = sqlx::query!(
@@ -891,7 +891,7 @@ pub async fn delete_received_published_collab(
   uid: i64,
   published_view_id: &Uuid,
 ) -> Result<(), AppError> {
-  let res = sqlx::query!(
+  let _res = sqlx::query!(
     r#"
       DELETE FROM af_received_published_collab
       WHERE received_by = $1 AND published_view_id = $2

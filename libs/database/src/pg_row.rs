@@ -881,7 +881,7 @@ pub struct AFReceivedPublishedCollab {
   pub view_id: Uuid,
   pub published_by: i64,
   pub published_at: DateTime<Utc>,
-  pub received_at: DateTime<Utc>,
+  pub received_at: Option<DateTime<Utc>>,
   pub is_readonly: bool,
 }
 

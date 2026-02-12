@@ -842,6 +842,17 @@ pub async fn get_collab_members(
   Ok(members)
 }
 
+/// 获取文档（collab）的拥有者
+/// 通过 workspace 的 owner_uid 确定文档拥有者
+pub async fn get_collab_owner(
+  pg_pool: &PgPool,
+  workspace_id: &Uuid,
+  _view_id: &Uuid,
+) -> Result<AFWorkspaceMemberRow, AppError> {
+  let owner = select_workspace_owner(pg_pool, workspace_id).await?;
+  Ok(owner)
+}
+
 pub async fn get_workspace_owner(
   pg_pool: &PgPool,
   workspace_id: &Uuid,

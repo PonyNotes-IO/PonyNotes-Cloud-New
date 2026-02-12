@@ -2345,7 +2345,8 @@ async fn receive_published_collab_handler(
     params.published_view_id,
   )
   .fetch_optional(&state.pg_pool)
-  .await?;
+  .await
+  .map_err(|e| AppResponseError::new(ErrorCode::Internal, e.to_string()))?;
 
   if let Some(existing) = existing {
     // 已接收过，直接返回
@@ -2391,7 +2392,8 @@ async fn receive_published_collab_handler(
   Ok(Json(AppResponse::Ok().with_data(ReceivePublishedCollabResponse {
     view_id: root_view_id,
     is_readonly: true,
-  }))}
+  })))
+}
 
 // Deprecated since 0.7.4
 async fn get_published_collab_info_handler(
