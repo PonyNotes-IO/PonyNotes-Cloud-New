@@ -574,6 +574,13 @@ pub struct ReceivePublishedCollabResponse {
   pub is_readonly: bool,
 }
 
+/// 查询接收的发布文档只读状态响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceivedPublishedCollabReadonlyResponse {
+  pub is_received: bool,  // 是否接收过该发布文档
+  pub is_readonly: bool,  // 是否为只读（发布文档默认只读）
+}
+
 /// 所有发布的文档列表项（包含发布者和接收者的信息）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AllPublishedCollabItem {
