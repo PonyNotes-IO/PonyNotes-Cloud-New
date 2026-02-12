@@ -2448,23 +2448,25 @@ async fn receive_published_collab_handler(
 
 /// 查询接收的发布文档只读状态
 /// 用于判断用户是否有权限编辑接收的发布文档
+/// 注意：view_id 参数是 published_view_id（原始发布的文档ID），不是复制后的 view_id
 async fn get_received_published_collab_readonly_handler(
   user_uuid: UserUuid,
   state: Data<AppState>,
   view_id: web::Path<Uuid>,
 ) -> Result<Json<AppResponse<ReceivedPublishedCollabReadonlyResponse>>> {
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
-  let view_id = view_id.into_inner();
+  let published_view_id = view_id.into_inner();
 
   // 查询用户是否接收过这个发布文档
+  // 注意：使用 published_view_id 而不是 view_id，因为客户端传递的是原始发布的文档ID
   let received = sqlx::query_as!(
     AFReceivedPublishedCollab,
     r#"
       SELECT * FROM af_received_published_collab
-      WHERE received_by = $1 AND view_id = $2
+      WHERE received_by = $1 AND published_view_id = $2
     "#,
     uid,
-    view_id,
+    published_view_id,
   )
   .fetch_optional(&state.pg_pool)
   .await
