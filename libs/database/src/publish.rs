@@ -650,6 +650,55 @@ pub async fn select_all_published_collab_info(
   Ok(res)
 }
 
+/// 查询所有发布的笔记（不限制 workspace_id）
+/// 用于侧边栏发布菜单显示所有发布的笔记
+pub async fn select_all_published_collab_info_global(
+  pg_pool: &PgPool,
+) -> Result<Vec<PublishInfo>, AppError> {
+  let mut res = sqlx::query_as!(
+    PublishInfo,
+    r#"
+      SELECT
+        awn.namespace,
+        apc.publish_name,
+        apc.view_id,
+        au.email AS publisher_email,
+        apc.created_at AS publish_timestamp,
+        apc.unpublished_at AS unpublished_timestamp,
+        apc.comments_enabled,
+        apc.duplicate_enabled
+      FROM af_published_collab apc
+      JOIN af_user au ON apc.published_by = au.uid
+      JOIN af_workspace aw ON apc.workspace_id = aw.workspace_id
+      JOIN af_workspace_namespace awn ON aw.workspace_id = awn.workspace_id AND awn.is_original = TRUE
+      WHERE apc.unpublished_at IS NULL
+      ORDER BY apc.created_at DESC;
+    "#,
+  )
+  .fetch_all(pg_pool)
+  .await?;
+
+  // 使用非原始命名空间（如果有的话）
+  if res.is_empty() {
+    return Ok(res);
+  }
+
+  // 获取所有唯一的命名空间并更新
+  let mut seen_namespaces = std::collections::HashSet::<String>::new();
+  for info in res.iter_mut() {
+    if !seen_namespaces.contains(&info.namespace) {
+      if let Some(non_original_namespace) =
+        select_most_recent_non_original_namespace(pg_pool, &info.namespace).await?
+      {
+        info.namespace.clone_from(&non_original_namespace);
+      }
+      seen_namespaces.insert(info.namespace.clone());
+    }
+  }
+
+  Ok(res)
+}
+
 async fn use_non_orginal_namespace_if_possible(
   pg_pool: &PgPool,
   publish_infos: &mut [PublishInfo],

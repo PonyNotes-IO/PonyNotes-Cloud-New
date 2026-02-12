@@ -795,6 +795,26 @@ impl Client {
     process_response_data::<AFUserProfile>(resp).await
   }
 
+  /// Get user uid by email or phone number
+  ///
+  /// This is used to convert user identifier (email or phone) to uid for backend operations.
+  #[instrument(level = "info", skip_all, err)]
+  pub async fn get_user_uid(&self, identifier: &str) -> Result<i64, AppResponseError> {
+    let mut url = format!("{}/api/user/get-uid", self.base_url);
+    let params = [("identifier", identifier)];
+    url.push('?');
+    url.push_str(&serde_urlencoded::to_string(&params).map_err(|e| {
+      AppResponseError::new(ErrorCode::Internal, format!("Failed to encode params: {}", e))
+    })?);
+    let resp = self
+      .http_client_with_auth(Method::GET, &url)
+      .await?
+      .send()
+      .await?;
+    let uid: i64 = process_response_data(resp).await?;
+    Ok(uid)
+  }
+
   #[instrument(level = "info", skip_all, err)]
   pub async fn get_user_workspace_info(&self) -> Result<AFUserWorkspaceInfo, AppResponseError> {
     let url = format!("{}/api/user/workspace", self.base_url);

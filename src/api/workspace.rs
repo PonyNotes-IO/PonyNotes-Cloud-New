@@ -31,6 +31,8 @@ use crate::biz::workspace::page_view::{
   update_space,
 };
 use crate::biz::workspace::publish::get_workspace_default_publish_view_info_meta;
+use crate::biz::workspace::publish::list_collab_publish_info;
+use database::publish::select_all_published_collab_info_global;
 use crate::biz::workspace::quick_note::{
   create_quick_note, delete_quick_note, list_quick_notes, update_quick_note,
 };
@@ -366,6 +368,11 @@ pub fn workspace_scope() -> Scope {
         .service(
             web::resource("/{workspace_id}/published-info")
                 .route(web::get().to(list_published_collab_info_handler)),
+        )
+        // 添加全局发布列表 API - 不限制 workspace_id，用于侧边栏显示所有发布的笔记
+        .service(
+            web::resource("/published-info/all")
+                .route(web::get().to(list_all_published_collab_info_handler)),
         )
         .service(
             // deprecated since 0.7.4
@@ -2249,7 +2256,7 @@ async fn list_published_collab_info_handler(
   state: Data<AppState>,
 ) -> Result<Json<AppResponse<Vec<PublishInfoView>>>> {
   let uid = DUMMY_UID;
-  let publish_infos = biz::workspace::publish::list_collab_publish_info(
+  let publish_infos = list_collab_publish_info(
     state.published_collab_store.as_ref(),
     &state.ws_server,
     workspace_id.into_inner(),
@@ -2258,6 +2265,31 @@ async fn list_published_collab_info_handler(
   .await?;
 
   Ok(Json(AppResponse::Ok().with_data(publish_infos)))
+}
+
+/// 获取所有发布的笔记列表（不限制 workspace_id）
+/// 用于侧边栏发布菜单显示所有发布的笔记
+async fn list_all_published_collab_info_handler(
+  state: Data<AppState>,
+) -> Result<Json<AppResponse<Vec<PublishInfoView>>>> {
+  let publish_infos = select_all_published_collab_info_global(&state.pg_pool).await?;
+
+  // 转换为 PublishInfoView 格式
+  let publish_info_views: Vec<PublishInfoView> = publish_infos
+    .into_iter()
+    .map(|info| {
+      PublishInfoView {
+        view: FolderViewMinimal {
+          view_id: info.view_id.to_string(),
+          name: info.publish_name.clone(), // 使用 publish_name 作为 fallback 名称
+          ..Default::default()
+        },
+        info,
+      }
+    })
+    .collect();
+
+  Ok(Json(AppResponse::Ok().with_data(publish_info_views)))
 }
 
 // Deprecated since 0.7.4

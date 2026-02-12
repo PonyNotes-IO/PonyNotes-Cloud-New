@@ -33,6 +33,23 @@ impl Client {
     process_response_data::<Vec<PublishInfoView>>(resp).await
   }
 
+  /// 获取所有发布的笔记列表（不限制 workspace_id）
+  /// 用于侧边栏发布菜单显示所有发布的笔记
+  #[instrument(level = "debug", skip_all)]
+  pub async fn list_all_published_views(
+    &self,
+  ) -> Result<Vec<PublishInfoView>, AppResponseError> {
+    let url = format!("{}/api/published-info/all", self.base_url);
+
+    let resp = self
+      .cloud_client
+      .get(&url)
+      .send()
+      .await?
+      .error_for_status()?;
+    process_response_data::<Vec<PublishInfoView>>(resp).await
+  }
+
   /// Changes the namespace for the first non-original publish namespace
   /// or the original publish namespace if not exists.
   pub async fn set_workspace_publish_namespace(
