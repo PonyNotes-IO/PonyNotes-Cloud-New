@@ -13,6 +13,44 @@ use shared_entity::response::AppResponseError;
 use tracing::instrument;
 use uuid::Uuid;
 
+// Add new DTOs for receive published collab
+use serde::{Deserialize, Serialize};
+
+/// 用户接收的发布文档请求
+#[derive(Debug, Serialize)]
+pub struct ReceivePublishedCollabRequest {
+  pub published_view_id: Uuid,
+  pub dest_workspace_id: Uuid,
+  pub dest_view_id: Uuid,
+}
+
+/// 用户接收的发布文档响应
+#[derive(Debug, Deserialize)]
+pub struct ReceivePublishedCollabResponse {
+  pub view_id: Uuid,
+  pub is_readonly: bool,
+}
+
+/// 所有发布的文档列表项（包含发布者和接收者的信息）
+#[derive(Debug, Deserialize)]
+pub struct AllPublishedCollabItem {
+  pub published_view_id: Uuid,
+  pub view_id: Uuid,
+  pub workspace_id: Uuid,
+  pub name: String,
+  pub publish_name: String,
+  pub publisher_email: Option<String>,
+  pub published_at: chrono::DateTime<chrono::Utc>,
+  pub is_received: bool,
+  pub is_readonly: bool,
+}
+
+/// 获取所有发布的文档列表响应
+#[derive(Debug, Deserialize)]
+pub struct ListAllPublishedCollabResponse {
+  pub items: Vec<AllPublishedCollabItem>,
+}
+
 // Publisher API
 impl Client {
   #[instrument(level = "debug", skip_all)]
@@ -38,7 +76,7 @@ impl Client {
   #[instrument(level = "debug", skip_all)]
   pub async fn list_all_published_views(
     &self,
-  ) -> Result<Vec<PublishInfoView>, AppResponseError> {
+  ) -> Result<ListAllPublishedCollabResponse, AppResponseError> {
     let url = format!("{}/api/published-info/all", self.base_url);
 
     let resp = self
@@ -47,7 +85,25 @@ impl Client {
       .send()
       .await?
       .error_for_status()?;
-    process_response_data::<Vec<PublishInfoView>>(resp).await
+    process_response_data::<ListAllPublishedCollabResponse>(resp).await
+  }
+
+  /// 接收发布的文档（复制到自己的工作区）
+  /// 发布的文档对接收者默认是只读的，不能协作同步
+  #[instrument(level = "debug", skip_all)]
+  pub async fn receive_published_collab(
+    &self,
+    request: &ReceivePublishedCollabRequest,
+  ) -> Result<ReceivePublishedCollabResponse, AppResponseError> {
+    let url = format!("{}/api/published/receive", self.base_url);
+
+    let resp = self
+      .http_client_with_auth(Method::POST, &url)
+      .await?
+      .json(request)
+      .send()
+      .await?;
+    process_response_data::<ReceivePublishedCollabResponse>(resp).await
   }
 
   /// Changes the namespace for the first non-original publish namespace

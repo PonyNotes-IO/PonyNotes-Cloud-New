@@ -1,4 +1,5 @@
 use app_error::AppError;
+use chrono::{DateTime, Utc};
 use database_entity::dto::{
   PatchPublishedCollab, PublishCollabItem, PublishCollabKey, PublishInfo, WorkspaceNamespace,
 };
@@ -782,4 +783,178 @@ pub async fn select_published_view_ids_with_publish_info_for_workspace<
   .await?;
 
   Ok(res)
+}
+
+use crate::pg_row::AFReceivedPublishedCollab;
+
+/// 查询用户接收到的所有发布文档
+pub async fn select_received_published_collabs(
+  pg_pool: &PgPool,
+  uid: i64,
+) -> Result<Vec<AFReceivedPublishedCollab>, AppError> {
+  let res = sqlx::query_as!(
+    AFReceivedPublishedCollab,
+    r#"
+      SELECT
+        received_by,
+        published_view_id,
+        workspace_id,
+        view_id,
+        published_by,
+        published_at,
+        received_at,
+        is_readonly
+      FROM af_received_published_collab
+      WHERE received_by = $1
+      ORDER BY received_at DESC
+    "#,
+    uid,
+  )
+  .fetch_all(pg_pool)
+  .await?;
+
+  Ok(res)
+}
+
+/// 查询用户接收的特定发布文档
+pub async fn select_received_published_collab(
+  pg_pool: &PgPool,
+  uid: i64,
+  published_view_id: &Uuid,
+) -> Result<Option<AFReceivedPublishedCollab>, AppError> {
+  let res = sqlx::query_as!(
+    AFReceivedPublishedCollab,
+    r#"
+      SELECT
+        received_by,
+        published_view_id,
+        workspace_id,
+        view_id,
+        published_by,
+        published_at,
+        received_at,
+        is_readonly
+      FROM af_received_published_collab
+      WHERE received_by = $1 AND published_view_id = $2
+    "#,
+    uid,
+    published_view_id,
+  )
+  .fetch_optional(pg_pool)
+  .await?;
+
+  Ok(res)
+}
+
+/// 插入用户接收的发布文档记录
+pub async fn insert_received_published_collab(
+  pg_pool: &PgPool,
+  received_by: i64,
+  published_view_id: &Uuid,
+  workspace_id: &Uuid,
+  view_id: &Uuid,
+  published_by: i64,
+  published_at: &chrono::DateTime<chrono::Utc>,
+  is_readonly: bool,
+) -> Result<(), AppError> {
+  let res = sqlx::query!(
+    r#"
+      INSERT INTO af_received_published_collab
+        (received_by, published_view_id, workspace_id, view_id, published_by, published_at, is_readonly)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      ON CONFLICT (received_by, published_view_id) DO NOTHING
+    "#,
+    received_by,
+    published_view_id,
+    workspace_id,
+    view_id,
+    published_by,
+    published_at,
+    is_readonly,
+  )
+  .execute(pg_pool)
+  .await?;
+
+  if res.rows_affected() != 1 {
+    tracing::warn!(
+      "Failed to insert received published collab, received_by: {}, published_view_id: {}, rows_affected: {}",
+      received_by, published_view_id, res.rows_affected()
+    );
+  }
+
+  Ok(())
+}
+
+/// 删除用户接收的发布文档记录
+pub async fn delete_received_published_collab(
+  pg_pool: &PgPool,
+  uid: i64,
+  published_view_id: &Uuid,
+) -> Result<(), AppError> {
+  let res = sqlx::query!(
+    r#"
+      DELETE FROM af_received_published_collab
+      WHERE received_by = $1 AND published_view_id = $2
+    "#,
+    uid,
+    published_view_id,
+  )
+  .execute(pg_pool)
+  .await?;
+
+  Ok(())
+}
+
+/// 查询发布文档的详情（包含发布者和接收者信息）
+pub async fn select_published_collab_with_receivers(
+  pg_pool: &PgPool,
+  view_id: &Uuid,
+) -> Result<Option<(AFPublishViewWithPublishInfo, Vec<AFReceivedPublishedCollab>)>, AppError> {
+  // 获取发布文档信息
+  let publish_info = sqlx::query_as!(
+    AFPublishViewWithPublishInfo,
+    r#"
+      SELECT
+        apc.view_id,
+        apc.publish_name,
+        au.email AS publisher_email,
+        apc.created_at AS publish_timestamp,
+        apc.comments_enabled,
+        apc.duplicate_enabled
+      FROM af_published_collab apc
+      JOIN af_user au ON apc.published_by = au.uid
+      WHERE apc.view_id = $1 AND apc.unpublished_at IS NULL
+    "#,
+    view_id,
+  )
+  .fetch_optional(pg_pool)
+  .await?;
+
+  match publish_info {
+    Some(info) => {
+      // 获取所有接收者
+      let receivers = sqlx::query_as!(
+        AFReceivedPublishedCollab,
+        r#"
+          SELECT
+            received_by,
+            published_view_id,
+            workspace_id,
+            view_id,
+            published_by,
+            published_at,
+            received_at,
+            is_readonly
+          FROM af_received_published_collab
+          WHERE published_view_id = $1
+        "#,
+        view_id,
+      )
+      .fetch_all(pg_pool)
+      .await?;
+
+      Ok(Some((info, receivers)))
+    },
+    None => Ok(None),
+  }
 }

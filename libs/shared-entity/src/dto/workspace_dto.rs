@@ -547,6 +547,53 @@ pub struct PublishedViewInfo {
   pub duplicate_enabled: bool,
 }
 
+/// 用户接收的发布文档信息（用于侧边栏显示）
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct ReceivedPublishedCollab {
+  pub published_view_id: Uuid,
+  pub view_id: Uuid,
+  pub workspace_id: Uuid,
+  pub name: String,
+  pub publisher_email: Option<String>,
+  pub published_at: DateTime<Utc>,
+  pub is_readonly: bool,
+}
+
+/// 发布文档的接收请求
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceivePublishedCollabRequest {
+  pub published_view_id: Uuid,
+  pub dest_workspace_id: Uuid,
+  pub dest_view_id: Uuid,
+}
+
+/// 发布文档的接收响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceivePublishedCollabResponse {
+  pub view_id: Uuid,
+  pub is_readonly: bool,
+}
+
+/// 所有发布的文档列表项（包含发布者和接收者的信息）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllPublishedCollabItem {
+  pub published_view_id: Uuid,
+  pub view_id: Uuid,
+  pub workspace_id: Uuid,
+  pub name: String,
+  pub publish_name: String,
+  pub publisher_email: Option<String>,
+  pub published_at: DateTime<Utc>,
+  pub is_received: bool,     // true 表示是接收的发布文档，false 表示是自己发布的
+  pub is_readonly: bool,    // 接收的文档默认为只读
+}
+
+/// 获取所有发布的文档列表响应
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct ListAllPublishedCollabResponse {
+  pub items: Vec<AllPublishedCollabItem>,
+}
+
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct AFDatabase {
   pub id: String,

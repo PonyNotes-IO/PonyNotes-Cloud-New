@@ -33,6 +33,9 @@ use crate::biz::workspace::page_view::{
 use crate::biz::workspace::publish::get_workspace_default_publish_view_info_meta;
 use crate::biz::workspace::publish::list_collab_publish_info;
 use database::publish::select_all_published_collab_info_global;
+use database::publish::{
+  insert_received_published_collab, select_received_published_collabs,
+};
 use crate::biz::workspace::quick_note::{
   create_quick_note, delete_quick_note, list_quick_notes, update_quick_note,
 };
@@ -68,6 +71,7 @@ use collab_rt_entity::user::RealtimeUser;
 use collab_rt_entity::RealtimeMessage;
 use collab_rt_protocol::collab_from_encode_collab;
 use database::user::select_uid_from_email;
+use database::pg_row::AFReceivedPublishedCollab;
 use database_entity::dto::PublishCollabItem;
 use database_entity::dto::PublishInfo;
 use database_entity::dto::*;
@@ -81,11 +85,15 @@ use crate::biz::collab::me::{get_received_collab_list, get_send_collab_list};
 use crate::biz::workspace::collab_member::{
   add_collab_member, edit_collab_member_permission, remove_collab_member, remove_collab_member_invite,
 };
-use database::workspace::select_collab_owner;
+use crate::biz::workspace::ops::get_collab_owner;
 use database::pg_row::AFCollabMemberInvite;
 use semver::Version;
 use sha2::{Digest, Sha256};
 use shared_entity::dto::publish_dto::DuplicatePublishedPageResponse;
+use shared_entity::dto::workspace_dto::{
+  AllPublishedCollabItem, ListAllPublishedCollabResponse, ReceivePublishedCollabRequest,
+  ReceivePublishedCollabResponse,
+};
 use shared_entity::dto::workspace_dto::{SingleOrVecInvitation, *};
 use shared_entity::response::AppResponseError;
 use shared_entity::response::{AppResponse, JsonAppResponse};
@@ -373,6 +381,11 @@ pub fn workspace_scope() -> Scope {
         .service(
             web::resource("/published-info/all")
                 .route(web::get().to(list_all_published_collab_info_handler)),
+        )
+        // 接收发布的文档 API
+        .service(
+            web::resource("/published/receive")
+                .route(web::post().to(receive_published_collab_handler)),
         )
         .service(
             // deprecated since 0.7.4
@@ -1027,22 +1040,9 @@ async fn update_workspace_member_handler(
 
   let changeset = payload.into_inner();
 
-  // 解析目标用户 uid：优先使用 uid 字段，uid=0 时尝试从 email 查找
-  let target_uid = if changeset.uid != 0 {
-    changeset.uid
-  } else if let Some(ref email) = changeset.email {
-    select_uid_from_email(&state.pg_pool, email)
-      .await
-      .map_err(AppResponseError::from)?
-  } else {
-    return Err(AppResponseError::new(
-      app_error::ErrorCode::InvalidRequest,
-      "Either uid or email must be provided to identify the member",
-    ).into());
-  };
-
+  // 使用 uid 直接更新成员角色（uid 是用户的唯一标识符）
   workspace::ops::update_workspace_member(
-    &target_uid,
+    &changeset.uid,
     &state.pg_pool,
     &workspace_id,
     &changeset,
@@ -2270,27 +2270,128 @@ async fn list_published_collab_info_handler(
 /// 获取所有发布的笔记列表（不限制 workspace_id）
 /// 用于侧边栏发布菜单显示所有发布的笔记
 async fn list_all_published_collab_info_handler(
+  user_uuid: UserUuid,
   state: Data<AppState>,
-) -> Result<Json<AppResponse<Vec<PublishInfoView>>>> {
+) -> Result<Json<AppResponse<ListAllPublishedCollabResponse>>> {
+  let uid = state.user_cache.get_user_uid(&user_uuid).await?;
   let publish_infos = select_all_published_collab_info_global(&state.pg_pool).await?;
 
-  // 转换为 PublishInfoView 格式
-  let publish_info_views: Vec<PublishInfoView> = publish_infos
-    .into_iter()
-    .map(|info| {
-      PublishInfoView {
-        view: FolderViewMinimal {
-          view_id: info.view_id.to_string(),
-          name: info.publish_name.clone(), // 使用 publish_name 作为 fallback 名称
-          ..Default::default()
-        },
-        info,
-      }
-    })
-    .collect();
+  // 查询用户已接收的发布文档
+  let received_collabs = select_received_published_collabs(&state.pg_pool, uid).await?;
+  let received_view_ids: std::collections::HashSet<Uuid> =
+    received_collabs.iter().map(|r| r.published_view_id).collect();
 
-  Ok(Json(AppResponse::Ok().with_data(publish_info_views)))
+  // 构建所有发布文档列表
+  let mut items: Vec<AllPublishedCollabItem> = Vec::new();
+
+  for info in publish_infos {
+    let is_received = received_view_ids.contains(&info.view_id);
+
+    // 获取接收的文档信息（如果已接收）
+    let received_info = if is_received {
+      received_collabs.iter().find(|r| r.published_view_id == info.view_id)
+    } else {
+      None
+    };
+
+    items.push(AllPublishedCollabItem {
+      published_view_id: info.view_id,
+      view_id: received_info.map(|r| r.view_id).unwrap_or(info.view_id),
+      workspace_id: received_info.map(|r| r.workspace_id).unwrap_or(Uuid::nil()),
+      name: info.publish_name.clone(), // 后续可从发布元数据获取真实名称
+      publish_name: info.publish_name.clone(),
+      publisher_email: info.publisher_email.clone(),
+      published_at: info.publish_timestamp,
+      is_received,
+      is_readonly: received_info.map(|r| r.is_readonly).unwrap_or(false),
+    });
+  }
+
+  // 按发布时间倒序排序
+  items.sort_by(|a, b| b.published_at.cmp(&a.published_at));
+
+  Ok(Json(AppResponse::Ok().with_data(ListAllPublishedCollabResponse { items })))
 }
+
+/// 接收发布的文档（复制到自己的工作区）
+/// 发布的文档对接收者默认是只读的，不能协作同步
+async fn receive_published_collab_handler(
+  user_uuid: UserUuid,
+  state: Data<AppState>,
+  params: Json<ReceivePublishedCollabRequest>,
+) -> Result<Json<AppResponse<ReceivePublishedCollabResponse>>> {
+  let uid = state.user_cache.get_user_uid(&user_uuid).await?;
+  let params = params.into_inner();
+
+  // 验证发布文档是否存在
+  let publish_info = state
+    .published_collab_store
+    .get_collab_publish_info(&params.published_view_id)
+    .await
+    .map_err(|e| AppResponseError::new(ErrorCode::RecordNotFound, e.to_string()))?;
+
+  if publish_info.unpublished_timestamp.is_some() {
+    return Err(AppError::RecordNotFound("Collab is unpublished".to_string()).into());
+  }
+
+  // 检查是否已接收过
+  let existing = sqlx::query_as!(
+    AFReceivedPublishedCollab,
+    r#"
+      SELECT * FROM af_received_published_collab
+      WHERE received_by = $1 AND published_view_id = $2
+    "#,
+    uid,
+    params.published_view_id,
+  )
+  .fetch_optional(&state.pg_pool)
+  .await?;
+
+  if let Some(existing) = existing {
+    // 已接收过，直接返回
+    return Ok(Json(AppResponse::Ok().with_data(ReceivePublishedCollabResponse {
+      view_id: existing.view_id,
+      is_readonly: existing.is_readonly,
+    })));
+  }
+
+  // 复制发布文档到用户工作区
+  let root_view_id = biz::workspace::publish_dup::duplicate_published_collab_to_workspace(
+    &state,
+    uid,
+    params.published_view_id,
+    params.dest_workspace_id,
+    params.dest_view_id,
+  )
+  .await
+  .map_err(|e| AppResponseError::new(ErrorCode::Internal, e.to_string()))?;
+
+  // 获取发布者的uid
+  let published_by_uid = match &publish_info.publisher_email {
+    Some(email) => {
+      select_uid_from_email(&state.pg_pool, email).await.ok().unwrap_or(0)
+    },
+    None => 0,
+  };
+
+  // 记录接收关系
+  insert_received_published_collab(
+    &state.pg_pool,
+    uid,
+    &params.published_view_id,
+    &params.dest_workspace_id,
+    &root_view_id,
+    published_by_uid,
+    &publish_info.publish_timestamp,
+    true, // 发布文档默认只读
+  )
+  .await
+  .map_err(|e| AppResponseError::new(ErrorCode::Internal, e.to_string()))?;
+
+  Ok(Json(AppResponse::Ok().with_data(ReceivePublishedCollabResponse {
+    view_id: root_view_id,
+    is_readonly: true,
+  }))}
 
 // Deprecated since 0.7.4
 async fn get_published_collab_info_handler(
@@ -3325,12 +3426,12 @@ async fn remove_collab_member_handler(
   let remove_uid = state.user_cache.get_user_uid(&remove_uid_uuid).await?;
 
   // 2. 获取文档拥有者
-  let collab_owner_uid = select_collab_owner(&state.pg_pool, &workspace_id, &view_id)
+  let collab_owner = workspace::ops::get_collab_owner(&state.pg_pool, &workspace_id, &view_id)
     .await
     .map_err(|e| AppResponseError::new(ErrorCode::Internal, e.to_string()))?;
 
   // 3. 只有文档拥有者可以删除成员
-  if user_uid != collab_owner_uid {
+  if user_uid != collab_owner.uid {
     return Err(AppResponseError::new(
       ErrorCode::NotEnoughPermissions,
       "只有文档拥有者可以删除成员".to_string(),
@@ -3346,7 +3447,7 @@ async fn remove_collab_member_handler(
   }
 
   // 5. 获取发送者的 uid（文档拥有者）
-  let send_uid = collab_owner_uid;
+  let send_uid = collab_owner.uid;
 
   // 6. 删除协作成员和邀请记录
   workspace::collab_member::remove_collab_member(

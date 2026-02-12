@@ -872,6 +872,19 @@ pub struct AFCollabMemberInvite {
   pub name: String,
 }
 
+/// 用于跟踪用户接收的发布文档
+#[derive(FromRow, Serialize, Deserialize, Debug, Clone)]
+pub struct AFReceivedPublishedCollab {
+  pub received_by: i64,
+  pub published_view_id: Uuid,
+  pub workspace_id: Uuid,
+  pub view_id: Uuid,
+  pub published_by: i64,
+  pub published_at: DateTime<Utc>,
+  pub received_at: DateTime<Utc>,
+  pub is_readonly: bool,
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
