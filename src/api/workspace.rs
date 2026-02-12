@@ -2255,6 +2255,7 @@ async fn post_published_duplicate_handler(
     .enforce_action(&uid, &workspace_id, Action::Write)
     .await?;
   let params = params.into_inner();
+  // Manual duplicate: is_readonly = false (user gets a fully editable copy)
   let root_view_id_for_duplicate =
     biz::workspace::publish_dup::duplicate_published_collab_to_workspace(
       &state,
@@ -2262,6 +2263,7 @@ async fn post_published_duplicate_handler(
       params.published_view_id,
       workspace_id,
       params.dest_view_id,
+      false, // not readonly for manual duplicate
     )
     .await?;
 
@@ -2315,11 +2317,32 @@ async fn list_all_published_collab_info_handler(
       None
     };
 
+    // 从发布元数据中获取真实的文档名称
+    // 如果元数据获取失败，则回退到 publish_name
+    let real_name = match state
+      .published_collab_store
+      .get_collab_metadata(
+        &info.namespace,
+        &info.publish_name,
+      )
+      .await
+    {
+      Ok(metadata) => {
+        // 从 metadata.view.name 获取真实名称
+        if let Some(name) = metadata.get("view").and_then(|v| v.get("name")) {
+          name.as_str().unwrap_or(&info.publish_name).to_string()
+        } else {
+          info.publish_name.clone()
+        }
+      },
+      Err(_) => info.publish_name.clone(),
+    };
+
     items.push(AllPublishedCollabItem {
       published_view_id: info.view_id,
       view_id: received_info.map(|r| r.view_id).unwrap_or(info.view_id),
       workspace_id: received_info.map(|r| r.workspace_id).unwrap_or(Uuid::nil()),
-      name: info.publish_name.clone(), // 后续可从发布元数据获取真实名称
+      name: real_name, // 使用从元数据中获取的真实名称
       publish_name: info.publish_name.clone(),
       publisher_email: info.publisher_email.clone(),
       published_at: info.publish_timestamp,
@@ -2378,12 +2401,14 @@ async fn receive_published_collab_handler(
   }
 
   // 复制发布文档到用户工作区
+  // is_readonly = true for receive operation (published doc should be readonly)
   let root_view_id = biz::workspace::publish_dup::duplicate_published_collab_to_workspace(
     &state,
     uid,
     params.published_view_id,
     params.dest_workspace_id,
     params.dest_view_id,
+    true, // readonly for received published collab
   )
   .await
   .map_err(|e| AppResponseError::new(ErrorCode::Internal, e.to_string()))?;

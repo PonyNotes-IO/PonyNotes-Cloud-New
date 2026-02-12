@@ -55,6 +55,7 @@ pub async fn duplicate_published_collab_to_workspace(
   publish_view_id: Uuid,
   dest_workspace_id: Uuid,
   dest_view_id: Uuid,
+  is_readonly: bool,
 ) -> Result<Uuid, AppError> {
   let copier = PublishCollabDuplicator::new(
     state.pg_pool.clone(),
@@ -65,6 +66,7 @@ pub async fn duplicate_published_collab_to_workspace(
     dest_workspace_id,
     dest_view_id,
     state.metrics.collab_metrics.clone(),
+    is_readonly,
   );
 
   let time_now = chrono::Utc::now().timestamp_millis();
@@ -112,6 +114,9 @@ pub struct PublishCollabDuplicator {
   dest_view_id: Uuid,
   collab_update_publisher: Box<dyn CollabUpdatePublisher>,
   collab_metrics: Arc<CollabMetrics>,
+  /// whether this is a readonly published collab
+  /// if true, the duplicated view will be locked
+  is_readonly: bool,
 }
 
 fn deserialize_publish_database_data(
@@ -140,6 +145,7 @@ impl PublishCollabDuplicator {
     dest_workspace_id: Uuid,
     dest_view_id: Uuid,
     collab_metrics: Arc<CollabMetrics>,
+    is_readonly: bool,
   ) -> Self {
     let ts_now = chrono::Utc::now().timestamp();
     Self {
@@ -159,6 +165,7 @@ impl PublishCollabDuplicator {
       dest_view_id,
       collab_update_publisher,
       collab_metrics,
+      is_readonly,
     }
   }
 
@@ -198,6 +205,7 @@ impl PublishCollabDuplicator {
       dest_view_id,
       collab_update_publisher: collab_update_writer,
       collab_metrics,
+      is_readonly: _,
     } = self;
 
     // insert all collab object accumulated
@@ -1065,12 +1073,17 @@ impl PublishCollabDuplicator {
   }
 
   /// creates a new folder view without parent_view_id set
+  /// If is_readonly is true, the view will be locked to prevent editing
   fn new_folder_view(
     &self,
     new_view_id: Uuid,
     view_info: &PublishViewInfo,
     layout: ViewLayout,
   ) -> View {
+    // For readonly published collab, lock the view to prevent editing
+    // This is used when a user receives a published document
+    let is_locked = self.is_readonly;
+
     View {
       id: new_view_id.to_string(),
       parent_view_id: "".to_string(), // to be filled by caller
@@ -1083,7 +1096,7 @@ impl PublishCollabDuplicator {
       created_by: Some(self.duplicator_uid),
       last_edited_time: self.ts_now,
       last_edited_by: Some(self.duplicator_uid),
-      is_locked: None,
+      is_locked,
       extra: view_info.extra.clone(),
     }
   }
