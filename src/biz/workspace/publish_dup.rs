@@ -1096,7 +1096,7 @@ impl PublishCollabDuplicator {
       created_by: Some(self.duplicator_uid),
       last_edited_time: self.ts_now,
       last_edited_by: Some(self.duplicator_uid),
-      is_locked,
+      is_locked: Some(is_locked),
       extra: view_info.extra.clone(),
     }
   }
