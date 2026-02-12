@@ -62,6 +62,13 @@ echo ""
 echo -e "${YELLOW}[步骤 2/5] 构建Docker镜像...${NC}"
 cd "${PROJECT_DIR}"
 export DOCKER_BUILDKIT=1
+
+# 清理并重建 buildx 缓存目录，防止缓存损坏导致构建失败
+BUILDX_CACHE_DIR="/tmp/.buildx-cache"
+BUILDX_CACHE_NEW="/tmp/.buildx-cache-new"
+rm -rf "${BUILDX_CACHE_NEW}"
+mkdir -p "${BUILDX_CACHE_DIR}"
+
 echo -e "${BLUE}开始构建 Docker 镜像...${NC}"
 
 docker buildx build \
@@ -70,9 +77,15 @@ docker buildx build \
   --build-arg DATABASE_URL="${DATABASE_URL}" \
   --build-arg CARGO_BUILD_JOBS=16 \
   --build-arg ENABLE_SCCACHE=true \
-  --cache-from=type=local,src=/tmp/.buildx-cache \
-  --cache-to=type=local,dest=/tmp/.buildx-cache,mode=max \
+  --cache-from=type=local,src=${BUILDX_CACHE_DIR} \
+  --cache-to=type=local,dest=${BUILDX_CACHE_NEW},mode=max \
   --load .
+
+# 构建成功后，用新缓存替换旧缓存（避免旧缓存目录状态损坏）
+if [ -d "${BUILDX_CACHE_NEW}" ]; then
+    rm -rf "${BUILDX_CACHE_DIR}"
+    mv "${BUILDX_CACHE_NEW}" "${BUILDX_CACHE_DIR}"
+fi
 
 BUILD_RESULT=$?
 if [ $BUILD_RESULT -eq 0 ]; then
