@@ -94,7 +94,8 @@ impl Client {
     &self,
     request: &ReceivePublishedCollabRequest,
   ) -> Result<ReceivePublishedCollabResponse, AppResponseError> {
-    let url = format!("{}/api/published/receive", self.base_url);
+    // 注意：后端 API 是在 /api/workspace scope 下定义的
+    let url = format!("{}/api/workspace/published/receive", self.base_url);
 
     let resp = self
       .http_client_with_auth(Method::POST, &url)
