@@ -77,14 +77,13 @@ impl Client {
   pub async fn list_all_published_views(
     &self,
   ) -> Result<ListAllPublishedCollabResponse, AppResponseError> {
-    let url = format!("{}/api/published-info/all", self.base_url);
+    let url = format!("{}/api/workspace/published-info/all", self.base_url);
 
     let resp = self
-      .cloud_client
-      .get(&url)
-      .send()
+      .http_client_with_auth(Method::GET, &url)
       .await?
-      .error_for_status()?;
+      .send()
+      .await?;
     process_response_data::<ListAllPublishedCollabResponse>(resp).await
   }
 
