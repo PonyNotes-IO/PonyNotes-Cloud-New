@@ -2500,16 +2500,32 @@ async fn get_published_collab_info_handler(
   Ok(Json(AppResponse::Ok().with_data(collab_data)))
 }
 
+#[derive(Serialize)]
+struct PublishInfoWithMetadata {
+  #[serde(flatten)]
+  info: PublishInfo,
+  metadata: serde_json::Value,
+}
+
 async fn get_v1_published_collab_info_handler(
   view_id: web::Path<Uuid>,
   state: Data<AppState>,
-) -> Result<Json<AppResponse<PublishInfo>>> {
+) -> Result<Json<AppResponse<PublishInfoWithMetadata>>> {
   let view_id = view_id.into_inner();
-  let collab_data = state
+  let info = state
     .published_collab_store
     .get_collab_publish_info(&view_id)
     .await?;
-  Ok(Json(AppResponse::Ok().with_data(collab_data)))
+
+  let metadata = state
+    .published_collab_store
+    .get_collab_metadata(&info.namespace, &info.publish_name)
+    .await?;
+
+  Ok(Json(AppResponse::Ok().with_data(PublishInfoWithMetadata {
+    info,
+    metadata,
+  })))
 }
 
 async fn get_published_collab_comment_handler(
