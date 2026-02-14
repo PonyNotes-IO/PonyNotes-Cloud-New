@@ -89,7 +89,7 @@ use crate::biz::workspace::collab_member::{
 use crate::biz::workspace::ops::get_collab_owner;
 use database::pg_row::AFCollabMemberInvite;
 use database::subscription::get_user_total_usage_bytes;
-use database::workspace::select_collab_owner;
+use database::workspace::{select_collab_owner, update_collab_member_permission};
 use semver::Version;
 use sha2::{Digest, Sha256};
 use shared_entity::dto::publish_dto::DuplicatePublishedPageResponse;
@@ -512,6 +512,17 @@ pub fn collab_scope() -> Scope {
           .route(web::post().to(post_realtime_message_stream_handler)),
       ),
     )
+}
+
+/// 添加协作成员的请求参数
+#[derive(Debug, Deserialize)]
+pub struct AddCollabMemberParams {
+    #[serde(default = "default_permission_id")]
+    pub permission_id: i32,
+}
+
+fn default_permission_id() -> i32 {
+    1 // 默认只读权限
 }
 
 // Adds a workspace for user, if success, return the workspace id
@@ -2315,15 +2326,16 @@ async fn list_all_published_collab_info_handler(
   for info in publish_infos {
     let is_received = received_view_ids.contains(&info.view_id);
 
-    // 获取接收的文档信息（如果已接收）
-    let received_info = if is_received {
-      received_collabs.iter().find(|r| r.published_view_id == info.view_id)
-    } else {
-      None
-    };
+    // 只返回用户已接收的发布
+    // 用户自己发布的文档通过 ListPublishedViews API 获取
+    if !is_received {
+      continue;
+    }
+
+    // 获取接收的文档信息
+    let received_info = received_collabs.iter().find(|r| r.published_view_id == info.view_id);
 
     // 从发布元数据中获取真实的文档名称
-    // 如果元数据获取失败，则回退到 publish_name
     let real_name = match state
       .published_collab_store
       .get_collab_metadata(
@@ -2333,7 +2345,6 @@ async fn list_all_published_collab_info_handler(
       .await
     {
       Ok(metadata) => {
-        // 从 metadata.view.name 获取真实名称
         if let Some(name) = metadata.get("view").and_then(|v| v.get("name")) {
           name.as_str().unwrap_or(&info.publish_name).to_string()
         } else {
@@ -2343,15 +2354,17 @@ async fn list_all_published_collab_info_handler(
       Err(_) => info.publish_name.clone(),
     };
 
+    // 用户已接收此发布
+    let dest_workspace_id = received_info.map(|r| r.workspace_id).expect("workspace_id should exist for received collabs");
     items.push(AllPublishedCollabItem {
       published_view_id: info.view_id,
       view_id: received_info.map(|r| r.view_id).unwrap_or(info.view_id),
-      workspace_id: received_info.map(|r| r.workspace_id).unwrap_or(Uuid::nil()),
-      name: real_name, // 使用从元数据中获取的真实名称
+      workspace_id: dest_workspace_id,
+      name: real_name,
       publish_name: info.publish_name.clone(),
       publisher_email: info.publisher_email.clone(),
       published_at: info.publish_timestamp,
-      is_received,
+      is_received: true,
       is_readonly: received_info.map(|r| r.is_readonly).unwrap_or(false),
     });
   }
@@ -3419,12 +3432,13 @@ async fn post_workspace_invite_code_handler(
 /// 业务逻辑：
 /// 1. 将被邀请者添加到工作区（这样协作者才能同步文档）
 /// 2. 将被邀请者添加到文档协作成员列表
-/// 3. 设置默认权限为只读
+/// 3. 设置权限（默认只读，可通过permission_id参数指定）
 ///
 async fn add_collab_member_handler(
   user_uuid: UserUuid,
   path_param: web::Path<(Uuid, Uuid, Uuid)>,
   state: Data<AppState>,
+  params: Json<AddCollabMemberParams>,
 ) -> Result<JsonAppResponse<()>> {
   // 检查是否是自己的笔记
   // 不能是添加自己
@@ -3432,6 +3446,7 @@ async fn add_collab_member_handler(
   // 添加到 zf_collab_member
   // 添加到分享表
   let (workspace_id, view_id, received_uid) = path_param.into_inner();
+  let params = params.into_inner();
 
   // 找到这个笔记的拥有者
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
@@ -3491,6 +3506,37 @@ async fn add_collab_member_handler(
     &view_name,
   )
   .await?;
+
+  // Step 3: 如果指定了权限（不是默认的只读权限），则更新权限
+  if params.permission_id > 1 {
+    // 将 permission_id 转换为 AFAccessLevel
+    let access_level = match params.permission_id {
+      2 => AFAccessLevel::ReadAndComment,
+      3 => AFAccessLevel::ReadAndWrite,
+      4 => AFAccessLevel::FullAccess,
+      _ => AFAccessLevel::ReadOnly,
+    };
+
+    // 更新权限
+    if let Err(e) = update_collab_member_permission(
+      &state.pg_pool,
+      &view_id,
+      received_uid,
+      params.permission_id,
+    ).await {
+      tracing::warn!("Failed to update collab member permission: {:?}", e);
+      // 权限更新失败不影响主流程，因为成员已经添加成功了
+    }
+
+    // 更新工作区访问控制策略
+    if let Err(e) = state
+      .collab_access_control
+      .update_access_level_policy(&received_uid, &view_id, access_level)
+      .await
+    {
+      tracing::warn!("Failed to update collab access control: {:?}", e);
+    }
+  }
 
   Ok(Json(AppResponse::Ok()))
 }

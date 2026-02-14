@@ -417,7 +417,7 @@ impl TestClient {
       .api_client
       .update_workspace_member(
         workspace_id,
-        WorkspaceMemberChangeset::new(email).with_role(role),
+        WorkspaceMemberChangeset::new_from_email(email).with_role(role),
       )
       .await
   }
