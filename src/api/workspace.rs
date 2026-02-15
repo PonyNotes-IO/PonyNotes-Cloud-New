@@ -3434,6 +3434,7 @@ async fn post_workspace_invite_code_handler(
 /// 2. 将被邀请者添加到文档协作成员列表
 /// 3. 设置权限（默认只读，可通过permission_id参数指定）
 ///
+#[tracing::instrument(skip_all, err)]
 async fn add_collab_member_handler(
   user_uuid: UserUuid,
   path_param: web::Path<(Uuid, Uuid, Uuid)>,
@@ -3448,9 +3449,20 @@ async fn add_collab_member_handler(
   let (workspace_id, view_id, received_uid) = path_param.into_inner();
   let params = params.into_inner();
 
+  tracing::info!(
+    "add_collab_member request: workspace_id={}, view_id={}, received_uid={}, permission_id={}",
+    workspace_id,
+    view_id,
+    received_uid,
+    params.permission_id
+  );
+
   // 找到这个笔记的拥有者
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
+  tracing::info!("current user uid: {}", uid);
+
   let received_uid = state.user_cache.get_user_uid(&received_uid).await?;
+  tracing::info!("received user uid: {}", received_uid);
 
   // 不能添加自己为协作者
   if uid == received_uid {
@@ -3462,10 +3474,18 @@ async fn add_collab_member_handler(
 
   // 获取视图名称
   let folder = state.ws_server.get_folder(workspace_id).await?;
+  tracing::info!("got folder for workspace: {}", workspace_id);
+
   let view_name = folder
     .get_view(&view_id.to_string(), uid)
-    .map(|v| v.name.clone())
-    .unwrap_or_else(|| format!("共享文档 {}", &view_id.to_string()[..8]));
+    .map(|v| {
+      tracing::info!("found view: {}", v.name.clone());
+      v.name.clone()
+    })
+    .unwrap_or_else(|| {
+      tracing::warn!("view not found in folder: {}", view_id);
+      format!("共享文档 {}", &view_id.to_string()[..8])
+    });
 
   // Step 1: 将被邀请者添加到工作区（工作区级别）
   // 这样协作者才能同步文档，实现实时协作
@@ -3496,6 +3516,7 @@ async fn add_collab_member_handler(
     })?;
 
   // Step 2: 将被邀请者添加到文档协作成员列表
+  tracing::info!("adding collab member: workspace_id={}, view_id={}, received_uid={}", workspace_id, view_id, received_uid);
   add_collab_member(
     &state.pg_pool,
     state.collab_access_control.clone(),
@@ -3506,6 +3527,7 @@ async fn add_collab_member_handler(
     &view_name,
   )
   .await?;
+  tracing::info!("add_collab_member success!");
 
   // Step 3: 如果指定了权限（不是默认的只读权限），则更新权限
   if params.permission_id > 1 {
