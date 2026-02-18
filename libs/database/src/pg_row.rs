@@ -867,7 +867,7 @@ pub struct AFPublishViewWithPublishInfo {
 pub struct AFCollabMemberInvite {
   pub oid: String,
   pub send_uid: i64,
-  pub received_uid: i64,
+  pub received_uid: Option<i64>,
   pub created_at: DateTime<Utc>,
   pub name: String,
   pub permission_id: i32,
