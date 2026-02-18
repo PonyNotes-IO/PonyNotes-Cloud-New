@@ -3556,10 +3556,11 @@ async fn add_collab_member_handler(
   let received_uid = state.user_cache.get_user_uid(&received_uid).await?;
   tracing::info!("received user uid: {}", received_uid);
 
-  // 如果是自己点击自己的分享链接，直接返回成功（可以访问自己的文档）
-  // 但需要更新 af_collab_member_invite 表，记录接收者信息
+  // 如果是自己点击自己的分享链接（接收者点击链接访问自己的文档）
+  // 需要向 af_collab_member_invite 表中插入一条新记录，记录接收者信息
+  // 而不是更新现有的邀请记录（received_uid = NULL 的记录是邀请模板）
   if uid == received_uid {
-    tracing::info!("user {} is accessing their own share link, checking if need to update invite record", uid);
+    tracing::info!("user {} is accessing their own share link, will insert new invite record for this receiver", uid);
     
     // 查询 af_collab_member_invite 表中是否有待接受的邀请记录
     let existing_invite = sqlx::query!(
@@ -3575,23 +3576,25 @@ async fn add_collab_member_handler(
     .map_err(AppError::from)?;
     
     if let Some(invite) = existing_invite {
-      // 更新邀请记录，设置 received_uid 和 permission_id
-      // 注意：这里使用分享链接中的权限，而不是当前用户的权限
+      // 新插入一条记录，记录接收者信息
+      // 注意：不是更新现有的邀请记录（邀请模板），而是新插入一条记录
+      // 这样每个接收者都有一条独立的记录
       sqlx::query!(
         r#"
-          UPDATE af_collab_member_invite
-          SET received_uid = $1, permission_id = $2
-          WHERE oid = $3 AND received_uid IS NULL
+          INSERT INTO af_collab_member_invite (oid, send_uid, received_uid, name, permission_id)
+          VALUES ($1, $2, $3, $4, $5)
         "#,
-        received_uid,
-        invite.permission_id,
         view_id.to_string(),
+        invite.send_uid,
+        received_uid,
+        invite.name,
+        invite.permission_id,
       )
       .execute(&state.pg_pool)
       .await
       .map_err(AppError::from)?;
       
-      tracing::info!("updated invite record: oid={}, send_uid={}, received_uid={}, permission_id={}", 
+      tracing::info!("inserted new invite record for receiver: oid={}, send_uid={}, received_uid={}, permission_id={}", 
         view_id, invite.send_uid, received_uid, invite.permission_id);
       
       // 检查 af_collab_member 表中是否已有记录，如果没有则添加
