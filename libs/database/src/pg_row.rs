@@ -870,6 +870,7 @@ pub struct AFCollabMemberInvite {
   pub received_uid: i64,
   pub created_at: DateTime<Utc>,
   pub name: String,
+  pub permission_id: i32,
 }
 
 /// 用于跟踪用户接收的发布文档

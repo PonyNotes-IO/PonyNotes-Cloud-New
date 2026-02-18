@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "select * from af_collab_member_invite where received_uid = $1",
+  "query": "\n      SELECT * FROM af_collab_member_invite\n      WHERE oid = $1 AND send_uid = $2 AND received_uid IS NULL\n    ",
   "describe": {
     "columns": [
       {
@@ -36,6 +36,7 @@
     ],
     "parameters": {
       "Left": [
+        "Text",
         "Int8"
       ]
     },
@@ -48,5 +49,5 @@
       false
     ]
   },
-  "hash": "bc85b2860e4fb7afc5252ca1903117a971d0355a750b249a2172cf04dc116f92"
+  "hash": "f777f1f0c0df2e67858fd0d13c91662fd5d88fe957e616b9cf70bde1c50a7960"
 }

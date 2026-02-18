@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE af_collab_member_invite\n        SET permission_id = $1\n        WHERE oid = $2 AND send_uid = $3 AND received_uid IS NULL\n      ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "012cab52142499c617da658204a1bf7196b519d731506b3b83032f8dd227ea9d"
+}

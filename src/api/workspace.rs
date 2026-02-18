@@ -3480,7 +3480,8 @@ async fn create_share_link_invite_handler(
     uid,
   )
   .fetch_optional(&state.pg_pool)
-  .await?;
+  .await
+  .map_err(AppError::from)?;
 
   if existing.is_some() {
     // 更新现有记录的权限
@@ -3495,7 +3496,8 @@ async fn create_share_link_invite_handler(
       uid,
     )
     .execute(&state.pg_pool)
-    .await?;
+    .await
+    .map_err(AppError::from)?;
     
     tracing::info!("updated existing invite record");
   } else {
@@ -3511,7 +3513,8 @@ async fn create_share_link_invite_handler(
       params.permission_id,
     )
     .execute(&state.pg_pool)
-    .await?;
+    .await
+    .map_err(AppError::from)?;
     
     tracing::info!("created new invite record");
   }
