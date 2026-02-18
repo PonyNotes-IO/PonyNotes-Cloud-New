@@ -3557,8 +3557,79 @@ async fn add_collab_member_handler(
   tracing::info!("received user uid: {}", received_uid);
 
   // 如果是自己点击自己的分享链接，直接返回成功（可以访问自己的文档）
+  // 但需要更新 af_collab_member_invite 表，记录接收者信息
   if uid == received_uid {
-    tracing::info!("user {} is accessing their own share link, skipping add collab member", uid);
+    tracing::info!("user {} is accessing their own share link, checking if need to update invite record", uid);
+    
+    // 查询 af_collab_member_invite 表中是否有待接受的邀请记录
+    let existing_invite = sqlx::query!(
+      r#"
+        SELECT send_uid, permission_id, name 
+        FROM af_collab_member_invite
+        WHERE oid = $1 AND received_uid IS NULL
+      "#,
+      view_id.to_string(),
+    )
+    .fetch_optional(&state.pg_pool)
+    .await
+    .map_err(AppError::from)?;
+    
+    if let Some(invite) = existing_invite {
+      // 更新邀请记录，设置 received_uid 和 permission_id
+      // 注意：这里使用分享链接中的权限，而不是当前用户的权限
+      sqlx::query!(
+        r#"
+          UPDATE af_collab_member_invite
+          SET received_uid = $1, permission_id = $2
+          WHERE oid = $3 AND received_uid IS NULL
+        "#,
+        received_uid,
+        invite.permission_id,
+        view_id.to_string(),
+      )
+      .execute(&state.pg_pool)
+      .await
+      .map_err(AppError::from)?;
+      
+      tracing::info!("updated invite record: oid={}, send_uid={}, received_uid={}, permission_id={}", 
+        view_id, invite.send_uid, received_uid, invite.permission_id);
+      
+      // 检查 af_collab_member 表中是否已有记录，如果没有则添加
+      let existing_member = sqlx::query!(
+        r#"
+          SELECT uid FROM af_collab_member
+          WHERE oid = $1 AND uid = $2
+        "#,
+        view_id.to_string(),
+        received_uid,
+      )
+      .fetch_optional(&state.pg_pool)
+      .await
+      .map_err(AppError::from)?;
+      
+      if existing_member.is_none() {
+        // 添加到 af_collab_member 表
+        sqlx::query!(
+          r#"
+            INSERT INTO af_collab_member (uid, oid, permission_id)
+            VALUES ($1, $2, $3)
+          "#,
+          received_uid,
+          view_id.to_string(),
+          invite.permission_id,
+        )
+        .execute(&state.pg_pool)
+        .await
+        .map_err(AppError::from)?;
+        
+        tracing::info!("added collab member: oid={}, uid={}, permission_id={}", 
+          view_id, received_uid, invite.permission_id);
+      }
+      
+      return Ok(Json(AppResponse::Ok()));
+    }
+    
+    tracing::info!("no pending invite found, skipping");
     return Ok(Json(AppResponse::Ok()));
   }
 
