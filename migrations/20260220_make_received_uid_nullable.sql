@@ -26,3 +26,4 @@ ON af_collab_member_invite(oid, send_uid) WHERE received_uid IS NULL;
 
 COMMENT ON COLUMN af_collab_member_invite.received_uid IS '被邀请者的用户ID，分享链接创建时为NULL，接受邀请后填入';
 
+
