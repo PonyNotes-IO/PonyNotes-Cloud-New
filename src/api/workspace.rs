@@ -198,6 +198,11 @@ pub fn workspace_scope() -> Scope {
                 .route(web::get().to(get_collab_members_handler)),
         )
         .service(
+            // 创建邀请链接（生成链接时调用）
+            web::resource("/{workspace_id}/collab/{object_id}/invite-link")
+                .route(web::post().to(create_share_link_invite_handler)),
+        )
+        .service(
             // 添加协作成员（给自己或别人）
             web::resource("/{workspace_id}/collab/{object_id}/members/{member_user_id}")
                 .route(web::post().to(add_collab_member_handler)),
@@ -3432,6 +3437,88 @@ async fn post_workspace_invite_code_handler(
 /// 添加协作成员到笔记
 ///
 /// 业务逻辑：
+/// 创建邀请链接时调用
+/// 在 af_collab_member_invite 表中创建一条记录，用于生成分享链接
+/// 这样被邀请者点击链接后就可以直接加入协作了
+#[tracing::instrument(skip_all, err)]
+async fn create_share_link_invite_handler(
+  user_uuid: UserUuid,
+  path_param: web::Path<(Uuid, Uuid)>,
+  state: Data<AppState>,
+  params: Json<AddCollabMemberParams>,
+) -> Result<JsonAppResponse<()>> {
+  let (workspace_id, view_id) = path_param.into_inner();
+  let params = params.into_inner();
+  
+  tracing::info!(
+    "create_share_link_invite: workspace_id={}, view_id={}, permission_id={}",
+    workspace_id,
+    view_id,
+    params.permission_id,
+  );
+
+  // 获取当前用户ID
+  let uid = state.user_cache.get_user_uid(&user_uuid).await?;
+  tracing::info!("current user uid: {}", uid);
+
+  // 获取视图名称
+  let folder = state.ws_server.get_folder(workspace_id).await?;
+  let view_name = folder
+    .get_view(&view_id.to_string(), uid)
+    .map(|v| v.name.clone())
+    .unwrap_or_else(|| {
+      format!("共享文档 {}", &view_id.to_string()[..8])
+    });
+
+  // 检查是否已存在邀请记录
+  let existing = sqlx::query!(
+    r#"
+      SELECT * FROM af_collab_member_invite
+      WHERE oid = $1 AND send_uid = $2 AND received_uid IS NULL
+    "#,
+    view_id.to_string(),
+    uid,
+  )
+  .fetch_optional(&state.pg_pool)
+  .await?;
+
+  if existing.is_some() {
+    // 更新现有记录的权限
+    sqlx::query!(
+      r#"
+        UPDATE af_collab_member_invite
+        SET permission_id = $1
+        WHERE oid = $2 AND send_uid = $3 AND received_uid IS NULL
+      "#,
+      params.permission_id,
+      view_id.to_string(),
+      uid,
+    )
+    .execute(&state.pg_pool)
+    .await?;
+    
+    tracing::info!("updated existing invite record");
+  } else {
+    // 创建新的邀请记录（received_uid 为 NULL 表示待接受）
+    sqlx::query!(
+      r#"
+        INSERT INTO af_collab_member_invite (oid, send_uid, name, permission_id)
+        VALUES ($1, $2, $3, $4)
+      "#,
+      view_id.to_string(),
+      uid,
+      view_name,
+      params.permission_id,
+    )
+    .execute(&state.pg_pool)
+    .await?;
+    
+    tracing::info!("created new invite record");
+  }
+
+  Ok(Json(AppResponse::Ok()))
+}
+
 /// 1. 将被邀请者添加到工作区（这样协作者才能同步文档）
 /// 2. 将被邀请者添加到文档协作成员列表
 /// 3. 设置权限（默认只读，可通过permission_id参数指定）
