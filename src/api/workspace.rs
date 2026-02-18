@@ -2326,13 +2326,7 @@ async fn list_all_published_collab_info_handler(
   for info in publish_infos {
     let is_received = received_view_ids.contains(&info.view_id);
 
-    // 只返回用户已接收的发布
-    // 用户自己发布的文档通过 ListPublishedViews API 获取
-    if !is_received {
-      continue;
-    }
-
-    // 获取接收的文档信息
+    // 获取接收的文档信息（如果已接收）
     let received_info = received_collabs.iter().find(|r| r.published_view_id == info.view_id);
 
     // 从发布元数据中获取真实的文档名称
@@ -2354,18 +2348,26 @@ async fn list_all_published_collab_info_handler(
       Err(_) => info.publish_name.clone(),
     };
 
-    // 用户已接收此发布
-    let dest_workspace_id = received_info.map(|r| r.workspace_id).expect("workspace_id should exist for received collabs");
+    // 根据是否已接收来设置目标工作区ID
+    let (dest_workspace_id, dest_view_id, is_readonly) = if let Some(rinfo) = received_info {
+      // 用户已接收此发布
+      (rinfo.workspace_id, Some(rinfo.view_id), rinfo.is_readonly)
+    } else {
+      // 用户未接收，使用用户默认工作区（需要前端传入）
+      // 这里先使用默认值，让前端在打开时传入
+      (Uuid::nil(), None, true)
+    };
+
     items.push(AllPublishedCollabItem {
       published_view_id: info.view_id,
-      view_id: received_info.map(|r| r.view_id).unwrap_or(info.view_id),
+      view_id: dest_view_id.unwrap_or(info.view_id),
       workspace_id: dest_workspace_id,
       name: real_name,
       publish_name: info.publish_name.clone(),
       publisher_email: info.publisher_email.clone(),
       published_at: info.publish_timestamp,
-      is_received: true,
-      is_readonly: received_info.map(|r| r.is_readonly).unwrap_or(false),
+      is_received,
+      is_readonly,
     });
   }
 
