@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT send_uid, permission_id, name \n        FROM af_collab_member_invite\n        WHERE oid = $1 AND received_uid IS NULL\n      ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "send_uid",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "permission_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "35019a1cd3a0621c80bcd1ab02b98360bf3be477a92ffb8a55530a070a373756"
+}

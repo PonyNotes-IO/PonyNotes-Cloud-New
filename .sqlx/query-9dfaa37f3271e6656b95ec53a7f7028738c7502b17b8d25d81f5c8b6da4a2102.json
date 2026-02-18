@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n          SELECT uid FROM af_collab_member\n          WHERE oid = $1 AND uid = $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "uid",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9dfaa37f3271e6656b95ec53a7f7028738c7502b17b8d25d81f5c8b6da4a2102"
+}
