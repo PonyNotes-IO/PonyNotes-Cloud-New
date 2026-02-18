@@ -74,7 +74,6 @@ echo -e "${BLUE}开始构建 Docker 镜像...${NC}"
 docker buildx build \
   -f Dockerfile \
   -t "${IMAGE_NAME}" \
-  --platform linux/amd64 \
   --build-arg DATABASE_URL="${DATABASE_URL}" \
   --build-arg CARGO_BUILD_JOBS=16 \
   --build-arg ENABLE_SCCACHE=true \
