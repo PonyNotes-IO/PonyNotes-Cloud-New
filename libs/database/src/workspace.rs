@@ -2191,29 +2191,32 @@ pub async fn insert_collab_member(
   send_uid: i64,
   received_uid: i64,
   name: &str,
+  permission_id: i32,
 ) -> Result<(), AppError> {
   let mut tx = executor.begin().await?;
   let view_id = view_id.to_string();
   sqlx::query!(
     r#"
       INSERT INTO af_collab_member (uid, oid, permission_id)
-      VALUES ($1, $2, 1)
+      VALUES ($1, $2, $3)
     "#,
     received_uid,
     &view_id,
+    permission_id,
   )
   .execute(tx.deref_mut())
   .await?;
 
   sqlx::query!(
     r#"
-      INSERT INTO af_collab_member_invite (oid, send_uid, received_uid, name)
-      VALUES ($1, $2, $3, $4)
+      INSERT INTO af_collab_member_invite (oid, send_uid, received_uid, name, permission_id)
+      VALUES ($1, $2, $3, $4, $5)
     "#,
     view_id,
     send_uid,
     received_uid,
     name,
+    permission_id,
   )
   .execute(tx.deref_mut())
   .await?;

@@ -19,6 +19,7 @@ pub async fn add_collab_member(
   send_uid: i64,
   received_uid: i64,
   view_name: &str,
+  permission_id: i32,
 ) -> Result<(), AppError> {
   let mut tx = pg_pool.begin().await?;
 
@@ -30,10 +31,19 @@ pub async fn add_collab_member(
     ));
   }
 
-  insert_collab_member(&mut tx, view_id, send_uid, received_uid, view_name).await?;
+  // 使用传入的 permission_id 参数
+  insert_collab_member(&mut tx, view_id, send_uid, received_uid, view_name, permission_id).await?;
+
+  // 将 permission_id 转换为 AFAccessLevel
+  let access_level = match permission_id {
+    2 => AFAccessLevel::ReadAndComment,
+    3 => AFAccessLevel::ReadAndWrite,
+    4 => AFAccessLevel::FullAccess,
+    _ => AFAccessLevel::ReadOnly,
+  };
 
   access_control
-    .update_access_level_policy(&received_uid, &view_id, AFAccessLevel::ReadOnly)
+    .update_access_level_policy(&received_uid, &view_id, access_level)
     .await?;
   tx.commit().await?;
   Ok(())

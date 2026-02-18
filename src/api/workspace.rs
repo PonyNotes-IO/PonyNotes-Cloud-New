@@ -3466,12 +3466,10 @@ async fn add_collab_member_handler(
   let received_uid = state.user_cache.get_user_uid(&received_uid).await?;
   tracing::info!("received user uid: {}", received_uid);
 
-  // 不能添加自己为协作者
+  // 如果是自己点击自己的分享链接，直接返回成功（可以访问自己的文档）
   if uid == received_uid {
-    return Err(AppResponseError::new(
-      ErrorCode::InvalidRequest,
-      "不能添加自己为协作者".to_string(),
-    ).into());
+    tracing::info!("user {} is accessing their own share link, skipping add collab member", uid);
+    return Ok(Json(AppResponse::Ok()));
   }
 
   // 获取视图名称
@@ -3494,7 +3492,8 @@ async fn add_collab_member_handler(
   // 文档协作通过 af_collab_member 表来控制权限
 
   // Step 1: 将被邀请者添加到文档协作成员列表
-  tracing::info!("adding collab member: workspace_id={}, view_id={}, received_uid={}", workspace_id, view_id, received_uid);
+  // 使用传入的 permission_id 参数
+  tracing::info!("adding collab member: workspace_id={}, view_id={}, received_uid={}, permission_id={}", workspace_id, view_id, received_uid, params.permission_id);
   add_collab_member(
     &state.pg_pool,
     state.collab_access_control.clone(),
@@ -3503,40 +3502,12 @@ async fn add_collab_member_handler(
     uid,
     received_uid,
     &view_name,
+    params.permission_id, // 传递权限参数
   )
   .await?;
   tracing::info!("add_collab_member success!");
 
-  // Step 2: 如果指定了权限（不是默认的只读权限），则更新权限
-  if params.permission_id > 1 {
-    // 将 permission_id 转换为 AFAccessLevel
-    let access_level = match params.permission_id {
-      2 => AFAccessLevel::ReadAndComment,
-      3 => AFAccessLevel::ReadAndWrite,
-      4 => AFAccessLevel::FullAccess,
-      _ => AFAccessLevel::ReadOnly,
-    };
-
-    // 更新权限
-    if let Err(e) = update_collab_member_permission(
-      &state.pg_pool,
-      &view_id,
-      received_uid,
-      params.permission_id,
-    ).await {
-      tracing::warn!("Failed to update collab member permission: {:?}", e);
-      // 权限更新失败不影响主流程，因为成员已经添加成功了
-    }
-
-    // 更新工作区访问控制策略
-    if let Err(e) = state
-      .collab_access_control
-      .update_access_level_policy(&received_uid, &view_id, access_level)
-      .await
-    {
-      tracing::warn!("Failed to update collab access control: {:?}", e);
-    }
-  }
+  // 权限已在 add_collab_member 内部处理，这里不再重复更新
 
   Ok(Json(AppResponse::Ok()))
 }
