@@ -3487,35 +3487,11 @@ async fn add_collab_member_handler(
       format!("共享文档 {}", &view_id.to_string()[..8])
     });
 
-  // Step 1: 将被邀请者添加到工作区（工作区级别）
-  // 这样协作者才能同步文档，实现实时协作
-  database::workspace::upsert_workspace_member_uid(
-    &state.pg_pool,
-    &workspace_id,
-    received_uid,
-    AFRole::Guest, // 默认作为 Guest 添加到工作区
-  )
-  .await
-  .map_err(|e| {
-    AppResponseError::new(
-      ErrorCode::Internal,
-      format!("添加工作区成员失败: {}", e),
-    )
-  })?;
+  // 注意：不再将用户添加到工作区级别
+  // 这样被邀请者只能访问被分享的单个文档，而不是整个工作区
+  // 文档协作通过 af_collab_member 表来控制权限
 
-  // 更新工作区访问控制策略
-  state
-    .workspace_access_control
-    .insert_role(&received_uid, &workspace_id, AFRole::Guest)
-    .await
-    .map_err(|e| {
-      AppResponseError::new(
-        ErrorCode::Internal,
-        format!("更新工作区访问控制失败: {}", e),
-      )
-    })?;
-
-  // Step 2: 将被邀请者添加到文档协作成员列表
+  // Step 1: 将被邀请者添加到文档协作成员列表
   tracing::info!("adding collab member: workspace_id={}, view_id={}, received_uid={}", workspace_id, view_id, received_uid);
   add_collab_member(
     &state.pg_pool,
@@ -3529,7 +3505,7 @@ async fn add_collab_member_handler(
   .await?;
   tracing::info!("add_collab_member success!");
 
-  // Step 3: 如果指定了权限（不是默认的只读权限），则更新权限
+  // Step 2: 如果指定了权限（不是默认的只读权限），则更新权限
   if params.permission_id > 1 {
     // 将 permission_id 转换为 AFAccessLevel
     let access_level = match params.permission_id {
