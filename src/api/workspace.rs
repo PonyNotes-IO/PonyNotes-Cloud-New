@@ -366,6 +366,16 @@ pub fn workspace_scope() -> Scope {
             web::resource("/{workspace_id}/usage-and-limit")
                 .route(web::get().to(get_workspace_usage_and_limit_handler)),
         )
+        // 接收发布的文档 API（静态路径必须在动态路径 /published/{publish_namespace} 之前注册，避免 405 冲突）
+        .service(
+            web::resource("/published/receive")
+                .route(web::post().to(receive_published_collab_handler)),
+        )
+        // 查询接收的发布文档只读状态 API
+        .service(
+            web::resource("/published/received/{view_id}/readonly")
+                .route(web::get().to(get_received_published_collab_readonly_handler)),
+        )
         .service(
             web::resource("/published/{publish_namespace}")
                 .route(web::get().to(get_default_published_collab_info_meta_handler)),
@@ -390,16 +400,6 @@ pub fn workspace_scope() -> Scope {
         .service(
             web::resource("/published-info/all")
                 .route(web::get().to(list_all_published_collab_info_handler)),
-        )
-        // 接收发布的文档 API
-        .service(
-            web::resource("/published/receive")
-                .route(web::post().to(receive_published_collab_handler)),
-        )
-        // 查询接收的发布文档只读状态 API
-        .service(
-            web::resource("/published/received/{view_id}/readonly")
-                .route(web::get().to(get_received_published_collab_readonly_handler)),
         )
         .service(
             // deprecated since 0.7.4
