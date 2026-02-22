@@ -34,6 +34,7 @@ use crate::biz::workspace::publish::get_workspace_default_publish_view_info_meta
 use crate::biz::workspace::publish::list_collab_publish_info;
 use database::publish::{
   insert_received_published_collab, select_received_published_collabs,
+  select_published_collab_by_uid, select_received_published_collab_with_details,
 };
 use crate::biz::workspace::quick_note::{
   create_quick_note, delete_quick_note, list_quick_notes, update_quick_note,
@@ -2311,36 +2312,27 @@ async fn list_published_collab_info_handler(
   Ok(Json(AppResponse::Ok().with_data(publish_infos)))
 }
 
-/// 获取所有发布的笔记列表（不限制 workspace_id）
-/// 用于侧边栏发布菜单显示所有发布的笔记
+/// 获取当前用户相关的发布文档列表
+/// 只返回：1. 用户自己发布的文档 2. 用户通过深度链接接收的其他用户发布的文档
 async fn list_all_published_collab_info_handler(
   user_uuid: UserUuid,
   state: Data<AppState>,
 ) -> Result<Json<AppResponse<ListAllPublishedCollabResponse>>> {
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
-  let publish_infos = select_all_published_collab_info_global(&state.pg_pool).await?;
 
-  // 查询用户已接收的发布文档
-  let received_collabs = select_received_published_collabs(&state.pg_pool, uid).await?;
-  let received_view_ids: std::collections::HashSet<Uuid> =
-    received_collabs.iter().map(|r| r.published_view_id).collect();
+  // 1. 获取当前用户自己发布的文档
+  let own_published = select_published_collab_by_uid(&state.pg_pool, uid).await?;
 
-  // 构建所有发布文档列表
+  // 2. 获取当前用户通过深度链接接收的其他用户发布的文档（含详情）
+  let received_details = select_received_published_collab_with_details(&state.pg_pool, uid).await?;
+
   let mut items: Vec<AllPublishedCollabItem> = Vec::new();
 
-  for info in publish_infos {
-    let is_received = received_view_ids.contains(&info.view_id);
-
-    // 获取接收的文档信息（如果已接收）
-    let received_info = received_collabs.iter().find(|r| r.published_view_id == info.view_id);
-
-    // 从发布元数据中获取真实的文档名称
+  // 处理自己发布的文档
+  for info in &own_published {
     let real_name = match state
       .published_collab_store
-      .get_collab_metadata(
-        &info.namespace,
-        &info.publish_name,
-      )
+      .get_collab_metadata(&info.namespace, &info.publish_name)
       .await
     {
       Ok(metadata) => {
@@ -2353,26 +2345,50 @@ async fn list_all_published_collab_info_handler(
       Err(_) => info.publish_name.clone(),
     };
 
-    // 根据是否已接收来设置目标工作区ID
-    let (dest_workspace_id, dest_view_id, is_readonly) = if let Some(rinfo) = received_info {
-      // 用户已接收此发布
-      (rinfo.workspace_id, Some(rinfo.view_id), rinfo.is_readonly)
-    } else {
-      // 用户未接收，使用用户默认工作区（需要前端传入）
-      // 这里先使用默认值，让前端在打开时传入
-      (Uuid::nil(), None, true)
-    };
-
     items.push(AllPublishedCollabItem {
       published_view_id: info.view_id,
-      view_id: dest_view_id.unwrap_or(info.view_id),
-      workspace_id: dest_workspace_id,
+      view_id: info.view_id,
+      workspace_id: Uuid::nil(),
       name: real_name,
       publish_name: info.publish_name.clone(),
       publisher_email: info.publisher_email.clone(),
       published_at: info.publish_timestamp,
-      is_received,
-      is_readonly,
+      is_received: false,
+      is_readonly: false,
+    });
+  }
+
+  // 处理接收的其他用户发布的文档
+  for detail in &received_details {
+    let real_name = if !detail.namespace.is_empty() && !detail.publish_name.is_empty() {
+      match state
+        .published_collab_store
+        .get_collab_metadata(&detail.namespace, &detail.publish_name)
+        .await
+      {
+        Ok(metadata) => {
+          if let Some(name) = metadata.get("view").and_then(|v| v.get("name")) {
+            name.as_str().unwrap_or(&detail.publish_name).to_string()
+          } else {
+            detail.publish_name.clone()
+          }
+        },
+        Err(_) => detail.publish_name.clone(),
+      }
+    } else {
+      detail.publish_name.clone()
+    };
+
+    items.push(AllPublishedCollabItem {
+      published_view_id: detail.published_view_id,
+      view_id: detail.received_view_id,
+      workspace_id: detail.workspace_id,
+      name: real_name,
+      publish_name: detail.publish_name.clone(),
+      publisher_email: detail.publisher_email.clone(),
+      published_at: detail.published_at,
+      is_received: true,
+      is_readonly: detail.is_readonly,
     });
   }
 

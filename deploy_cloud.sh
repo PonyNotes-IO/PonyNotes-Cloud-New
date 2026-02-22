@@ -63,10 +63,36 @@ echo -e "${YELLOW}[步骤 2/5] 构建Docker镜像...${NC}"
 cd "${PROJECT_DIR}"
 export DOCKER_BUILDKIT=1
 
+# 检测远程构建器（Intel Mac），避免 ARM64 上 QEMU 模拟的低效构建
+BUILDER_ARG=""
+REMOTE_BUILDER_NAME="intel-builder"
+BUILDER_CONFIG="$HOME/.docker/ponynotes-builder.conf"
+
+if [ -f "$BUILDER_CONFIG" ]; then
+    source "$BUILDER_CONFIG"
+    REMOTE_BUILDER_NAME="${BUILDER_NAME:-intel-builder}"
+fi
+
+if docker buildx inspect "$REMOTE_BUILDER_NAME" > /dev/null 2>&1; then
+    BUILDER_ARG="--builder ${REMOTE_BUILDER_NAME}"
+    echo -e "${GREEN}🚀 检测到远程构建器 '${REMOTE_BUILDER_NAME}'，将使用 Intel Mac 原生构建（预计10分钟）${NC}"
+else
+    LOCAL_ARCH=$(uname -m)
+    if [ "$LOCAL_ARCH" = "arm64" ]; then
+        echo -e "${YELLOW}⚠️  当前为 ARM64 架构，未检测到远程构建器，将使用 QEMU 模拟构建（较慢）${NC}"
+        echo -e "${YELLOW}   提示：运行 scripts/setup_remote_builder.sh 配置 Intel Mac 远程构建器可大幅提速${NC}"
+    else
+        echo -e "${BLUE}当前为 x86_64 架构，直接原生构建${NC}"
+    fi
+fi
+
 echo -e "${BLUE}开始构建 Docker 镜像...${NC}"
+BUILD_START_TIME=$(date +%s)
 
 docker buildx build \
+  ${BUILDER_ARG} \
   -f Dockerfile \
+  --platform linux/amd64 \
   -t "${IMAGE_NAME}" \
   --build-arg DATABASE_URL="${DATABASE_URL}" \
   --build-arg CARGO_BUILD_JOBS=16 \
@@ -74,10 +100,15 @@ docker buildx build \
   --load .
 
 BUILD_RESULT=$?
+BUILD_END_TIME=$(date +%s)
+BUILD_DURATION=$(( BUILD_END_TIME - BUILD_START_TIME ))
+BUILD_MINUTES=$(( BUILD_DURATION / 60 ))
+BUILD_SECONDS=$(( BUILD_DURATION % 60 ))
+
 if [ $BUILD_RESULT -eq 0 ]; then
-    echo -e "${GREEN}✅ Docker镜像构建成功${NC}"
+    echo -e "${GREEN}✅ Docker镜像构建成功（耗时: ${BUILD_MINUTES}分${BUILD_SECONDS}秒）${NC}"
 else
-    echo -e "${RED}❌ Docker镜像构建失败 (退出码: ${BUILD_RESULT})${NC}"
+    echo -e "${RED}❌ Docker镜像构建失败 (退出码: ${BUILD_RESULT}，耗时: ${BUILD_MINUTES}分${BUILD_SECONDS}秒)${NC}"
     exit 1
 fi
 echo ""

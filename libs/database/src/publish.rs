@@ -700,6 +700,85 @@ pub async fn select_all_published_collab_info_global(
   Ok(res)
 }
 
+/// 查询当前用户自己发布的文档
+pub async fn select_published_collab_by_uid(
+  pg_pool: &PgPool,
+  uid: i64,
+) -> Result<Vec<PublishInfo>, AppError> {
+  let mut res = sqlx::query_as!(
+    PublishInfo,
+    r#"
+      SELECT
+        awn.namespace,
+        apc.publish_name,
+        apc.view_id,
+        au.email AS publisher_email,
+        apc.created_at AS publish_timestamp,
+        apc.unpublished_at AS unpublished_timestamp,
+        apc.comments_enabled,
+        apc.duplicate_enabled
+      FROM af_published_collab apc
+      JOIN af_user au ON apc.published_by = au.uid
+      JOIN af_workspace aw ON apc.workspace_id = aw.workspace_id
+      JOIN af_workspace_namespace awn ON aw.workspace_id = awn.workspace_id AND awn.is_original = TRUE
+      WHERE apc.published_by = $1 AND apc.unpublished_at IS NULL
+      ORDER BY apc.created_at DESC;
+    "#,
+    uid,
+  )
+  .fetch_all(pg_pool)
+  .await?;
+
+  use_non_orginal_namespace_if_possible(pg_pool, &mut res).await?;
+  Ok(res)
+}
+
+/// 查询用户接收的发布文档及其发布详情（含名称、发布者邮箱等）
+pub async fn select_received_published_collab_with_details(
+  pg_pool: &PgPool,
+  uid: i64,
+) -> Result<Vec<ReceivedPublishedCollabDetail>, AppError> {
+  let res = sqlx::query_as!(
+    ReceivedPublishedCollabDetail,
+    r#"
+      SELECT
+        rpc.published_view_id,
+        rpc.view_id AS received_view_id,
+        rpc.workspace_id,
+        rpc.published_at,
+        rpc.is_readonly,
+        COALESCE(apc.publish_name, '') AS "publish_name!",
+        COALESCE(awn.namespace, '') AS "namespace!",
+        au.email AS publisher_email
+      FROM af_received_published_collab rpc
+      LEFT JOIN af_published_collab apc ON rpc.published_view_id = apc.view_id
+      LEFT JOIN af_workspace aw ON apc.workspace_id = aw.workspace_id
+      LEFT JOIN af_workspace_namespace awn ON aw.workspace_id = awn.workspace_id AND awn.is_original = TRUE
+      LEFT JOIN af_user au ON rpc.published_by = au.uid
+      WHERE rpc.received_by = $1
+      ORDER BY rpc.received_at DESC
+    "#,
+    uid,
+  )
+  .fetch_all(pg_pool)
+  .await?;
+
+  Ok(res)
+}
+
+/// 接收的发布文档详情（含发布信息）
+#[derive(sqlx::FromRow, Debug)]
+pub struct ReceivedPublishedCollabDetail {
+  pub published_view_id: Uuid,
+  pub received_view_id: Uuid,
+  pub workspace_id: Uuid,
+  pub published_at: DateTime<Utc>,
+  pub is_readonly: bool,
+  pub publish_name: String,
+  pub namespace: String,
+  pub publisher_email: Option<String>,
+}
+
 async fn use_non_orginal_namespace_if_possible(
   pg_pool: &PgPool,
   publish_infos: &mut [PublishInfo],
