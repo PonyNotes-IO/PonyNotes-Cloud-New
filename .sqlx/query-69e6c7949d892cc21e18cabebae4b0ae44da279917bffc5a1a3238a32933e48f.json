@@ -55,13 +55,8 @@
       false,
       false,
       false,
-<<<<<<< HEAD
       false,
       false,
-=======
-      null,
-      null,
->>>>>>> e0232b1b (feat: 添加新的查询JSON文件以支持发布和接收协作内容)
       true
     ]
   },
