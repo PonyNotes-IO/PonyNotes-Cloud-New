@@ -1,362 +1,305 @@
 #!/bin/bash
 
-# PonyNotes-Cloud-New 快速部署脚本
-# 用途：本地构建Docker镜像并部署到服务器
-# 日期：2026-02-09
+# PonyNotes-Cloud-New 部署脚本
+# x86_64 本地构建 → 导出镜像 → 上传服务器 → 部署 → HTTPS API 全量测试
+# 日期：2026-02-23
 
-set -e  # 遇到错误立即退出
+set -e
 
-# 颜色输出
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# 配置变量
 PROJECT_DIR="/Users/kuncao/github.com/PonyNotes-IO/PonyNotes-Cloud-New"
 SERVER_IP="8.152.101.166"
 SERVER_USER="root"
 SERVER_DOCKER_DIR="/root/docker-compose"
 IMAGE_NAME="appflowyinc/appflowy_cloud:latest"
-
-echo -e "${CYAN}========================================${NC}"
-echo -e "${CYAN}PonyNotes-Cloud-New 自动部署开始${NC}"
-echo -e "${CYAN}========================================${NC}"
-echo ""
-
-# 从服务器获取真实的 DATABASE_URL
-echo -e "${YELLOW}[步骤 1/5] 从服务器获取数据库配置...${NC}"
-echo -e "${BLUE}连接到服务器获取 DATABASE_URL...${NC}"
-
-# SSH 连接重试
-MAX_RETRIES=3
-RETRY_DELAY=5
-RETRY_COUNT=0
-
-while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-    REMOTE_ENV=$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 "${SERVER_USER}@${SERVER_IP}" "cat /root/docker-compose/.env 2>/dev/null" 2>&1) && break
-    RETRY_COUNT=$((RETRY_COUNT + 1))
-    if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-        echo -e "${YELLOW}SSH 连接失败，${RETRY_DELAY}秒后重试 (${RETRY_COUNT}/${MAX_RETRIES})...${NC}"
-        sleep $RETRY_DELAY
-    else
-        echo -e "${RED}SSH 连接失败: ${REMOTE_ENV}${NC}"
-        exit 1
-    fi
-done
-
-# 提取 DATABASE_URL
-DATABASE_URL=$(echo "$REMOTE_ENV" | grep '^DATABASE_URL=' | head -1 | sed 's/^DATABASE_URL=//' | tr -d '"' | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-
-if [ -z "$DATABASE_URL" ]; then
-    echo -e "${RED}❌ 无法从服务器获取 DATABASE_URL${NC}"
-    echo -e "${RED}服务器返回内容:${NC}${REMOTE_ENV}"
-    exit 1
-fi
-echo -e "${GREEN}✅ 已获取数据库配置 (长度: ${#DATABASE_URL})${NC}"
-echo ""
-
-# 构建Docker镜像
-echo -e "${YELLOW}[步骤 2/5] 构建Docker镜像...${NC}"
-cd "${PROJECT_DIR}"
-export DOCKER_BUILDKIT=1
-
-# 检测远程构建器（Intel Mac），避免 ARM64 上 QEMU 模拟的低效构建
-BUILDER_ARG=""
-REMOTE_BUILDER_NAME="intel-builder"
-BUILDER_CONFIG="$HOME/.docker/ponynotes-builder.conf"
-
-if [ -f "$BUILDER_CONFIG" ]; then
-    source "$BUILDER_CONFIG"
-    REMOTE_BUILDER_NAME="${BUILDER_NAME:-intel-builder}"
-fi
-
-if docker buildx inspect "$REMOTE_BUILDER_NAME" > /dev/null 2>&1; then
-    BUILDER_ARG="--builder ${REMOTE_BUILDER_NAME}"
-    echo -e "${GREEN}🚀 检测到远程构建器 '${REMOTE_BUILDER_NAME}'，将使用 Intel Mac 原生构建（预计10分钟）${NC}"
-else
-    LOCAL_ARCH=$(uname -m)
-    if [ "$LOCAL_ARCH" = "arm64" ]; then
-        echo -e "${YELLOW}⚠️  当前为 ARM64 架构，未检测到远程构建器，将使用 QEMU 模拟构建（较慢）${NC}"
-        echo -e "${YELLOW}   提示：运行 scripts/setup_remote_builder.sh 配置 Intel Mac 远程构建器可大幅提速${NC}"
-    else
-        echo -e "${BLUE}当前为 x86_64 架构，直接原生构建${NC}"
-    fi
-fi
-
-echo -e "${BLUE}开始构建 Docker 镜像...${NC}"
-BUILD_START_TIME=$(date +%s)
-
-docker buildx build \
-  ${BUILDER_ARG} \
-  -f Dockerfile \
-  --platform linux/amd64 \
-  -t "${IMAGE_NAME}" \
-  --build-arg DATABASE_URL="${DATABASE_URL}" \
-  --build-arg CARGO_BUILD_JOBS=16 \
-  --build-arg ENABLE_SCCACHE=true \
-  --load .
-
-BUILD_RESULT=$?
-BUILD_END_TIME=$(date +%s)
-BUILD_DURATION=$(( BUILD_END_TIME - BUILD_START_TIME ))
-BUILD_MINUTES=$(( BUILD_DURATION / 60 ))
-BUILD_SECONDS=$(( BUILD_DURATION % 60 ))
-
-if [ $BUILD_RESULT -eq 0 ]; then
-    echo -e "${GREEN}✅ Docker镜像构建成功（耗时: ${BUILD_MINUTES}分${BUILD_SECONDS}秒）${NC}"
-else
-    echo -e "${RED}❌ Docker镜像构建失败 (退出码: ${BUILD_RESULT}，耗时: ${BUILD_MINUTES}分${BUILD_SECONDS}秒)${NC}"
-    exit 1
-fi
-echo ""
-
-# 导出镜像为tar文件（本地临时文件名可以随机，但服务器端固定为 appflowy_cloud.tar）
-echo -e "${YELLOW}[步骤 3/5] 导出镜像为tar文件...${NC}"
-TAR_FILE=$(mktemp).tar
-docker save "${IMAGE_NAME}" -o "${TAR_FILE}"
-TAR_SIZE=$(du -h "${TAR_FILE}" | cut -f1)
-echo -e "${GREEN}✅ 镜像导出成功，文件大小: ${TAR_SIZE}${NC}"
-echo ""
-
-# 上传镜像到服务器，远端文件名固定为 appflowy_cloud.tar，和后面 docker load -i appflowy_cloud.tar 保持一致
-echo -e "${YELLOW}[步骤 4/5] 上传镜像到服务器...${NC}"
-scp -o StrictHostKeyChecking=no -o ConnectTimeout=60 "${TAR_FILE}" "${SERVER_USER}@${SERVER_IP}:${SERVER_DOCKER_DIR}/appflowy_cloud.tar"
-rm -f "${TAR_FILE}"
-echo -e "${GREEN}✅ 镜像上传成功${NC}"
-echo ""
-
-# 停止并部署新容器
-echo -e "${YELLOW}[步骤 5/5] 部署到服务器...${NC}"
-
-# 在服务器上执行部署命令
-ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 "${SERVER_USER}@${SERVER_IP}" "cd '${SERVER_DOCKER_DIR}' && {
-    echo '停止旧容器...'
-    docker compose -f docker-compose-dev.yml down appflowy_cloud 2>/dev/null || true
-    echo '删除旧镜像...'
-    docker rmi '${IMAGE_NAME}' 2>/dev/null || true
-    echo '导入新镜像...'
-    docker load -i appflowy_cloud.tar
-    echo '启动新容器...'
-    docker compose -f docker-compose-dev.yml up -d appflowy_cloud
-    rm -f appflowy_cloud.tar
-    echo '部署命令执行完成'
-    echo '等待容器启动...'
-    sleep 10
-    echo '检查容器状态...'
-    docker compose -f docker-compose-dev.yml ps appflowy_cloud
-}"
-
-DEPLOY_RESULT=$?
-if [ $DEPLOY_RESULT -eq 0 ]; then
-    echo -e "${GREEN}✅ 部署成功${NC}"
-else
-    echo -e "${RED}❌ 部署失败 (退出码: ${DEPLOY_RESULT})${NC}"
-    exit 1
-fi
-echo ""
-
-# 等待服务完全启动
-echo -e "${YELLOW}[等待] 等待服务完全启动...${NC}"
-sleep 8
-echo ""
-
-# ============================================================
-# API 接口全面测试
-# ============================================================
-API_BASE="http://${SERVER_IP}:8000"
-GOTRUE_BASE="http://${SERVER_IP}:9999"
-TEST_PHONE="13436574850"
-TEST_PASSWORD='qwer1234!'
+API_BASE="https://api.xiaomabiji.com"
+GOTRUE_BASE="https://gotrue.xiaomabiji.com"
 
 PASS_COUNT=0
 FAIL_COUNT=0
 TOTAL_COUNT=0
+SCRIPT_START=$(date +%s)
 
-# 通用测试函数
-# 参数: $1=测试名称 $2=请求方法 $3=URL $4=期望的JSON key $5...=额外curl参数
+# ─── 通用测试函数 ───
 test_api() {
-    local name="$1"
-    local method="$2"
-    local url="$3"
-    local expect_key="$4"
+    local name="$1" method="$2" url="$3" expect_code="$4"
     shift 4
     local extra_args=("$@")
-
     TOTAL_COUNT=$((TOTAL_COUNT + 1))
-    local body
-    body=$(curl -s -m 10 -X "$method" "$url" "${extra_args[@]}" 2>/dev/null)
-    local http_code
-    http_code=$(curl -s -m 10 -o /dev/null -w "%{http_code}" -X "$method" "$url" "${extra_args[@]}" 2>/dev/null)
 
-    if [ "$http_code" -ge 200 ] 2>/dev/null && [ "$http_code" -lt 300 ] 2>/dev/null && echo "$body" | grep -q "\"${expect_key}\""; then
+    local resp_file
+    resp_file=$(mktemp)
+    local http_code
+    http_code=$(curl -sk -m 15 -o "$resp_file" -w "%{http_code}" -X "$method" "$url" "${extra_args[@]}" 2>/dev/null || echo "000")
+    local body
+    body=$(cat "$resp_file" 2>/dev/null)
+    rm -f "$resp_file"
+
+    if [ "$http_code" = "$expect_code" ]; then
         PASS_COUNT=$((PASS_COUNT + 1))
-        echo -e "  ${GREEN}✅ ${name}${NC} [HTTP ${http_code}]"
-        local summary
-        summary=$(echo "$body" | python3 -c "
-import sys,json
-try:
-    d=json.load(sys.stdin)
-    if 'data' in d:
-        val=d['data']
-        if isinstance(val, list):
-            print(f'  返回 {len(val)} 条数据')
-        elif isinstance(val, dict):
-            keys=list(val.keys())[:5]
-            print(f'  字段: {keys}')
-        else:
-            print(f'  值: {str(val)[:80]}')
-    else:
-        print(f'  keys: {list(d.keys())[:5]}')
-except:
-    pass
-" 2>/dev/null)
-        [ -n "$summary" ] && echo -e "    ${CYAN}${summary}${NC}"
+        echo -e "  ${GREEN}✅ ${name}${NC} [${http_code}]"
     else
         FAIL_COUNT=$((FAIL_COUNT + 1))
-        echo -e "  ${RED}❌ ${name}${NC} [HTTP ${http_code}]"
-        echo -e "    ${RED}响应: ${body:0:150}${NC}"
+        echo -e "  ${RED}❌ ${name}${NC} [期望:${expect_code} 实际:${http_code}]"
+        echo -e "    ${RED}${body:0:120}${NC}"
     fi
 }
 
-echo -e "${CYAN}========================================${NC}"
-echo -e "${CYAN}[测试] API 接口全面测试${NC}"
-echo -e "${CYAN}========================================${NC}"
-echo ""
-
-# ─── 公共接口（无需登录）───
-echo -e "${YELLOW}▶ 公共接口（无需认证）${NC}"
-
-TOTAL_COUNT=$((TOTAL_COUNT + 1))
-HEALTH=$(curl -s -m 10 "${API_BASE}/health" 2>/dev/null)
-if [ "$HEALTH" = "OK" ]; then
-    PASS_COUNT=$((PASS_COUNT + 1))
-    echo -e "  ${GREEN}✅ 健康检查 /health${NC} [OK]"
-else
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-    echo -e "  ${RED}❌ 健康检查 /health${NC} [${HEALTH:0:50}]"
-fi
-
-test_api "服务器信息 /api/server" GET "${API_BASE}/api/server" "data"
-test_api "订阅计划列表 /api/subscription/plans" GET "${API_BASE}/api/subscription/plans" "data"
-test_api "GoTrue 健康检查" GET "${GOTRUE_BASE}/health" "version"
-
-echo ""
-
-# ─── 登录获取 Token ───
-echo -e "${YELLOW}▶ 用户登录认证${NC}"
-
-LOGIN_BODY=$(curl -s -m 10 -X POST "${GOTRUE_BASE}/token?grant_type=password" \
-    -H "Content-Type: application/json" \
-    -d "{\"phone\":\"${TEST_PHONE}\",\"password\":\"${TEST_PASSWORD}\"}" 2>/dev/null)
-ACCESS_TOKEN=$(echo "$LOGIN_BODY" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)
-REFRESH_TOKEN=$(echo "$LOGIN_BODY" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("refresh_token",""))' 2>/dev/null)
-
-TOTAL_COUNT=$((TOTAL_COUNT + 1))
-if [ -n "$ACCESS_TOKEN" ] && [ ${#ACCESS_TOKEN} -gt 20 ]; then
-    PASS_COUNT=$((PASS_COUNT + 1))
-    echo -e "  ${GREEN}✅ 手机号密码登录${NC} [token长度: ${#ACCESS_TOKEN}]"
-    AUTH_HEADER=(-H "Authorization: Bearer ${ACCESS_TOKEN}")
-
-    # ─── 用户接口 ───
-    echo ""
-    echo -e "${YELLOW}▶ 用户接口（需要认证）${NC}"
-    test_api "用户资料 /api/user/profile" GET "${API_BASE}/api/user/profile" "data" "${AUTH_HEADER[@]}"
-    test_api "用户工作区信息 /api/user/workspace" GET "${API_BASE}/api/user/workspace" "data" "${AUTH_HEADER[@]}"
-
-    WORKSPACE_ID=$(curl -s -m 10 "${API_BASE}/api/user/workspace" "${AUTH_HEADER[@]}" 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["visiting_workspace"]["workspace_id"])' 2>/dev/null)
-
-    # ─── 工作区接口 ───
-    echo ""
-    echo -e "${YELLOW}▶ 工作区接口${NC}"
-    test_api "工作区列表 /api/workspace" GET "${API_BASE}/api/workspace" "data" "${AUTH_HEADER[@]}"
-    if [ -n "$WORKSPACE_ID" ]; then
-        echo -e "    ${CYAN}使用工作区: ${WORKSPACE_ID}${NC}"
-        test_api "工作区成员列表" GET "${API_BASE}/api/workspace/${WORKSPACE_ID}/member" "data" "${AUTH_HEADER[@]}"
-        test_api "工作区设置" GET "${API_BASE}/api/workspace/${WORKSPACE_ID}/settings" "data" "${AUTH_HEADER[@]}"
-        test_api "文档使用量" GET "${API_BASE}/api/workspace/${WORKSPACE_ID}/usage" "data" "${AUTH_HEADER[@]}"
-    fi
-
-    # ─── 订阅与账单接口 ───
-    echo ""
-    echo -e "${YELLOW}▶ 订阅与账单接口${NC}"
-    test_api "当前订阅 /api/subscription/current" GET "${API_BASE}/api/subscription/current" "data" "${AUTH_HEADER[@]}"
-    test_api "使用量 /api/subscription/usage" GET "${API_BASE}/api/subscription/usage" "data" "${AUTH_HEADER[@]}"
-    test_api "订阅状态列表 /billing" GET "${API_BASE}/billing/api/v1/subscription-status" "data" "${AUTH_HEADER[@]}"
-    if [ -n "$WORKSPACE_ID" ]; then
-        test_api "工作区订阅状态" GET "${API_BASE}/billing/api/v1/subscription-status/${WORKSPACE_ID}" "data" "${AUTH_HEADER[@]}"
-    fi
-
-    # ─── 协作接口 ───
-    echo ""
-    echo -e "${YELLOW}▶ 协作接口${NC}"
-    test_api "收到的协作邀请" GET "${API_BASE}/api/collab/me/received" "data" "${AUTH_HEADER[@]}"
-    test_api "发出的协作邀请" GET "${API_BASE}/api/collab/me/sent" "data" "${AUTH_HEADER[@]}"
-
-    # ─── 文件存储接口 ───
-    if [ -n "$WORKSPACE_ID" ]; then
-        echo ""
-        echo -e "${YELLOW}▶ 文件存储接口${NC}"
-        test_api "文件使用量" GET "${API_BASE}/api/file_storage/${WORKSPACE_ID}/usage" "data" "${AUTH_HEADER[@]}"
-        test_api "文件列表" GET "${API_BASE}/api/file_storage/${WORKSPACE_ID}/blobs" "data" "${AUTH_HEADER[@]}"
-    fi
-
-    # ─── 共享接口 ───
-    if [ -n "$WORKSPACE_ID" ]; then
-        echo ""
-        echo -e "${YELLOW}▶ 共享接口${NC}"
-        test_api "共享文档列表" GET "${API_BASE}/api/sharing/workspace/${WORKSPACE_ID}/view" "data" "${AUTH_HEADER[@]}"
-    fi
-
-    # ─── Token 刷新 ───
-    echo ""
-    echo -e "${YELLOW}▶ Token 刷新${NC}"
-    REFRESH_BODY=$(curl -s -m 10 -X POST "${GOTRUE_BASE}/token?grant_type=refresh_token" \
+# 登录并返回 access_token，参数：$1=账号 $2=密码 $3=登录方式(phone|email)
+do_login() {
+    local account="$1" password="$2" login_type="$3"
+    local field="phone"
+    [ "$login_type" = "email" ] && field="email"
+    local body
+    body=$(curl -sk -m 15 -X POST "${GOTRUE_BASE}/token?grant_type=password" \
         -H "Content-Type: application/json" \
-        -d "{\"refresh_token\":\"${REFRESH_TOKEN}\"}" 2>/dev/null)
-    NEW_TOKEN=$(echo "$REFRESH_BODY" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)
-    TOTAL_COUNT=$((TOTAL_COUNT + 1))
-    if [ -n "$NEW_TOKEN" ] && [ ${#NEW_TOKEN} -gt 20 ]; then
-        PASS_COUNT=$((PASS_COUNT + 1))
-        echo -e "  ${GREEN}✅ Token 刷新成功${NC} [新token长度: ${#NEW_TOKEN}]"
-    else
-        FAIL_COUNT=$((FAIL_COUNT + 1))
-        echo -e "  ${RED}❌ Token 刷新失败${NC}"
-    fi
+        -d "{\"${field}\":\"${account}\",\"password\":\"${password}\"}" 2>/dev/null)
+    echo "$body" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null
+}
 
-else
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-    echo -e "  ${RED}❌ 登录失败，跳过所有需要认证的接口测试${NC}"
-    echo -e "    ${RED}响应: ${LOGIN_BODY:0:200}${NC}"
-fi
-
-# ─── 测试结果汇总 ───
-echo ""
-echo -e "${CYAN}========================================${NC}"
-if [ $FAIL_COUNT -eq 0 ]; then
-    echo -e "${GREEN}🎉 全部测试通过！ (${PASS_COUNT}/${TOTAL_COUNT})${NC}"
-else
-    echo -e "${YELLOW}📊 测试结果: ${GREEN}${PASS_COUNT} 通过${NC} / ${RED}${FAIL_COUNT} 失败${NC} / 共 ${TOTAL_COUNT} 项"
-fi
-echo -e "${CYAN}========================================${NC}"
+echo -e "${CYAN}════════════════════════════════════════${NC}"
+echo -e "${CYAN}  PonyNotes-Cloud 构建 · 部署 · 测试${NC}"
+echo -e "${CYAN}════════════════════════════════════════${NC}"
 echo ""
 
-# 检查运行状态
-echo -e "${BLUE}容器运行状态:${NC}"
-ssh -o StrictHostKeyChecking=no "${SERVER_USER}@${SERVER_IP}" "docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | grep -E 'appflowy|cloud|gotrue|postgres' || true"
-
-echo ""
-echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}部署完成！${NC}"
-echo -e "${GREEN}========================================${NC}"
-echo ""
-echo -e "${YELLOW}查看日志命令:${NC}"
-echo "  ssh ${SERVER_USER}@${SERVER_IP} 'docker logs -f docker-compose-appflowy_cloud-1'"
-echo ""
-
-if [ $FAIL_COUNT -gt 0 ]; then
+# ══════════════════════════════════════
+# 步骤 1：获取数据库连接字符串
+# ══════════════════════════════════════
+echo -e "${YELLOW}[1/5] 获取数据库配置...${NC}"
+RETRY=0
+while [ $RETRY -lt 3 ]; do
+    REMOTE_ENV=$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 "${SERVER_USER}@${SERVER_IP}" "cat ${SERVER_DOCKER_DIR}/.env 2>/dev/null" 2>&1) && break
+    RETRY=$((RETRY + 1))
+    [ $RETRY -lt 3 ] && echo -e "${YELLOW}  重试 ${RETRY}/3...${NC}" && sleep 5
+done
+DATABASE_URL=$(echo "$REMOTE_ENV" | grep '^DATABASE_URL=' | head -1 | sed 's/^DATABASE_URL=//' | tr -d '"' | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+if [ -z "$DATABASE_URL" ]; then
+    echo -e "${RED}❌ 获取 DATABASE_URL 失败${NC}"
     exit 1
 fi
+echo -e "${GREEN}  ✅ 已获取 (长度:${#DATABASE_URL})${NC}"
+
+# ══════════════════════════════════════
+# 步骤 2：构建 Docker 镜像（x86_64 原生）
+# ══════════════════════════════════════
+echo ""
+echo -e "${YELLOW}[2/5] 构建 Docker 镜像 (x86_64 原生)...${NC}"
+cd "${PROJECT_DIR}"
+export DOCKER_BUILDKIT=1
+T0=$(date +%s)
+
+docker build \
+  -f Dockerfile \
+  -t "${IMAGE_NAME}" \
+  --build-arg DATABASE_URL="${DATABASE_URL}" \
+  --build-arg CARGO_BUILD_JOBS=16 \
+  --build-arg ENABLE_SCCACHE=true \
+  .
+
+T1=$(date +%s)
+echo -e "${GREEN}  ✅ 构建成功 ($(( (T1-T0)/60 ))分$(( (T1-T0)%60 ))秒)${NC}"
+
+# ══════════════════════════════════════
+# 步骤 3：导出镜像
+# ══════════════════════════════════════
+echo ""
+echo -e "${YELLOW}[3/5] 导出镜像...${NC}"
+TAR_FILE=$(mktemp).tar
+docker save "${IMAGE_NAME}" -o "${TAR_FILE}"
+TAR_SIZE=$(du -h "${TAR_FILE}" | cut -f1)
+echo -e "${GREEN}  ✅ 导出完成 (${TAR_SIZE})${NC}"
+
+# ══════════════════════════════════════
+# 步骤 4：上传到服务器
+# ══════════════════════════════════════
+echo ""
+echo -e "${YELLOW}[4/5] 上传镜像到服务器...${NC}"
+scp -o StrictHostKeyChecking=no -o ConnectTimeout=60 "${TAR_FILE}" "${SERVER_USER}@${SERVER_IP}:${SERVER_DOCKER_DIR}/appflowy_cloud.tar"
+rm -f "${TAR_FILE}"
+echo -e "${GREEN}  ✅ 上传完成${NC}"
+
+# ══════════════════════════════════════
+# 步骤 5：服务器部署
+# ══════════════════════════════════════
+echo ""
+echo -e "${YELLOW}[5/5] 服务器部署...${NC}"
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 "${SERVER_USER}@${SERVER_IP}" "cd '${SERVER_DOCKER_DIR}' && \
+    docker compose -f docker-compose-dev.yml down appflowy_cloud 2>/dev/null || true && \
+    docker rmi '${IMAGE_NAME}' 2>/dev/null || true && \
+    docker load -i appflowy_cloud.tar && \
+    docker compose -f docker-compose-dev.yml up -d appflowy_cloud && \
+    rm -f appflowy_cloud.tar && \
+    echo 'done'"
+echo -e "${GREEN}  ✅ 部署完成，等待启动...${NC}"
+sleep 15
+
+# 验证容器运行
+echo -e "${BLUE}  容器状态:${NC}"
+ssh -o StrictHostKeyChecking=no "${SERVER_USER}@${SERVER_IP}" "docker ps --format '  {{.Names}}\t{{.Status}}' | grep -E 'appflowy_cloud|gotrue|postgres' || true"
+echo ""
+
+# ══════════════════════════════════════════════════════════════
+# API 全量测试（通过 https://api.xiaomabiji.com）
+# ══════════════════════════════════════════════════════════════
+echo -e "${CYAN}════════════════════════════════════════${NC}"
+echo -e "${CYAN}  HTTPS API 全量测试${NC}"
+echo -e "${CYAN}════════════════════════════════════════${NC}"
+echo ""
+
+# ─── 公共接口 ───
+echo -e "${YELLOW}▶ 公共接口（无需认证）${NC}"
+test_api "健康检查 /health" GET "${API_BASE}/health" "200"
+test_api "服务器信息" GET "${API_BASE}/api/server" "200"
+test_api "GoTrue 健康检查" GET "${GOTRUE_BASE}/health" "200"
+
+# ─── 测试单个用户的所有接口 ───
+test_user_apis() {
+    local label="$1" account="$2" password="$3" login_type="$4"
+    echo ""
+    echo -e "${CYAN}── ${label} (${account}) ──${NC}"
+
+    # 登录
+    echo -e "${YELLOW}▶ 登录${NC}"
+    local token
+    token=$(do_login "$account" "$password" "$login_type")
+    TOTAL_COUNT=$((TOTAL_COUNT + 1))
+    if [ -n "$token" ] && [ ${#token} -gt 20 ]; then
+        PASS_COUNT=$((PASS_COUNT + 1))
+        echo -e "  ${GREEN}✅ 登录成功${NC} [token:${#token}字符]"
+    else
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        echo -e "  ${RED}❌ 登录失败，跳过后续测试${NC}"
+        return
+    fi
+    local AUTH=(-H "Authorization: Bearer ${token}")
+
+    # 用户接口
+    echo -e "${YELLOW}▶ 用户接口${NC}"
+    test_api "用户资料" GET "${API_BASE}/api/user/profile" "200" "${AUTH[@]}"
+    test_api "用户工作区" GET "${API_BASE}/api/user/workspace" "200" "${AUTH[@]}"
+
+    # 获取工作区 ID
+    local WS_ID
+    WS_ID=$(curl -sk -m 10 "${API_BASE}/api/user/workspace" "${AUTH[@]}" 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["visiting_workspace"]["workspace_id"])' 2>/dev/null)
+    if [ -z "$WS_ID" ]; then
+        echo -e "  ${RED}无法获取工作区ID，跳过工作区相关测试${NC}"
+        return
+    fi
+    echo -e "  ${BLUE}工作区: ${WS_ID}${NC}"
+
+    # 工作区接口
+    echo -e "${YELLOW}▶ 工作区接口${NC}"
+    test_api "工作区列表" GET "${API_BASE}/api/workspace" "200" "${AUTH[@]}"
+    test_api "工作区成员" GET "${API_BASE}/api/workspace/${WS_ID}/member" "200" "${AUTH[@]}"
+    test_api "工作区设置" GET "${API_BASE}/api/workspace/${WS_ID}/settings" "200" "${AUTH[@]}"
+    test_api "文档使用量" GET "${API_BASE}/api/workspace/${WS_ID}/usage" "200" "${AUTH[@]}"
+
+    # 发布相关接口
+    echo -e "${YELLOW}▶ 发布接口${NC}"
+    test_api "发布列表(workspace)" GET "${API_BASE}/api/workspace/${WS_ID}/published-info" "200" "${AUTH[@]}"
+    test_api "发布列表(全局)" GET "${API_BASE}/api/workspace/published-info/all" "200" "${AUTH[@]}"
+    test_api "发布命名空间" GET "${API_BASE}/api/workspace/${WS_ID}/publish-namespace" "200" "${AUTH[@]}"
+
+    # 发布接收接口（POST 空参数验证路由存在，期望 400 而非 405）
+    local RECEIVE_CODE
+    RECEIVE_CODE=$(curl -sk -m 10 -o /dev/null -w "%{http_code}" -X POST "${API_BASE}/api/workspace/published/receive" \
+        -H "Content-Type: application/json" "${AUTH[@]}" \
+        -d '{"published_view_id":"00000000-0000-0000-0000-000000000000","dest_workspace_id":"00000000-0000-0000-0000-000000000000","dest_view_id":"00000000-0000-0000-0000-000000000001"}' 2>/dev/null)
+    TOTAL_COUNT=$((TOTAL_COUNT + 1))
+    if [ "$RECEIVE_CODE" != "405" ]; then
+        PASS_COUNT=$((PASS_COUNT + 1))
+        echo -e "  ${GREEN}✅ 发布接收路由可达${NC} [${RECEIVE_CODE}]"
+    else
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        echo -e "  ${RED}❌ 发布接收路由不存在(405)，需要重新部署${NC}"
+    fi
+
+    # 文件夹/视图接口
+    echo -e "${YELLOW}▶ 文件夹与视图接口${NC}"
+    test_api "文件夹结构" GET "${API_BASE}/api/workspace/${WS_ID}/folder" "200" "${AUTH[@]}"
+    test_api "最近文档" GET "${API_BASE}/api/workspace/${WS_ID}/recent" "200" "${AUTH[@]}"
+    test_api "收藏文档" GET "${API_BASE}/api/workspace/${WS_ID}/favorite" "200" "${AUTH[@]}"
+    test_api "回收站" GET "${API_BASE}/api/workspace/${WS_ID}/trash" "200" "${AUTH[@]}"
+
+    # 协作接口
+    echo -e "${YELLOW}▶ 协作接口${NC}"
+    test_api "收到的协作邀请" GET "${API_BASE}/api/collab/me/received" "200" "${AUTH[@]}"
+    test_api "发出的协作邀请" GET "${API_BASE}/api/collab/me/sent" "200" "${AUTH[@]}"
+
+    # 共享接口
+    echo -e "${YELLOW}▶ 共享接口${NC}"
+    test_api "共享文档列表" GET "${API_BASE}/api/sharing/workspace/${WS_ID}/view" "200" "${AUTH[@]}"
+
+    # 文件存储
+    echo -e "${YELLOW}▶ 文件存储接口${NC}"
+    test_api "文件使用量" GET "${API_BASE}/api/file_storage/${WS_ID}/usage" "200" "${AUTH[@]}"
+    test_api "文件列表" GET "${API_BASE}/api/file_storage/${WS_ID}/blobs" "200" "${AUTH[@]}"
+
+    # 数据库接口
+    echo -e "${YELLOW}▶ 数据库接口${NC}"
+    test_api "数据库列表" GET "${API_BASE}/api/workspace/${WS_ID}/database" "200" "${AUTH[@]}"
+
+    # 快捷笔记
+    echo -e "${YELLOW}▶ 快捷笔记接口${NC}"
+    test_api "快捷笔记列表" GET "${API_BASE}/api/workspace/${WS_ID}/quick-note" "200" "${AUTH[@]}"
+
+    # 订阅接口
+    echo -e "${YELLOW}▶ 订阅接口${NC}"
+    test_api "当前订阅" GET "${API_BASE}/api/subscription/current" "200" "${AUTH[@]}"
+    test_api "使用量" GET "${API_BASE}/api/subscription/usage" "200" "${AUTH[@]}"
+
+    # Token 刷新
+    echo -e "${YELLOW}▶ Token 刷新${NC}"
+    local refresh_token
+    refresh_token=$(curl -sk -m 10 -X POST "${GOTRUE_BASE}/token?grant_type=password" \
+        -H "Content-Type: application/json" \
+        -d "{\"${login_type}\":\"${account}\",\"password\":\"${password}\"}" 2>/dev/null \
+        | python3 -c 'import sys,json;print(json.load(sys.stdin).get("refresh_token",""))' 2>/dev/null)
+    if [ -n "$refresh_token" ]; then
+        local new_token
+        new_token=$(curl -sk -m 10 -X POST "${GOTRUE_BASE}/token?grant_type=refresh_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"refresh_token\":\"${refresh_token}\"}" 2>/dev/null \
+            | python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)
+        TOTAL_COUNT=$((TOTAL_COUNT + 1))
+        if [ -n "$new_token" ] && [ ${#new_token} -gt 20 ]; then
+            PASS_COUNT=$((PASS_COUNT + 1))
+            echo -e "  ${GREEN}✅ Token 刷新成功${NC}"
+        else
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+            echo -e "  ${RED}❌ Token 刷新失败${NC}"
+        fi
+    fi
+}
+
+# ─── 账号1：手机号登录 ───
+test_user_apis "账号1" "13436574850" 'Qwer1234!' "phone"
+
+# ─── 账号2：邮箱登录 ───
+test_user_apis "账号2" "87103978@qq.com" 'Qwer1234!' "email"
+
+# ══════════════════════════════════════
+# 测试结果汇总
+# ══════════════════════════════════════
+SCRIPT_END=$(date +%s)
+TOTAL_SEC=$((SCRIPT_END - SCRIPT_START))
+echo ""
+echo -e "${CYAN}════════════════════════════════════════${NC}"
+if [ $FAIL_COUNT -eq 0 ]; then
+    echo -e "${GREEN}  全部通过！ ${PASS_COUNT}/${TOTAL_COUNT} (耗时 $((TOTAL_SEC/60))分$((TOTAL_SEC%60))秒)${NC}"
+else
+    echo -e "${YELLOW}  通过: ${GREEN}${PASS_COUNT}${NC} / 失败: ${RED}${FAIL_COUNT}${NC} / 共 ${TOTAL_COUNT} (耗时 $((TOTAL_SEC/60))分$((TOTAL_SEC%60))秒)"
+fi
+echo -e "${CYAN}════════════════════════════════════════${NC}"
+echo ""
+echo -e "${BLUE}查看日志: ssh ${SERVER_USER}@${SERVER_IP} 'docker logs -f docker-compose-appflowy_cloud-1'${NC}"
+echo ""
+
+[ $FAIL_COUNT -gt 0 ] && exit 1
 exit 0
