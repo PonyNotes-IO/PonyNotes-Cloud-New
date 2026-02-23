@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select * from af_collab_member_invite where send_uid = $1 AND received_uid IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "oid",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "send_uid",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "received_uid",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 4,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "permission_id",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "461ebfb6f9d9de3526d09a9baf3f0eb797ac4395af516a9c0c8110e5335b00ae"
+}
