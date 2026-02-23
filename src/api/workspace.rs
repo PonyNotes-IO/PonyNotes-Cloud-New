@@ -71,7 +71,6 @@ use collab_rt_entity::realtime_proto::HttpRealtimeMessage;
 use collab_rt_entity::user::RealtimeUser;
 use collab_rt_entity::RealtimeMessage;
 use collab_rt_protocol::collab_from_encode_collab;
-use database::user::select_uid_from_email;
 use database::pg_row::AFReceivedPublishedCollab;
 use database_entity::dto::PublishCollabItem;
 use database_entity::dto::PublishInfo;
@@ -2454,13 +2453,14 @@ async fn receive_published_collab_handler(
   .await
   .map_err(|e| AppResponseError::new(ErrorCode::Internal, e.to_string()))?;
 
-  // 获取发布者的uid
-  let published_by_uid = match &publish_info.publisher_email {
-    Some(email) => {
-      select_uid_from_email(&state.pg_pool, email).await.ok().unwrap_or(0)
-    },
-    None => 0,
-  };
+  // 直接从 af_published_collab 表查询发布者 uid（兼容手机号和邮箱注册用户）
+  let published_by_uid = sqlx::query_scalar!(
+    r#"SELECT published_by FROM af_published_collab WHERE view_id = $1"#,
+    params.published_view_id,
+  )
+  .fetch_one(&state.pg_pool)
+  .await
+  .map_err(|e| AppResponseError::new(ErrorCode::Internal, format!("Failed to get publisher uid: {}", e)))?;
 
   // 记录接收关系
   insert_received_published_collab(
