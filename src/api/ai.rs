@@ -514,65 +514,61 @@ async fn stream_chat_handler(
     );
   }
   
-  // 4. 如果有图片，上传到七牛云（豆包需要URL格式）
+  // 4. 如果有图片，根据模型决定处理方式
   let mut params = params;
   if params.has_images && params.images.is_some() {
-    if let Some(qiniu_client) = &state.qiniu_client {
-      let mut image_urls = Vec::new();
-      
-      if let Some(images) = &params.images {
-        for (idx, image_data) in images.iter().enumerate() {
-          // 判断是否已经是URL
-          if image_data.starts_with("http://") || image_data.starts_with("https://") {
-            // 已经是URL，直接使用
-            image_urls.push(image_data.clone());
-          } else {
-            // 是base64数据，需要上传到七牛云
-            match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, image_data) {
-              Ok(image_bytes) => {
-                // 生成对象存储key
-                let timestamp = std::time::SystemTime::now()
-                  .duration_since(std::time::UNIX_EPOCH)
-                  .unwrap()
-                  .as_millis();
-                let object_key = format!(
-                  "ai-chat-images/{}/{}-{}.jpg",
-                  workspace_id.to_string(),
-                  timestamp,
-                  idx
-                );
-                
-                // 上传到七牛云
-                match qiniu_client.upload_file(&object_key, image_bytes, "image/jpeg").await {
-                  Ok(url) => {
-                    info!("Image {} uploaded to Qiniu Cloud: {}", idx, url);
-                    image_urls.push(url);
+    match model {
+      AIModel::Qwen3VlPlus => {
+        info!("📸 [stream_chat] 通义千问支持 base64 data URL，跳过对象存储上传");
+      },
+      AIModel::Doubao => {
+        if let Some(qiniu_client) = &state.qiniu_client {
+          let mut image_urls = Vec::new();
+          if let Some(images) = &params.images {
+            for (idx, image_data) in images.iter().enumerate() {
+              if image_data.starts_with("http://") || image_data.starts_with("https://") {
+                image_urls.push(image_data.clone());
+              } else {
+                match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, image_data) {
+                  Ok(image_bytes) => {
+                    let timestamp = std::time::SystemTime::now()
+                      .duration_since(std::time::UNIX_EPOCH)
+                      .unwrap()
+                      .as_millis();
+                    let object_key = format!(
+                      "ai-chat-images/{}/{}-{}.jpg",
+                      workspace_id.to_string(),
+                      timestamp,
+                      idx
+                    );
+                    match qiniu_client.upload_file(&object_key, image_bytes, "image/jpeg").await {
+                      Ok(url) => {
+                        info!("Image {} uploaded to Qiniu Cloud: {}", idx, url);
+                        image_urls.push(url);
+                      },
+                      Err(e) => {
+                        error!("Failed to upload image {} to Qiniu Cloud: {}", idx, e);
+                        image_urls.push(image_data.clone());
+                      }
+                    }
                   },
                   Err(e) => {
-                    error!("Failed to upload image {} to Qiniu Cloud: {}", idx, e);
-                    // 如果上传失败，保留base64（对于不需要URL的模型）
-                    image_urls.push(image_data.clone());
+                    error!("Failed to decode base64 image {}: {}", idx, e);
                   }
                 }
-              },
-              Err(e) => {
-                error!("Failed to decode base64 image {}: {}", idx, e);
-                // 解码失败，跳过此图片
               }
             }
           }
+          if !image_urls.is_empty() {
+            params.images = Some(image_urls);
+          }
+        } else {
+          warn!("Qiniu Cloud not configured, Doubao requires image URLs");
         }
-      }
-      
-      // 更新params中的图片数据为URL
-      if !image_urls.is_empty() {
-        params.images = Some(image_urls);
-        trace!("Updated {} image(s) to URL format", params.images.as_ref().unwrap().len());
-      } else {
-        warn!("No valid images after processing");
-      }
-    } else {
-      warn!("Qiniu Cloud not configured, images will be sent as base64 (may not work with Doubao)");
+      },
+      AIModel::DeepSeek => {
+        info!("⚠️ [stream_chat] DeepSeek 不支持多模态图片");
+      },
     }
   }
   
@@ -835,73 +831,85 @@ async fn public_chat_session_handler(
     );
   }
   
-  // 5. 如果有图片，上传到七牛云（豆包需要URL格式）
+  // 5. 如果有图片，根据模型决定处理方式
+  //    - 通义千问(Qwen)：支持 base64 data URL，直接保留 base64 数据即可
+  //    - 豆包(Doubao)：只支持 HTTP(S) URL，需要上传到对象存储
+  //    - DeepSeek：不支持多模态，跳过图片处理
   let mut params = params;
   if params.has_images && params.images.is_some() {
-    info!("📸 [AI会话] 检测到图片数据，准备处理...");
-    if let Some(qiniu_client) = &state.qiniu_client {
-      info!("✅ [AI会话] 七牛云客户端已配置，开始上传图片");
-      let mut image_urls = Vec::new();
-      
-      if let Some(images) = &params.images {
-        for (idx, image_data) in images.iter().enumerate() {
-          // 判断是否已经是URL
-          if image_data.starts_with("http://") || image_data.starts_with("https://") {
-            // 已经是URL，直接使用
-            image_urls.push(image_data.clone());
-          } else {
-            // 是base64数据，需要上传到七牛云
-            match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, image_data) {
-              Ok(image_bytes) => {
-                // 生成对象存储key
-                let timestamp = std::time::SystemTime::now()
-                  .duration_since(std::time::UNIX_EPOCH)
-                  .unwrap()
-                  .as_millis();
-                let object_key = format!(
-                  "ai-chat-images/{}/{}-{}.jpg",
-                  user_uuid.to_string(),
-                  timestamp,
-                  idx
-                );
-                
-                info!("🔄 [AI会话] 开始上传图片 {} 到七牛云，key: {}", idx, object_key);
-                
-                // 上传到七牛云
-                match qiniu_client.upload_file(&object_key, image_bytes, "image/jpeg").await {
-                  Ok(url) => {
-                    info!("✅ [AI会话] 图片 {} 上传成功！URL: {}", idx, url);
-                    image_urls.push(url);
+    info!("📸 [AI会话] 检测到图片数据，模型: {:?}，准备处理...", model);
+    
+    match model {
+      AIModel::Qwen3VlPlus => {
+        // 通义千问支持 OpenAI 兼容格式的 base64 data URL，不需要上传到对象存储
+        // build_messages_for_openai_compatible 会自动添加 "data:image/jpeg;base64," 前缀
+        info!("📸 [AI会话] 通义千问支持 base64 data URL，跳过对象存储上传，直接使用 base64 数据");
+        let image_count = params.images.as_ref().map(|v| v.len()).unwrap_or(0);
+        info!("📸 [AI会话] 保留 {} 张图片的 base64 数据", image_count);
+      },
+      AIModel::Doubao => {
+        // 豆包只支持 HTTP(S) URL，需要上传到七牛云
+        info!("📸 [AI会话] 豆包需要 URL 格式，准备上传到七牛云");
+        if let Some(qiniu_client) = &state.qiniu_client {
+          info!("✅ [AI会话] 七牛云客户端已配置，开始上传图片");
+          let mut image_urls = Vec::new();
+          
+          if let Some(images) = &params.images {
+            for (idx, image_data) in images.iter().enumerate() {
+              if image_data.starts_with("http://") || image_data.starts_with("https://") {
+                image_urls.push(image_data.clone());
+              } else {
+                match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, image_data) {
+                  Ok(image_bytes) => {
+                    let timestamp = std::time::SystemTime::now()
+                      .duration_since(std::time::UNIX_EPOCH)
+                      .unwrap()
+                      .as_millis();
+                    let object_key = format!(
+                      "ai-chat-images/{}/{}-{}.jpg",
+                      user_uuid.to_string(),
+                      timestamp,
+                      idx
+                    );
+                    
+                    info!("🔄 [AI会话] 开始上传图片 {} 到七牛云，key: {}", idx, object_key);
+                    
+                    match qiniu_client.upload_file(&object_key, image_bytes, "image/jpeg").await {
+                      Ok(url) => {
+                        info!("✅ [AI会话] 图片 {} 上传成功！URL: {}", idx, url);
+                        image_urls.push(url);
+                      },
+                      Err(e) => {
+                        error!("❌ [AI会话] 图片 {} 上传失败: {}", idx, e);
+                        image_urls.push(image_data.clone());
+                      }
+                    }
                   },
                   Err(e) => {
-                    error!("❌ [AI会话] 图片 {} 上传失败: {}", idx, e);
-                    // 如果上传失败，保留base64（对于不需要URL的模型）
-                    image_urls.push(image_data.clone());
+                    error!("❌ [AI会话] 图片 {} base64解码失败: {}", idx, e);
                   }
                 }
-              },
-              Err(e) => {
-                error!("❌ [AI会话] 图片 {} base64解码失败: {}", idx, e);
-                // 解码失败，跳过此图片
               }
             }
           }
+          
+          if !image_urls.is_empty() {
+            info!("✅ [AI会话] 图片处理完成，共 {} 张图片转换为URL", image_urls.len());
+            for (i, url) in image_urls.iter().enumerate() {
+              info!("   图片 {}: {}", i, url);
+            }
+            params.images = Some(image_urls);
+          } else {
+            error!("❌ [AI会话] 图片处理后没有有效的图片数据");
+          }
+        } else {
+          error!("❌ [AI会话] 七牛云客户端未配置！豆包模型需要图片URL，无法处理");
+          error!("   请检查环境变量：QINIU_ENABLED, QINIU_ACCESS_KEY, QINIU_SECRET_KEY");
         }
-      }
-      
-      // 更新params中的图片数据为URL
-      if !image_urls.is_empty() {
-        info!("✅ [AI会话] 图片处理完成，共 {} 张图片转换为URL", image_urls.len());
-        for (i, url) in image_urls.iter().enumerate() {
-          info!("   图片 {}: {}", i, url);
-        }
-        params.images = Some(image_urls);
-      } else {
-        error!("❌ [AI会话] 图片处理后没有有效的图片数据");
-      }
-    } else {
-      error!("❌ [AI会话] 七牛云客户端未配置！无法上传图片");
-      error!("   请检查环境变量：QINIU_ENABLED, QINIU_ACCESS_KEY, QINIU_SECRET_KEY");
+      },
+      AIModel::DeepSeek => {
+        info!("⚠️ [AI会话] DeepSeek 不支持多模态图片，图片数据将被忽略");
+      },
     }
   } else {
     info!("ℹ️ [AI会话] 本次请求不包含图片");
