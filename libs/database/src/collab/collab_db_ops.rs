@@ -716,7 +716,10 @@ where
 {
   let list = sqlx::query_as!(
     AFCollabMemberInvite,
-    "select * from af_collab_member_invite where send_uid = $1 AND received_uid IS NOT NULL",
+    r#"SELECT DISTINCT ON (oid) oid, send_uid, received_uid, created_at, name, permission_id
+       FROM af_collab_member_invite
+       WHERE send_uid = $1
+       ORDER BY oid, created_at DESC"#,
     uid
   )
   .fetch_all(executor)

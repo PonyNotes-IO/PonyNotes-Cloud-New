@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "select * from af_collab_member_invite where send_uid = $1 AND received_uid IS NOT NULL",
+  "query": "SELECT DISTINCT ON (oid) oid, send_uid, received_uid, created_at, name, permission_id\n       FROM af_collab_member_invite\n       WHERE send_uid = $1\n       ORDER BY oid, created_at DESC",
   "describe": {
     "columns": [
       {
@@ -48,5 +48,5 @@
       false
     ]
   },
-  "hash": "461ebfb6f9d9de3526d09a9baf3f0eb797ac4395af516a9c0c8110e5335b00ae"
+  "hash": "8a63724c366aed268c2d028c2e858656f5467939478e231e9f3ba23f94a47fbb"
 }
