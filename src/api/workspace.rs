@@ -2483,26 +2483,25 @@ async fn receive_published_collab_handler(
 }
 
 /// 查询接收的发布文档只读状态
-/// 用于判断用户是否有权限编辑接收的发布文档
-/// 注意：view_id 参数是 published_view_id（原始发布的文档ID），不是复制后的 view_id
+/// 客户端传递的是复制后的 view_id（即接收者工作区中的文档ID）
+/// 同时兼容 published_view_id 查询，以支持两种调用方式
 async fn get_received_published_collab_readonly_handler(
   user_uuid: UserUuid,
   state: Data<AppState>,
   view_id: web::Path<Uuid>,
 ) -> Result<Json<AppResponse<ReceivedPublishedCollabReadonlyResponse>>> {
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
-  let published_view_id = view_id.into_inner();
+  let query_view_id = view_id.into_inner();
 
-  // 查询用户是否接收过这个发布文档
-  // 注意：使用 published_view_id 而不是 view_id，因为客户端传递的是原始发布的文档ID
+  // 先按 view_id（复制后的ID）查询，再按 published_view_id（原始ID）查询
   let received = sqlx::query_as!(
     AFReceivedPublishedCollab,
     r#"
       SELECT * FROM af_received_published_collab
-      WHERE received_by = $1 AND published_view_id = $2
+      WHERE received_by = $1 AND (view_id = $2 OR published_view_id = $2)
     "#,
     uid,
-    published_view_id,
+    query_view_id,
   )
   .fetch_optional(&state.pg_pool)
   .await
@@ -2713,10 +2712,28 @@ async fn post_publish_collabs_handler(
   let total_data_size: i64 = accumulator.iter().map(|item| item.data.len() as i64).sum();
   check_user_storage_limit(&state.pg_pool, uid, total_data_size).await?;
 
+  // 收集即将发布的 view_id 列表（用于后续清理旧接收记录）
+  let published_view_ids: Vec<Uuid> = accumulator
+    .iter()
+    .map(|item| item.meta.view_id)
+    .collect();
+
   state
     .published_collab_store
     .publish_collabs(accumulator, &workspace_id, &user_uuid)
     .await?;
+
+  // 重新发布时，删除所有用户已接收的旧副本记录
+  // 这样其他用户下次通过链接打开时会生成新的只读副本
+  for view_id in &published_view_ids {
+    let _ = sqlx::query!(
+      r#"DELETE FROM af_received_published_collab WHERE published_view_id = $1"#,
+      view_id,
+    )
+    .execute(&state.pg_pool)
+    .await;
+  }
+
   Ok(Json(AppResponse::Ok()))
 }
 
