@@ -343,15 +343,16 @@ pub async fn set_published_collabs_as_unpublished(
   // 先删除所有接收者的记录，再删除发布记录
   delete_received_published_collabs_by_view_ids(pg_pool, view_ids).await?;
 
-  let res = sqlx::query!(
+  // 使用非宏查询避免 SQLX 离线缓存问题
+  let res = sqlx::query(
     r#"
       DELETE FROM af_published_collab
       WHERE workspace_id = $1
         AND view_id = ANY($2)
     "#,
-    workspace_id,
-    view_ids,
   )
+  .bind(workspace_id)
+  .bind(view_ids)
   .execute(pg_pool)
   .await?;
 
@@ -372,13 +373,14 @@ pub async fn delete_received_published_collabs_by_view_ids(
   pg_pool: &PgPool,
   view_ids: &[Uuid],
 ) -> Result<(), AppError> {
-  let res = sqlx::query!(
+  // 使用非宏查询避免 SQLX 离线缓存问题
+  let res = sqlx::query(
     r#"
       DELETE FROM af_received_published_collab
       WHERE published_view_id = ANY($1)
     "#,
-    view_ids,
   )
+  .bind(view_ids)
   .execute(pg_pool)
   .await?;
 
