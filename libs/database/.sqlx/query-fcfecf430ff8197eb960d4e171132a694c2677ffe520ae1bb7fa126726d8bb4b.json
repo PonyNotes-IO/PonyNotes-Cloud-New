@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM af_received_published_collab WHERE published_view_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fcfecf430ff8197eb960d4e171132a694c2677ffe520ae1bb7fa126726d8bb4b"
+}

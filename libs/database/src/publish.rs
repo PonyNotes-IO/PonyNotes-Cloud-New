@@ -335,24 +335,24 @@ pub async fn select_publish_collab_meta<'a, E: Executor<'a, Database = Postgres>
 }
 
 #[inline]
-pub async fn set_published_collabs_as_unpublished<'a, E: Executor<'a, Database = Postgres>>(
-  executor: E,
+pub async fn set_published_collabs_as_unpublished(
+  pg_pool: &PgPool,
   workspace_id: &Uuid,
   view_ids: &[Uuid],
 ) -> Result<(), AppError> {
+  // 先删除所有接收者的记录，再删除发布记录
+  delete_received_published_collabs_by_view_ids(pg_pool, view_ids).await?;
+
   let res = sqlx::query!(
     r#"
-      UPDATE af_published_collab
-      SET
-        blob = E''::bytea,
-        unpublished_at = NOW()
+      DELETE FROM af_published_collab
       WHERE workspace_id = $1
         AND view_id = ANY($2)
     "#,
     workspace_id,
     view_ids,
   )
-  .execute(executor)
+  .execute(pg_pool)
   .await?;
 
   if res.rows_affected() != view_ids.len() as u64 {
@@ -363,6 +363,30 @@ pub async fn set_published_collabs_as_unpublished<'a, E: Executor<'a, Database =
       res.rows_affected()
     );
   }
+
+  Ok(())
+}
+
+/// 根据 view_ids 删除所有接收该发布文档的用户记录
+pub async fn delete_received_published_collabs_by_view_ids(
+  pg_pool: &PgPool,
+  view_ids: &[Uuid],
+) -> Result<(), AppError> {
+  let res = sqlx::query!(
+    r#"
+      DELETE FROM af_received_published_collab
+      WHERE published_view_id = ANY($1)
+    "#,
+    view_ids,
+  )
+  .execute(pg_pool)
+  .await?;
+
+  tracing::info!(
+    "Deleted {} received published collab records for view_ids: {:?}",
+    res.rows_affected(),
+    view_ids
+  );
 
   Ok(())
 }

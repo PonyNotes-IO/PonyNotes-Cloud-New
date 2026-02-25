@@ -404,6 +404,7 @@ impl PublishedCollabStore for PublishedCollabPostgresStore {
     user_uuid: &Uuid,
   ) -> Result<(), AppError> {
     check_workspace_owner_or_publisher(&self.pg_pool, user_uuid, workspace_id, view_ids).await?;
+    // 同时删除 af_published_collab 和 af_received_published_collab 中的记录
     set_published_collabs_as_unpublished(&self.pg_pool, workspace_id, view_ids).await?;
     Ok(())
   }
@@ -595,6 +596,7 @@ impl PublishedCollabStore for PublishedCollabS3StoreWithPostgresFallback {
       .map(|view_id| get_collab_s3_key(workspace_id, view_id))
       .collect::<Vec<String>>();
     self.bucket_client.delete_blobs(object_keys).await?;
+    // 同时删除 af_published_collab 和 af_received_published_collab 中的记录
     set_published_collabs_as_unpublished(&self.pg_pool, workspace_id, view_ids).await?;
     Ok(())
   }
