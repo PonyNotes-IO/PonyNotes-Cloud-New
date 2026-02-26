@@ -3662,6 +3662,31 @@ async fn add_collab_member_handler(
           view_id, received_uid, invite.permission_id);
       }
       
+      // 【关键修复】无论 af_collab_member 是否是新插入的，都必须更新 Casbin 内存策略。
+      // 原因：Casbin 仅在服务器启动时从数据库加载策略，运行时插入 af_collab_member
+      // 后不会自动更新 Casbin 内存缓存，必须显式调用 update_access_level_policy。
+      // 若不调用，can_write_collab / can_read_collab 将因找不到策略而拒绝协作。
+      let access_level = match invite.permission_id {
+        2 => AFAccessLevel::ReadAndComment,
+        3 => AFAccessLevel::ReadAndWrite,
+        4 => AFAccessLevel::FullAccess,
+        _ => AFAccessLevel::ReadOnly,
+      };
+      if let Err(e) = state.collab_access_control
+        .update_access_level_policy(&received_uid, &view_id, access_level)
+        .await
+      {
+        tracing::error!(
+          "failed to update casbin access level policy for uid={}, oid={}: {}",
+          received_uid, view_id, e
+        );
+      } else {
+        tracing::info!(
+          "updated casbin policy: uid={}, oid={}, permission_id={}",
+          received_uid, view_id, invite.permission_id
+        );
+      }
+      
       return Ok(Json(AppResponse::Ok()));
     }
     
