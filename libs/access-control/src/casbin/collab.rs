@@ -73,11 +73,9 @@ impl CollabAccessControl for CollabAccessControlImpl {
     &self,
     workspace_id: &Uuid,
     uid: &i64,
-    _oid: &Uuid,
+    oid: &Uuid,
     access_level: AFAccessLevel,
   ) -> Result<(), AppError> {
-    // TODO: allow non workspace member to read a collab.
-
     // Anyone who can write to a workspace, also have full access to a collab.
     let workspace_action = match access_level {
       AFAccessLevel::ReadOnly => Action::Read,
@@ -86,6 +84,22 @@ impl CollabAccessControl for CollabAccessControlImpl {
       AFAccessLevel::FullAccess => Action::Write,
     };
 
+    // 优先检查文档级（collab-level）权限，允许分享链接用户访问特定文档。
+    let collab_result = self
+      .access_control
+      .enforce_immediately(
+        uid,
+        ObjectType::Collab(oid.to_string()),
+        workspace_action.clone(),
+      )
+      .await;
+    match collab_result {
+      Ok(true) => return Ok(()),
+      Err(e) => return Err(e),
+      _ => {},
+    }
+
+    // 回退到工作区级权限。
     let result = self
       .access_control
       .enforce_immediately(
@@ -138,11 +152,9 @@ impl RealtimeCollabAccessControlImpl {
     &self,
     workspace_id: &Uuid,
     uid: &i64,
-    _oid: &Uuid,
+    oid: &Uuid,
     required_action: Action,
   ) -> Result<bool, AppError> {
-    // TODO: allow non workspace member to read a collab.
-
     // Anyone who can write to a workspace, can also delete a collab.
     let workspace_action = match required_action {
       Action::Read => Action::Read,
@@ -150,6 +162,24 @@ impl RealtimeCollabAccessControlImpl {
       Action::Delete => Action::Write,
     };
 
+    // 优先检查文档级（collab-level）权限：适用于通过分享链接获得权限的用户。
+    // 分享链接用户不是工作区成员，但持有针对特定文档的 collab 级策略，
+    // 应当允许他们进行实时协作（读/写）。
+    let collab_result = self
+      .access_control
+      .enforce_immediately(
+        uid,
+        ObjectType::Collab(oid.to_string()),
+        workspace_action.clone(),
+      )
+      .await;
+    match collab_result {
+      Ok(true) => return Ok(true),
+      Err(e) => return Err(e),
+      _ => {},
+    }
+
+    // 回退到工作区级（workspace-level）权限：适用于工作区正式成员。
     self
       .access_control
       .enforce_immediately(
