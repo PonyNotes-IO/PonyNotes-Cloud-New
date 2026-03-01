@@ -23,15 +23,15 @@ impl PlanLimits {
     match plan {
       SubscriptionPlan::Free => PlanLimits {
         member_limit: i64::MAX, // Local use: unlimited members
-        storage_bytes_limit: 0,
+        storage_bytes_limit: 300 * 1024 * 1024, // 300MB
         ai_responses_limit: 10, // Free users: 10 AI responses per month
-        single_upload_limit: 0,
-        storage_unlimited: true,
+        single_upload_limit: 5 * 1024 * 1024, // 5MB
+        storage_unlimited: false,
         ai_unlimited: false,
       },
       SubscriptionPlan::Basic => PlanLimits {
         member_limit: 2,
-        storage_bytes_limit: 2 * 1024 * 1024 * 1024, // 2GB
+        storage_bytes_limit: 10 * 1024 * 1024 * 1024, // 10GB
         ai_responses_limit: 10,
         single_upload_limit: 5 * 1024 * 1024, // 5MB
         storage_unlimited: false,
@@ -39,7 +39,7 @@ impl PlanLimits {
       },
       SubscriptionPlan::Pro => PlanLimits {
         member_limit: 5,
-        storage_bytes_limit: 10 * 1024 * 1024 * 1024, // 10GB
+        storage_bytes_limit: 50 * 1024 * 1024 * 1024, // 50GB
         ai_responses_limit: 40,
         single_upload_limit: 10 * 1024 * 1024, // 10MB
         storage_unlimited: false,
@@ -47,7 +47,7 @@ impl PlanLimits {
       },
       SubscriptionPlan::Team => PlanLimits {
         member_limit: 10,
-        storage_bytes_limit: 20 * 1024 * 1024 * 1024, // 20GB
+        storage_bytes_limit: 150 * 1024 * 1024 * 1024, // 150GB
         ai_responses_limit: 120,
         single_upload_limit: 20 * 1024 * 1024, // 20MB
         storage_unlimited: false,
@@ -105,15 +105,17 @@ mod tests {
   fn test_free_plan_limits() {
     let limits = PlanLimits::from_plan(&SubscriptionPlan::Free);
     assert_eq!(limits.member_limit, i64::MAX);
-    assert!(limits.storage_unlimited);
-    assert_eq!(limits.ai_responses_limit, 0);
+    assert!(!limits.storage_unlimited);
+    assert_eq!(limits.storage_bytes_limit, 300 * 1024 * 1024);
+    assert_eq!(limits.ai_responses_limit, 10);
+    assert_eq!(limits.single_upload_limit, 5 * 1024 * 1024);
   }
 
   #[test]
   fn test_basic_plan_limits() {
     let limits = PlanLimits::from_plan(&SubscriptionPlan::Basic);
     assert_eq!(limits.member_limit, 2);
-    assert_eq!(limits.storage_bytes_limit, 2 * 1024 * 1024 * 1024);
+    assert_eq!(limits.storage_bytes_limit, 10 * 1024 * 1024 * 1024);
     assert_eq!(limits.ai_responses_limit, 10);
     assert_eq!(limits.single_upload_limit, 5 * 1024 * 1024);
   }
@@ -122,7 +124,7 @@ mod tests {
   fn test_pro_plan_limits() {
     let limits = PlanLimits::from_plan(&SubscriptionPlan::Pro);
     assert_eq!(limits.member_limit, 5);
-    assert_eq!(limits.storage_bytes_limit, 10 * 1024 * 1024 * 1024);
+    assert_eq!(limits.storage_bytes_limit, 50 * 1024 * 1024 * 1024);
     assert_eq!(limits.ai_responses_limit, 40);
     assert_eq!(limits.single_upload_limit, 10 * 1024 * 1024);
   }
@@ -131,7 +133,7 @@ mod tests {
   fn test_team_plan_limits() {
     let limits = PlanLimits::from_plan(&SubscriptionPlan::Team);
     assert_eq!(limits.member_limit, 10);
-    assert_eq!(limits.storage_bytes_limit, 20 * 1024 * 1024 * 1024);
+    assert_eq!(limits.storage_bytes_limit, 150 * 1024 * 1024 * 1024);
     assert_eq!(limits.ai_responses_limit, 120);
     assert_eq!(limits.single_upload_limit, 20 * 1024 * 1024);
   }
@@ -143,6 +145,7 @@ mod tests {
     assert_eq!(limits.ai_responses_limit, i64::MAX);
     // Should inherit Pro's other limits
     assert_eq!(limits.member_limit, 5);
+    assert_eq!(limits.storage_bytes_limit, 50 * 1024 * 1024 * 1024);
   }
 
   #[test]
@@ -156,8 +159,9 @@ mod tests {
   fn test_can_add_storage() {
     let limits = PlanLimits::from_plan(&SubscriptionPlan::Basic);
     let gb = 1024 * 1024 * 1024;
-    assert!(limits.can_add_storage(gb, gb)); // 1GB + 1GB = 2GB, within limit
-    assert!(!limits.can_add_storage(gb, 2 * gb)); // 1GB + 2GB = 3GB, exceeds limit
+    assert!(limits.can_add_storage(gb, gb)); // 1GB + 1GB = 2GB, within 10GB limit
+    assert!(limits.can_add_storage(5 * gb, 5 * gb)); // 5GB + 5GB = 10GB, within 10GB limit
+    assert!(!limits.can_add_storage(5 * gb, 6 * gb)); // 5GB + 6GB = 11GB, exceeds 10GB limit
   }
 
   #[test]
