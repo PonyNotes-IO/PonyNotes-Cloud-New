@@ -349,7 +349,17 @@ pub async fn check_user_storage_limit(
   let resource_status = get_user_resource_limit_status(pg_pool, uid).await?;
   let total_limit_bytes = (resource_status.storage_limit_mb * STORAGE_MB_IN_BYTES) as i64;
   let current_usage = get_user_total_usage_bytes(pg_pool, uid).await?;
+  
+  log::info!(
+    "[STORAGE_CHECK] uid: {}, current_usage: {} bytes, limit: {} bytes, data_size: {} bytes, plan: {}",
+    uid, current_usage, total_limit_bytes, data_size_bytes, resource_status.plan_code
+  );
+  
   if current_usage + data_size_bytes > total_limit_bytes {
+    log::error!(
+      "[STORAGE_CHECK] Storage limit exceeded! uid: {}, current: {}, limit: {}, data: {}",
+      uid, current_usage, total_limit_bytes, data_size_bytes
+    );
     return Err(AppError::PlanLimitExceeded(format!(
       "Storage limit exceeded. Current: {} bytes, Limit: {} bytes, Data: {} bytes",
       current_usage, total_limit_bytes, data_size_bytes
