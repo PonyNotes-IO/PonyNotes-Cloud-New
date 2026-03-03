@@ -203,18 +203,11 @@ pub fn workspace_scope() -> Scope {
                 .route(web::post().to(create_share_link_invite_handler)),
         )
         .service(
-            // 添加协作成员（给自己或别人）
+            // 协作成员管理：添加(POST)、修改权限(PATCH)、删除(DELETE)
+            // 注意：必须合并到同一 resource，否则 Actix-web 后注册的同路径会覆盖前面的，导致 PATCH 返回 405
             web::resource("/{workspace_id}/collab/{object_id}/members/{member_user_id}")
-                .route(web::post().to(add_collab_member_handler)),
-        )
-        .service(
-            // 修改已有协作成员的权限
-            web::resource("/{workspace_id}/collab/{object_id}/members/{member_user_id}")
-                .route(web::patch().to(update_collab_member_permission_handler)),
-        )
-        .service(
-            // 删除协作成员
-            web::resource("/{workspace_id}/collab/{object_id}/members/{member_user_id}")
+                .route(web::post().to(add_collab_member_handler))
+                .route(web::patch().to(update_collab_member_permission_handler))
                 .route(web::delete().to(remove_collab_member_handler)),
         )
         .service(
