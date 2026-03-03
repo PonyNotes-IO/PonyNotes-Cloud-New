@@ -2,6 +2,7 @@ use access_control::collab::CollabAccessControl;
 use app_error::AppError;
 use database::workspace::{
   insert_collab_member, select_collab_owner, select_permission, update_collab_member_permission,
+  update_collab_member_invite_permission,
 };
 use database_entity::dto::AFAccessLevel;
 use sqlx::PgPool;
@@ -76,6 +77,9 @@ pub async fn edit_collab_member_permission(
     .ok_or(AppError::InvalidRequest("无效的权限id".to_string()))?;
 
   update_collab_member_permission(pg_pool, view_id, uid, new_permission_id).await?;
+
+  // 同步更新 af_collab_member_invite 表中的权限，保持邀请记录与实际权限一致
+  update_collab_member_invite_permission(pg_pool, view_id, uid, new_permission_id).await?;
 
   // 同步更新 Casbin 权限策略
   access_control

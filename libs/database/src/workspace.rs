@@ -2274,3 +2274,29 @@ pub async fn update_collab_member_permission(
 
   Ok(())
 }
+
+/// 同步更新 af_collab_member_invite 表中对应成员的 permission_id，
+/// 使邀请记录与实际权限保持一致。
+/// 使用非宏版 sqlx::query 以兼容 SQLX_OFFLINE 构建模式。
+pub async fn update_collab_member_invite_permission(
+  executor: &PgPool,
+  view_id: &Uuid,
+  received_uid: i64,
+  new_permission_id: i32,
+) -> Result<(), AppError> {
+  let view_id = view_id.to_string();
+  sqlx::query(
+    r#"
+      UPDATE af_collab_member_invite
+      SET permission_id = $1
+      WHERE oid = $2 AND received_uid = $3
+    "#,
+  )
+  .bind(new_permission_id)
+  .bind(&view_id)
+  .bind(received_uid)
+  .execute(executor)
+  .await?;
+
+  Ok(())
+}
