@@ -123,7 +123,16 @@ pub async fn remove_collab_member(
   // 3. 删除 af_collab_member 表中的记录
   delete_collab_member(pg_pool, uid, oid).await?;
 
-  // 4. 删除 Casbin 访问控制策略
+  // 4. 同步删除 af_collab_member_invite 中的邀请记录
+  let _ = sqlx::query(
+    "DELETE FROM af_collab_member_invite WHERE oid = $1 AND received_uid = $2",
+  )
+  .bind(oid)
+  .bind(uid)
+  .execute(pg_pool)
+  .await;
+
+  // 5. 删除 Casbin 访问控制策略
   access_control
     .remove_access_level(&uid, view_id)
     .await?;
