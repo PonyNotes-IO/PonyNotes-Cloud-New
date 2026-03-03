@@ -56,7 +56,7 @@ impl AggregateMessageQueue {
     let maximum_payload_size = self.maximum_payload_size;
     let weak_queue = Arc::downgrade(&self.queue);
     let weak_seen_ids = Arc::downgrade(&self.seen_ids);
-    let interval_duration = Duration::from_millis(1000);
+    let interval_duration = Duration::from_millis(200);
     let mut next_tick = Instant::now() + interval_duration;
     tokio::spawn(async move {
       loop {
@@ -225,14 +225,14 @@ fn calculate_next_tick_duration(
   default_interval: Duration,
 ) -> Duration {
   if cfg!(feature = "test_util") {
-    Duration::from_millis(500)
+    Duration::from_millis(200)
   } else if num_messages == 0 {
-    Duration::from_secs(1)
+    default_interval
   } else {
     match num_init_sync {
       0..=10 => default_interval,
-      11..=20 => Duration::from_secs(2),
-      _ => Duration::from_secs(4),
+      11..=20 => Duration::from_millis(500),
+      _ => Duration::from_secs(1),
     }
   }
 }

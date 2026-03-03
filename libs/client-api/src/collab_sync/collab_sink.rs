@@ -17,8 +17,8 @@ use crate::collab_sync::collab_stream::SeqNumCounter;
 use crate::collab_sync::{SinkConfig, SyncError, SyncObject};
 use collab_rt_entity::{ClientCollabMessage, MsgId, ServerCollabMessage, SinkMessage};
 
-pub(crate) const SEND_INTERVAL: Duration = Duration::from_secs(8);
-pub const COLLAB_SINK_DELAY_MILLIS: u64 = 500;
+pub(crate) const SEND_INTERVAL: Duration = Duration::from_secs(3);
+pub const COLLAB_SINK_DELAY_MILLIS: u64 = 100;
 
 pub struct CollabSink<Sink> {
   uid: i64,
