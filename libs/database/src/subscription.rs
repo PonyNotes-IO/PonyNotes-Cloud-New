@@ -41,6 +41,8 @@ pub struct UserSubscriptionRow {
   pub end_date: DateTime<Utc>,
   pub canceled_at: Option<DateTime<Utc>>,
   pub cancel_reason: Option<String>,
+  pub grace_period_end: Option<DateTime<Utc>>,
+  pub downgraded_from_plan_id: Option<i32>,
 }
 
 #[derive(Debug, Clone)]
@@ -237,15 +239,15 @@ pub async fn get_subscription_plan(
 /// 获取免费版订阅计划ID (plan_code = 'mfb')
 #[instrument(skip_all, err)]
 pub async fn get_free_plan_id(pg_pool: &PgPool) -> Result<i64, AppError> {
-  let plan_id: i64 = sqlx::query_scalar!(
+  let row: (i64,) = sqlx::query_as(
     r#"
-    SELECT id FROM af_subscription_plans WHERE plan_code = 'mfb' AND is_active = TRUE
+    SELECT id::BIGINT FROM af_subscription_plans WHERE plan_code = 'mfb' AND is_active = TRUE
     "#,
   )
   .fetch_one(pg_pool)
   .await?;
 
-  Ok(plan_id)
+  Ok(row.0)
 }
 
 /// 为用户创建免费版订阅（如果不存在）
@@ -266,31 +268,32 @@ pub async fn get_or_create_free_subscription(
   let start_date = Utc::now();
   let end_date = start_date + chrono::Duration::days(365);
 
-  // 插入新订阅
-  let row = sqlx::query!(
+  let row = sqlx::query(
     r#"
     INSERT INTO af_user_subscriptions (uid, plan_id, billing_type, status, start_date, end_date)
     VALUES ($1, $2, 'monthly', 'active', $3, $4)
-    RETURNING id, uid, plan_id, billing_type, status, start_date, end_date, canceled_at, cancel_reason
+    RETURNING id, uid, plan_id, billing_type, status, start_date, end_date, canceled_at, cancel_reason, grace_period_end, downgraded_from_plan_id
     "#,
-    uid,
-    free_plan_id,
-    start_date,
-    end_date
   )
+  .bind(uid)
+  .bind(free_plan_id)
+  .bind(start_date)
+  .bind(end_date)
   .fetch_one(pg_pool)
   .await?;
 
   Ok(UserSubscriptionRow {
-    id: row.id,
-    uid: row.uid,
-    plan_id: row.plan_id,
-    billing_type: row.billing_type,
-    status: row.status,
-    start_date: row.start_date,
-    end_date: row.end_date,
-    canceled_at: row.canceled_at,
-    cancel_reason: row.cancel_reason,
+    id: row.get(0),
+    uid: row.get(1),
+    plan_id: row.get(2),
+    billing_type: row.get(3),
+    status: row.get(4),
+    start_date: row.get(5),
+    end_date: row.get(6),
+    canceled_at: row.get(7),
+    cancel_reason: row.get(8),
+    grace_period_end: row.get(9),
+    downgraded_from_plan_id: row.get(10),
   })
 }
 
@@ -302,9 +305,10 @@ pub async fn get_user_recently_expired_subscription(
   let row = sqlx::query(
     r#"
     SELECT id, uid, plan_id, billing_type, status,
-           start_date, end_date, canceled_at, cancel_reason
+           start_date, end_date, canceled_at, cancel_reason,
+           grace_period_end, downgraded_from_plan_id
     FROM af_user_subscriptions
-    WHERE uid = $1 AND (status = 'active' OR status = 'canceled') AND end_date <= NOW()
+    WHERE uid = $1 AND (status = 'active' OR status = 'canceled' OR status = 'expired') AND end_date <= NOW()
     ORDER BY end_date DESC
     LIMIT 1
     "#,
@@ -324,6 +328,8 @@ pub async fn get_user_recently_expired_subscription(
       end_date: row.get(6),
       canceled_at: row.get(7),
       cancel_reason: row.get(8),
+      grace_period_end: row.get(9),
+      downgraded_from_plan_id: row.get(10),
     }))
   } else {
     Ok(None)
@@ -339,7 +345,8 @@ pub async fn get_user_active_subscription(
   let row = sqlx::query(
     r#"
     SELECT id, uid, plan_id, billing_type, status,
-           start_date, end_date, canceled_at, cancel_reason
+           start_date, end_date, canceled_at, cancel_reason,
+           grace_period_end, downgraded_from_plan_id
     FROM af_user_subscriptions
     WHERE uid = $1 AND status = 'active' AND end_date > NOW()
     ORDER BY id DESC
@@ -361,6 +368,8 @@ pub async fn get_user_active_subscription(
       end_date: row.get(6),
       canceled_at: row.get(7),
       cancel_reason: row.get(8),
+      grace_period_end: row.get(9),
+      downgraded_from_plan_id: row.get(10),
     }))
   } else {
     Ok(None)
@@ -375,8 +384,9 @@ pub async fn upsert_user_subscription(
   billing_type: &str,
   start_date: DateTime<Utc>,
   end_date: DateTime<Utc>,
+  grace_period_end: Option<DateTime<Utc>>,
+  downgraded_from_plan_id: Option<i64>,
 ) -> Result<UserSubscriptionRow, AppError> {
-  // First, cancel any existing active subscriptions
   sqlx::query(
     r#"
     UPDATE af_user_subscriptions
@@ -388,12 +398,11 @@ pub async fn upsert_user_subscription(
   .execute(pg_pool)
   .await?;
 
-  // Insert new subscription
   let row = sqlx::query(
     r#"
-    INSERT INTO af_user_subscriptions (uid, plan_id, billing_type, status, start_date, end_date)
-    VALUES ($1, $2, $3, 'active', $4, $5)
-    RETURNING id, uid, plan_id, billing_type, status, start_date, end_date, canceled_at, cancel_reason
+    INSERT INTO af_user_subscriptions (uid, plan_id, billing_type, status, start_date, end_date, grace_period_end, downgraded_from_plan_id)
+    VALUES ($1, $2, $3, 'active', $4, $5, $6, $7)
+    RETURNING id, uid, plan_id, billing_type, status, start_date, end_date, canceled_at, cancel_reason, grace_period_end, downgraded_from_plan_id
     "#,
   )
   .bind(uid)
@@ -401,6 +410,8 @@ pub async fn upsert_user_subscription(
   .bind(billing_type)
   .bind(start_date)
   .bind(end_date)
+  .bind(grace_period_end)
+  .bind(downgraded_from_plan_id.map(|v| v as i32))
   .fetch_one(pg_pool)
   .await?;
 
@@ -414,6 +425,8 @@ pub async fn upsert_user_subscription(
     end_date: row.get(6),
     canceled_at: row.get(7),
     cancel_reason: row.get(8),
+    grace_period_end: row.get(9),
+    downgraded_from_plan_id: row.get(10),
   })
 }
 
@@ -428,7 +441,7 @@ pub async fn cancel_user_subscription(
     UPDATE af_user_subscriptions
     SET status = 'canceled', canceled_at = NOW(), cancel_reason = $2
     WHERE uid = $1 AND status = 'active'
-    RETURNING id, uid, plan_id, billing_type, status, start_date, end_date, canceled_at, cancel_reason
+    RETURNING id, uid, plan_id, billing_type, status, start_date, end_date, canceled_at, cancel_reason, grace_period_end, downgraded_from_plan_id
     "#,
   )
   .bind(uid)
@@ -446,6 +459,8 @@ pub async fn cancel_user_subscription(
     end_date: row.get(6),
     canceled_at: row.get(7),
     cancel_reason: row.get(8),
+    grace_period_end: row.get(9),
+    downgraded_from_plan_id: row.get(10),
   })
 }
 
@@ -804,8 +819,68 @@ pub async fn get_user_owned_workspace_count(pg_pool: &PgPool, uid: i64) -> Resul
   Ok(count.0)
 }
 
+/// 批量将已过期的活跃订阅状态更新为 expired
+/// 条件：status='active' AND end_date <= NOW()
+#[instrument(skip_all, err)]
+pub async fn expire_overdue_subscriptions(pg_pool: &PgPool) -> Result<u64, AppError> {
+  let result = sqlx::query(
+    r#"
+    UPDATE af_user_subscriptions
+    SET status = 'expired'
+    WHERE status = 'active' AND end_date <= NOW()
+    "#,
+  )
+  .execute(pg_pool)
+  .await?;
+
+  Ok(result.rows_affected())
+}
+
+/// 查询需要资源清理的用户列表
+/// 场景1：过期/取消的订阅超过15天宽限期
+/// 场景2：降级后的活跃订阅，降级宽限期已过
+/// 排除：已有更新活跃订阅且无降级宽限期的用户
+#[instrument(skip_all, err)]
+pub async fn get_users_needing_cleanup(pg_pool: &PgPool) -> Result<Vec<i64>, AppError> {
+  let rows: Vec<(i64,)> = sqlx::query_as(
+    r#"
+    SELECT DISTINCT uid
+    FROM af_user_subscriptions
+    WHERE
+      (
+        status IN ('expired', 'canceled')
+        AND end_date + INTERVAL '15 days' < NOW()
+      )
+      OR
+      (
+        status = 'active'
+        AND grace_period_end IS NOT NULL
+        AND grace_period_end < NOW()
+      )
+    "#,
+  )
+  .fetch_all(pg_pool)
+  .await?;
+
+  Ok(rows.into_iter().map(|r| r.0).collect())
+}
+
+/// 获取套餐的等级排序值（用于判断升降级）
+/// 返回值越大表示套餐越高级
+pub fn get_plan_level(plan_code: &str) -> i32 {
+  match plan_code {
+    "mfb" | "free_local" => 0,
+    "student" => 1,
+    "standard" | "stand" => 2,
+    "profersor" => 3,
+    "hiclass" => 4,
+    "team" => 5,
+    "enterprise" => 6,
+    _ => 0,
+  }
+}
+
 #[instrument(skip_all)]
 pub fn calculate_addon_period_end(start_date: DateTime<Utc>) -> DateTime<Utc> {
-  // Addons are valid for 1 year from start date
   start_date + chrono::Duration::days(365)
 }

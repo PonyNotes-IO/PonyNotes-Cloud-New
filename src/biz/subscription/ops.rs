@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use app_error::AppError;
 use chrono::{Datelike, Months, NaiveDate, Utc};
-use database::subscription::{aggregate_user_usage, calculate_addon_period_end, get_or_create_free_subscription, get_subscription_addon, get_subscription_plan, get_subscription_plan_by_code, get_user_active_subscription, get_user_owned_workspace_count, get_user_total_usage_bytes, insert_user_addon, list_subscription_addons, list_subscription_plans, list_user_addons, upsert_usage_record, upsert_user_subscription, SubscriptionAddonRow, SubscriptionPlanRow, UserAddonRow, UserSubscriptionRow};
+use database::subscription::{aggregate_user_usage, calculate_addon_period_end, get_or_create_free_subscription, get_plan_level, get_subscription_addon, get_subscription_plan, get_subscription_plan_by_code, get_user_active_subscription, get_user_owned_workspace_count, get_user_total_usage_bytes, insert_user_addon, list_subscription_addons, list_subscription_plans, list_user_addons, upsert_usage_record, upsert_user_subscription, SubscriptionAddonRow, SubscriptionPlanRow, UserAddonRow, UserSubscriptionRow};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use shared_entity::dto::subscription_dto::{
@@ -63,9 +63,33 @@ pub async fn subscribe_plan(
   let end_date = add_months(start_date, request.billing_type.months())
     .ok_or_else(|| AppError::InvalidRequest("failed to calculate subscription end date".into()))?;
 
+  // 判断是否为降级操作
+  let existing_sub = get_user_active_subscription(pg_pool, uid).await?;
+  let (grace_period_end, downgraded_from_plan_id) = if let Some(ref old_sub) = existing_sub {
+    let old_plan = get_subscription_plan(pg_pool, old_sub.plan_id).await?;
+    let old_level = get_plan_level(&old_plan.plan_code);
+    let new_level = get_plan_level(&plan.plan_code);
+
+    if new_level < old_level {
+      // 降级：设置15天宽限期，宽限期内多余资源保留
+      let grace_end = start_date + chrono::Duration::days(15);
+      log::info!(
+        "[订阅降级] uid: {}, 从 {} (等级{}) 降级到 {} (等级{}), 宽限期至 {}",
+        uid, old_plan.plan_code, old_level, plan.plan_code, new_level, grace_end
+      );
+      (Some(grace_end), Some(old_sub.plan_id))
+    } else {
+      (None, None)
+    }
+  } else {
+    (None, None)
+  };
+
   let billing_type_str = request.billing_type.as_str();
-  let subscription =
-    upsert_user_subscription(pg_pool, uid, plan.id, billing_type_str, start_date, end_date).await?;
+  let subscription = upsert_user_subscription(
+    pg_pool, uid, plan.id, billing_type_str, start_date, end_date,
+    grace_period_end, downgraded_from_plan_id,
+  ).await?;
   build_current_subscription_with_plan(pg_pool, uid, subscription, plan).await
 }
 
@@ -298,7 +322,22 @@ pub async fn get_user_resource_limit_status(
         });
       }
 
-      // 订阅有效，立即应用限制（降级场景）
+      // 订阅有效，检查是否处于降级宽限期
+      if let (Some(grace_end), Some(old_plan_id)) = (sub.grace_period_end, sub.downgraded_from_plan_id) {
+        if now <= grace_end {
+          // 降级宽限期内，使用旧套餐的资源限制
+          let old_plan = get_subscription_plan(pg_pool, old_plan_id as i64).await?;
+          return Ok(ResourceLimitStatus {
+            plan_code: plan.plan_code.clone(),
+            storage_limit_mb: old_plan.cloud_storage_gb.to_f64().unwrap_or(0.0),
+            workspace_limit: old_plan.collaborative_workspace_limit as i64,
+            member_limit: old_plan.workspace_member_limit as i64,
+            is_grace_period: true,
+            grace_period_end: Some(grace_end),
+          });
+        }
+      }
+
       Ok(ResourceLimitStatus {
         plan_code: plan.plan_code,
         storage_limit_mb: plan.cloud_storage_gb.to_f64().unwrap_or(0.0),
@@ -557,6 +596,8 @@ impl UserSubscriptionContext {
       end_date: self.record.end_date,
       canceled_at: self.record.canceled_at,
       cancel_reason: self.record.cancel_reason,
+      grace_period_end: self.record.grace_period_end,
+      downgraded_from_plan_id: self.record.downgraded_from_plan_id.map(|v| v as i64),
     })
   }
 }

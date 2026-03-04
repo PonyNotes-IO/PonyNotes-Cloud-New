@@ -1,3 +1,4 @@
 pub mod ops;
 pub mod resource_cleanup_task;
+pub mod subscription_expiry_task;
 

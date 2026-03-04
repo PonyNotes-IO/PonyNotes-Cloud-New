@@ -170,6 +170,8 @@ pub struct UserSubscriptionRecord {
   pub end_date: DateTime<Utc>,
   pub canceled_at: Option<DateTime<Utc>>,
   pub cancel_reason: Option<String>,
+  pub grace_period_end: Option<DateTime<Utc>>,
+  pub downgraded_from_plan_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

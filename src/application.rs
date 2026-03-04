@@ -71,6 +71,8 @@ use crate::api::user::user_scope;
 use crate::api::workspace::{collab_scope, workspace_scope};
 use crate::api::ws::ws_scope;
 use crate::biz::notification::email::EmailNotificationWorker;
+use crate::biz::subscription::subscription_expiry_task::start_subscription_expiry_task;
+use crate::biz::subscription::resource_cleanup_task::start_resource_cleanup_task;
 use crate::biz::pg_listener::PgListeners;
 use crate::biz::workspace::publish::{
   PublishedCollabPostgresStore, PublishedCollabS3StoreWithPostgresFallback, PublishedCollabStore,
@@ -347,6 +349,21 @@ pub async fn init_state(config: &Config) -> Result<AppState, Error> {
       email_notification_worker.start_task().await;
     });
   }
+
+  // 启动订阅过期检查定时任务（每小时）
+  info!("Setting up subscription expiry check task...");
+  let expiry_pg_pool = pg_pool.clone();
+  tokio::spawn(async move {
+    start_subscription_expiry_task(expiry_pg_pool).await;
+  });
+
+  // 启动资源清理定时任务（每24小时）
+  info!("Setting up resource cleanup task...");
+  let cleanup_pg_pool = pg_pool.clone();
+  let cleanup_s3_client = s3_client.clone();
+  tokio::spawn(async move {
+    start_resource_cleanup_task(cleanup_pg_pool, cleanup_s3_client).await;
+  });
 
   info!("Setting up Indexer scheduler...");
   let (open_ai_config, azure_ai_config) = get_open_ai_config();
