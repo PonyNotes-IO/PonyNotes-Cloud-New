@@ -455,6 +455,10 @@ pub fn workspace_scope() -> Scope {
         )
         .service(web::resource("/{workspace_id}/database").route(web::get().to(list_database_handler)))
         .service(
+            web::resource("/{workspace_id}/database/view/{view_id}/resolve")
+                .route(web::get().to(resolve_database_id_for_view_handler)),
+        )
+        .service(
             web::resource("/{workspace_id}/database/{database_id}/row")
                 .route(web::get().to(list_database_row_id_handler))
                 .route(web::post().to(post_database_row_handler))
@@ -2941,6 +2945,49 @@ async fn get_workspace_publish_outline_handler(
   )
   .await?;
   Ok(Json(AppResponse::Ok().with_data(published_view)))
+}
+
+async fn resolve_database_id_for_view_handler(
+  user_uuid: UserUuid,
+  path_param: web::Path<(Uuid, Uuid)>,
+  state: Data<AppState>,
+) -> Result<Json<AppResponse<serde_json::Value>>> {
+  let (workspace_id, view_id) = path_param.into_inner();
+  let _uid = state.user_cache.get_user_uid(&user_uuid).await?;
+
+  let ws_db_oid =
+    database::collab::select_workspace_database_oid(&state.pg_pool, &workspace_id)
+      .await
+      .map_err(|e| AppError::Internal(anyhow!("Failed to get workspace database oid: {}", e)))?;
+  let ws_db_collab = crate::biz::collab::utils::get_latest_collab(
+    &state.collab_storage,
+    database::collab::GetCollabOrigin::Server,
+    workspace_id,
+    ws_db_oid,
+    CollabType::WorkspaceDatabase,
+    default_client_id(),
+  )
+  .await?;
+
+  let ws_db =
+    collab_database::workspace_database::WorkspaceDatabase::open(ws_db_collab).map_err(|err| {
+      AppError::Internal(anyhow!(
+        "Failed to open workspace database: {}",
+        err
+      ))
+    })?;
+
+  let database_id = ws_db
+    .get_database_meta_with_view_id(&view_id.to_string())
+    .ok_or(AppError::RecordNotFound(format!(
+      "Database for view {} not found in workspace {}",
+      view_id, workspace_id
+    )))?
+    .database_id;
+
+  Ok(Json(
+    AppResponse::Ok().with_data(serde_json::json!({ "database_id": database_id })),
+  ))
 }
 
 async fn list_database_handler(
