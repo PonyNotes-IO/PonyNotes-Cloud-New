@@ -68,7 +68,7 @@ use crate::api::server_info::server_info_scope;
 use crate::api::subscription::subscription_scope;
 use crate::api::template::template_scope;
 use crate::api::user::user_scope;
-use crate::api::workspace::{collab_scope, workspace_scope};
+use crate::api::workspace::{collab_scope, collab_share_scope, workspace_scope};
 use crate::api::ws::ws_scope;
 use crate::biz::notification::email::EmailNotificationWorker;
 use crate::biz::subscription::subscription_expiry_task::start_subscription_expiry_task;
@@ -170,6 +170,7 @@ pub async fn run_actix_server(
       // Register collab_scope earlier to avoid route matching conflicts where a more
       // generic scope (e.g., chat_scope) may capture the same path and return 405 for POST.
       .service(collab_scope())
+      .service(collab_share_scope())
       .service(chat_scope())
       .service(ws_scope())
       .service(file_storage_scope())
