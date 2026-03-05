@@ -37,7 +37,9 @@ use client_api_entity::{AFUserProfile, AFUserWorkspaceInfo, AFWorkspace};
 use client_api_entity::{GotrueTokenResponse, UpdateGotrueUserParams, User};
 use semver::Version;
 use shared_entity::dto::auth_dto::UpdateUserParams;
-use shared_entity::dto::auth_dto::{SignInPasswordResponse, SignInTokenResponse};
+use shared_entity::dto::auth_dto::{
+  GetUidByEmailOrPhoneResponse, SignInPasswordResponse, SignInTokenResponse,
+};
 use shared_entity::dto::workspace_dto::WorkspaceSpaceUsage;
 use shared_entity::response::{AppResponse, AppResponseError};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -811,8 +813,8 @@ impl Client {
       .await?
       .send()
       .await?;
-    let uid: i64 = process_response_data(resp).await?;
-    Ok(uid)
+    let response: GetUidByEmailOrPhoneResponse = process_response_data(resp).await?;
+    Ok(response.uid)
   }
 
   #[instrument(level = "info", skip_all, err)]
