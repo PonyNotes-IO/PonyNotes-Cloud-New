@@ -872,6 +872,7 @@ pub struct AFCollabMemberInvite {
   pub name: String,
   pub permission_id: i32,
   pub view_layout: i32,
+  pub owner_workspace_id: Option<Uuid>,
 }
 
 /// 用于跟踪用户接收的发布文档

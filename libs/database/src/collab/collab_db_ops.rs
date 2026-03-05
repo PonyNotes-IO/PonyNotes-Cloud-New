@@ -716,7 +716,7 @@ where
 {
   let list = sqlx::query_as!(
     AFCollabMemberInvite,
-    r#"SELECT DISTINCT ON (oid) oid, send_uid, received_uid, created_at, name, permission_id, view_layout
+    r#"SELECT DISTINCT ON (oid) oid, send_uid, received_uid, created_at, name, permission_id, view_layout, owner_workspace_id
        FROM af_collab_member_invite
        WHERE send_uid = $1
        ORDER BY oid, created_at DESC"#,
@@ -733,7 +733,7 @@ where
 {
   let list = sqlx::query_as!(
     AFCollabMemberInvite,
-    r#"SELECT oid, send_uid, received_uid, created_at, name, permission_id, view_layout
+    r#"SELECT oid, send_uid, received_uid, created_at, name, permission_id, view_layout, owner_workspace_id
        FROM af_collab_member_invite
        WHERE received_uid = $1 AND received_uid IS NOT NULL"#,
     uid

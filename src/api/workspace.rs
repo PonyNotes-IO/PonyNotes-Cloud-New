@@ -3671,7 +3671,7 @@ async fn add_collab_member_handler(
         r#"
           INSERT INTO af_collab_member_invite (oid, send_uid, received_uid, name, permission_id, view_layout, owner_workspace_id)
           VALUES ($1, $2, $3, $4, $5, $6, $7)
-          ON CONFLICT (oid, send_uid, received_uid) DO UPDATE
+          ON CONFLICT (oid, send_uid, received_uid) WHERE received_uid IS NOT NULL DO UPDATE
           SET permission_id = EXCLUDED.permission_id,
               view_layout = EXCLUDED.view_layout,
               owner_workspace_id = EXCLUDED.owner_workspace_id
