@@ -67,14 +67,34 @@ async fn list_shared_views_handler(
       Err(_) => continue,
     };
     
-    // 从 af_collab 表获取文档实际所属的 workspace_id（使用运行时查询避免 sqlx 宏缓存问题）
-    let doc_workspace_id: Uuid = sqlx::query_scalar(
-      "SELECT workspace_id FROM af_collab WHERE oid = $1",
-    )
-    .bind(&invite.oid)
-    .fetch_one(&state.pg_pool)
-    .await
-    .unwrap_or(_workspace_id);
+    // 优先从 af_collab_member_invite 中获取 owner_workspace_id
+    // 这是解决网格类视图（Grid/Board/Calendar）workspace_id 错误的核心修复：
+    // 对于网格类视图，af_collab 表只有 database_id 的条目，没有 view_id 的条目
+    // 所以直接查询 af_collab WHERE oid=view_id 会失败，回退到当前用户自己的 workspace_id（错误！）
+    let doc_workspace_id: Uuid = {
+      // 首先尝试从邀请记录直接获取 owner_workspace_id（最准确，支持所有视图类型）
+      let owner_ws: Option<Uuid> = sqlx::query_scalar(
+        "SELECT owner_workspace_id FROM af_collab_member_invite WHERE oid = $1 AND received_uid = $2",
+      )
+      .bind(&invite.oid)
+      .bind(uid)
+      .fetch_one(&state.pg_pool)
+      .await
+      .ok();
+
+      if let Some(ws) = owner_ws {
+        ws
+      } else {
+        // 兼容旧数据：回退到 af_collab 查询（适用于普通文档视图）
+        sqlx::query_scalar(
+          "SELECT workspace_id FROM af_collab WHERE oid = $1",
+        )
+        .bind(&invite.oid)
+        .fetch_one(&state.pg_pool)
+        .await
+        .unwrap_or(_workspace_id)
+      }
+    };
     
     // 从 af_collab_member 表获取用户的权限（使用运行时查询）
     let permission_id: i32 = sqlx::query_scalar(

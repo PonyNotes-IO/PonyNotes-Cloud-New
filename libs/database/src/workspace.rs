@@ -2192,6 +2192,7 @@ pub async fn insert_collab_member(
   received_uid: i64,
   name: &str,
   permission_id: i32,
+  owner_workspace_id: &Uuid,
 ) -> Result<(), AppError> {
   let mut tx = executor.begin().await?;
   let view_id = view_id.to_string();
@@ -2207,17 +2208,19 @@ pub async fn insert_collab_member(
   .execute(tx.deref_mut())
   .await?;
 
-  sqlx::query!(
+  // 使用运行时查询（无!宏），包含 owner_workspace_id，避免 sqlx 离线缓存限制
+  sqlx::query(
     r#"
-      INSERT INTO af_collab_member_invite (oid, send_uid, received_uid, name, permission_id)
-      VALUES ($1, $2, $3, $4, $5)
+      INSERT INTO af_collab_member_invite (oid, send_uid, received_uid, name, permission_id, owner_workspace_id)
+      VALUES ($1, $2, $3, $4, $5, $6)
     "#,
-    view_id,
-    send_uid,
-    received_uid,
-    name,
-    permission_id,
   )
+  .bind(&view_id)
+  .bind(send_uid)
+  .bind(received_uid)
+  .bind(name)
+  .bind(permission_id)
+  .bind(*owner_workspace_id)
   .execute(tx.deref_mut())
   .await?;
   tx.commit().await?;

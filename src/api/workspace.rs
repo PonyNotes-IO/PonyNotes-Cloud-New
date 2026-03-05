@@ -3534,62 +3534,66 @@ async fn create_share_link_invite_handler(
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
   tracing::info!("current user uid: {}", uid);
 
-  // 获取视图名称
+  // 获取视图名称和布局类型
   let folder = state.ws_server.get_folder(workspace_id).await?;
-  let view_name = folder
-    .get_view(&view_id.to_string(), uid)
+  let view_info = folder.get_view(&view_id.to_string(), uid);
+  let view_name = view_info
+    .as_ref()
     .map(|v| v.name.clone())
-    .unwrap_or_else(|| {
-      format!("共享文档 {}", &view_id.to_string()[..8])
-    });
+    .unwrap_or_else(|| format!("共享文档 {}", &view_id.to_string()[..8]));
+  let view_layout: i32 = view_info
+    .as_ref()
+    .map(|v| v.layout.clone() as i32)
+    .unwrap_or(0);
 
-  // 检查是否已存在邀请记录
-  let existing = sqlx::query!(
-    r#"
-      SELECT * FROM af_collab_member_invite
-      WHERE oid = $1 AND send_uid = $2 AND received_uid IS NULL
-    "#,
-    view_id.to_string(),
-    uid,
+  // 检查是否已存在邀请记录（使用运行时查询避免 sqlx 宏缓存列不匹配问题）
+  let existing_count: i64 = sqlx::query_scalar(
+    "SELECT COUNT(*) FROM af_collab_member_invite WHERE oid = $1 AND send_uid = $2 AND received_uid IS NULL",
   )
-  .fetch_optional(&state.pg_pool)
+  .bind(view_id.to_string())
+  .bind(uid)
+  .fetch_one(&state.pg_pool)
   .await
-  .map_err(AppError::from)?;
+  .unwrap_or(0);
 
-  if existing.is_some() {
-    // 更新现有记录的权限
-    sqlx::query!(
+  if existing_count > 0 {
+    // 更新现有记录的权限、视图布局和 owner_workspace_id（使用运行时查询，避免 sqlx 离线缓存限制）
+    sqlx::query(
       r#"
         UPDATE af_collab_member_invite
-        SET permission_id = $1
-        WHERE oid = $2 AND send_uid = $3 AND received_uid IS NULL
+        SET permission_id = $1, view_layout = $2, owner_workspace_id = $3
+        WHERE oid = $4 AND send_uid = $5 AND received_uid IS NULL
       "#,
-      params.permission_id,
-      view_id.to_string(),
-      uid,
     )
+    .bind(params.permission_id)
+    .bind(view_layout)
+    .bind(workspace_id)
+    .bind(view_id.to_string())
+    .bind(uid)
     .execute(&state.pg_pool)
     .await
     .map_err(AppError::from)?;
     
-    tracing::info!("updated existing invite record");
+    tracing::info!("updated existing invite record, view_layout={}, owner_workspace_id={}", view_layout, workspace_id);
   } else {
-    // 创建新的邀请记录（received_uid 为 NULL 表示待接受）
-    sqlx::query!(
+    // 创建新的邀请记录（received_uid 为 NULL 表示待接受），使用运行时查询包含 owner_workspace_id
+    sqlx::query(
       r#"
-        INSERT INTO af_collab_member_invite (oid, send_uid, name, permission_id)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO af_collab_member_invite (oid, send_uid, name, permission_id, view_layout, owner_workspace_id)
+        VALUES ($1, $2, $3, $4, $5, $6)
       "#,
-      view_id.to_string(),
-      uid,
-      view_name,
-      params.permission_id,
     )
+    .bind(view_id.to_string())
+    .bind(uid)
+    .bind(view_name)
+    .bind(params.permission_id)
+    .bind(view_layout)
+    .bind(workspace_id)
     .execute(&state.pg_pool)
     .await
     .map_err(AppError::from)?;
     
-    tracing::info!("created new invite record");
+    tracing::info!("created new invite record, view_layout={}, owner_workspace_id={}", view_layout, workspace_id);
   }
 
   Ok(Json(AppResponse::Ok()))
@@ -3635,65 +3639,76 @@ async fn add_collab_member_handler(
   if uid == received_uid {
     tracing::info!("user {} is accessing their own share link, will insert new invite record for this receiver", uid);
     
-    // 查询 af_collab_member_invite 表中是否有待接受的邀请记录
-    let existing_invite = sqlx::query!(
+    // 查询 af_collab_member_invite 表中是否有待接受的邀请模板（received_uid IS NULL）
+    // 使用运行时查询（无!宏）以获取 view_layout 和 owner_workspace_id 字段
+    #[derive(sqlx::FromRow)]
+    struct InviteTemplate {
+      send_uid: i64,
+      permission_id: i32,
+      name: String,
+      view_layout: i32,
+      owner_workspace_id: Option<Uuid>,
+    }
+    let existing_invite = sqlx::query_as::<_, InviteTemplate>(
       r#"
-        SELECT send_uid, permission_id, name 
+        SELECT send_uid, permission_id, name, view_layout, owner_workspace_id
         FROM af_collab_member_invite
         WHERE oid = $1 AND received_uid IS NULL
       "#,
-      view_id.to_string(),
     )
+    .bind(view_id.to_string())
     .fetch_optional(&state.pg_pool)
     .await
     .map_err(AppError::from)?;
     
     if let Some(invite) = existing_invite {
-      // 新插入一条记录，记录接收者信息
+      // 新插入一条记录，记录接收者信息（含 view_layout 和 owner_workspace_id）
       // 注意：不是更新现有的邀请记录（邀请模板），而是新插入一条记录
       // 这样每个接收者都有一条独立的记录
-      sqlx::query!(
+      // owner_workspace_id: 优先使用模板中的值，若模板没有则使用请求中的 workspace_id（链接中的 workspace_id）
+      let effective_owner_workspace_id = invite.owner_workspace_id.unwrap_or(workspace_id);
+      sqlx::query(
         r#"
-          INSERT INTO af_collab_member_invite (oid, send_uid, received_uid, name, permission_id)
-          VALUES ($1, $2, $3, $4, $5)
+          INSERT INTO af_collab_member_invite (oid, send_uid, received_uid, name, permission_id, view_layout, owner_workspace_id)
+          VALUES ($1, $2, $3, $4, $5, $6, $7)
+          ON CONFLICT (oid, send_uid, received_uid) DO UPDATE
+          SET permission_id = EXCLUDED.permission_id,
+              view_layout = EXCLUDED.view_layout,
+              owner_workspace_id = EXCLUDED.owner_workspace_id
         "#,
-        view_id.to_string(),
-        invite.send_uid,
-        received_uid,
-        invite.name,
-        invite.permission_id,
       )
+      .bind(view_id.to_string())
+      .bind(invite.send_uid)
+      .bind(received_uid)
+      .bind(&invite.name)
+      .bind(invite.permission_id)
+      .bind(invite.view_layout)
+      .bind(effective_owner_workspace_id)
       .execute(&state.pg_pool)
       .await
       .map_err(AppError::from)?;
       
-      tracing::info!("inserted new invite record for receiver: oid={}, send_uid={}, received_uid={}, permission_id={}", 
-        view_id, invite.send_uid, received_uid, invite.permission_id);
+      tracing::info!("inserted/updated invite record for receiver: oid={}, send_uid={}, received_uid={}, permission_id={}, view_layout={}, owner_workspace_id={}", 
+        view_id, invite.send_uid, received_uid, invite.permission_id, invite.view_layout, effective_owner_workspace_id);
       
       // 检查 af_collab_member 表中是否已有记录，如果没有则添加
-      let existing_member = sqlx::query!(
-        r#"
-          SELECT uid FROM af_collab_member
-          WHERE oid = $1 AND uid = $2
-        "#,
-        view_id.to_string(),
-        received_uid,
+      let existing_member_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM af_collab_member WHERE oid = $1 AND uid = $2",
       )
-      .fetch_optional(&state.pg_pool)
+      .bind(view_id.to_string())
+      .bind(received_uid)
+      .fetch_one(&state.pg_pool)
       .await
-      .map_err(AppError::from)?;
+      .unwrap_or(0);
       
-      if existing_member.is_none() {
+      if existing_member_count == 0 {
         // 添加到 af_collab_member 表
-        sqlx::query!(
-          r#"
-            INSERT INTO af_collab_member (uid, oid, permission_id)
-            VALUES ($1, $2, $3)
-          "#,
-          received_uid,
-          view_id.to_string(),
-          invite.permission_id,
+        sqlx::query(
+          "INSERT INTO af_collab_member (uid, oid, permission_id) VALUES ($1, $2, $3)",
         )
+        .bind(received_uid)
+        .bind(view_id.to_string())
+        .bind(invite.permission_id)
         .execute(&state.pg_pool)
         .await
         .map_err(AppError::from)?;
@@ -3703,9 +3718,6 @@ async fn add_collab_member_handler(
       }
       
       // 【关键修复】无论 af_collab_member 是否是新插入的，都必须更新 Casbin 内存策略。
-      // 原因：Casbin 仅在服务器启动时从数据库加载策略，运行时插入 af_collab_member
-      // 后不会自动更新 Casbin 内存缓存，必须显式调用 update_access_level_policy。
-      // 若不调用，can_write_collab / can_read_collab 将因找不到策略而拒绝协作。
       let access_level = match invite.permission_id {
         2 => AFAccessLevel::ReadAndComment,
         3 => AFAccessLevel::ReadAndWrite,
@@ -3726,6 +3738,31 @@ async fn add_collab_member_handler(
           received_uid, view_id, invite.permission_id
         );
       }
+
+      // 【关键修复】如果是数据库类视图，还需要授予 database_id 的访问权限
+      // 使用邀请模板中存储的 view_layout 来判断（更可靠，不依赖 Folder 加载）
+      // view_layout: 0=Document, 1=Grid, 2=Board, 3=Calendar, 4=Chat
+      let is_database_view = invite.view_layout > 0;
+      tracing::info!("self-access: view_layout={}, is_database_view={}", invite.view_layout, is_database_view);
+      if is_database_view {
+        tracing::info!("self-access: view is a database view, resolving database_id");
+        match resolve_database_id_for_shared_view(&state, &effective_owner_workspace_id, &view_id).await {
+          Ok(database_id) => {
+            let db_uuid = Uuid::parse_str(&database_id).unwrap_or(view_id);
+            if let Err(e) = state.collab_access_control
+              .update_access_level_policy(&received_uid, &db_uuid, access_level)
+              .await
+            {
+              tracing::error!("failed to grant database_id permission: {}", e);
+            } else {
+              tracing::info!("granted database_id permission: database_id={}", database_id);
+            }
+          },
+          Err(e) => {
+            tracing::warn!("self-access: failed to resolve database_id for view {}: {}", view_id, e);
+          }
+        }
+      }
       
       return Ok(Json(AppResponse::Ok()));
     }
@@ -3734,28 +3771,33 @@ async fn add_collab_member_handler(
     return Ok(Json(AppResponse::Ok()));
   }
 
-  // 获取视图名称
+  // 获取视图名称和布局类型
   let folder = state.ws_server.get_folder(workspace_id).await?;
   tracing::info!("got folder for workspace: {}", workspace_id);
 
-  let view_name = folder
-    .get_view(&view_id.to_string(), uid)
+  let view_info = folder.get_view(&view_id.to_string(), uid);
+  let view_name = view_info
+    .as_ref()
     .map(|v| {
-      tracing::info!("found view: {}", v.name.clone());
+      tracing::info!("found view: {}, layout: {:?}", v.name, v.layout);
       v.name.clone()
     })
     .unwrap_or_else(|| {
       tracing::warn!("view not found in folder: {}", view_id);
       format!("共享文档 {}", &view_id.to_string()[..8])
     });
-
-  // 注意：不再将用户添加到工作区级别
-  // 这样被邀请者只能访问被分享的单个文档，而不是整个工作区
-  // 文档协作通过 af_collab_member 表来控制权限
+  let view_layout: i32 = view_info
+    .as_ref()
+    .map(|v| v.layout.clone() as i32)
+    .unwrap_or(0);
+  let is_database_view = view_info
+    .as_ref()
+    .map(|v| v.layout.is_database())
+    .unwrap_or(false);
 
   // Step 1: 将被邀请者添加到文档协作成员列表
-  // 使用传入的 permission_id 参数
-  tracing::info!("adding collab member: workspace_id={}, view_id={}, received_uid={}, permission_id={}", workspace_id, view_id, received_uid, params.permission_id);
+  tracing::info!("adding collab member: workspace_id={}, view_id={}, received_uid={}, permission_id={}, view_layout={}", 
+    workspace_id, view_id, received_uid, params.permission_id, view_layout);
   add_collab_member(
     &state.pg_pool,
     state.collab_access_control.clone(),
@@ -3764,12 +3806,49 @@ async fn add_collab_member_handler(
     uid,
     received_uid,
     &view_name,
-    params.permission_id, // 传递权限参数
+    params.permission_id,
   )
   .await?;
   tracing::info!("add_collab_member success!");
 
-  // 权限已在 add_collab_member 内部处理，这里不再重复更新
+  // Step 2: 【关键修复】如果是数据库类视图(Grid/Board/Calendar)，还需要授予 database_id 的访问权限
+  // 因为数据库视图的 collab 对象 ID 是 database_id，不同于 view_id
+  if is_database_view {
+    tracing::info!("view is a database view, resolving database_id for permission grant");
+    match resolve_database_id_for_shared_view(&state, &workspace_id, &view_id).await {
+      Ok(database_id) => {
+        let access_level = match params.permission_id {
+          2 => database_entity::dto::AFAccessLevel::ReadAndComment,
+          3 => database_entity::dto::AFAccessLevel::ReadAndWrite,
+          4 => database_entity::dto::AFAccessLevel::FullAccess,
+          _ => database_entity::dto::AFAccessLevel::ReadOnly,
+        };
+        let db_uuid = Uuid::parse_str(&database_id).unwrap_or(view_id);
+        if let Err(e) = state.collab_access_control
+          .update_access_level_policy(&received_uid, &db_uuid, access_level)
+          .await
+        {
+          tracing::error!("failed to grant database_id permission: database_id={}, err={}", database_id, e);
+        } else {
+          tracing::info!("granted database_id permission: database_id={}, uid={}", database_id, received_uid);
+        }
+      },
+      Err(e) => {
+        tracing::warn!("failed to resolve database_id for view {}: {}", view_id, e);
+      }
+    }
+  }
+
+  // Step 3: 更新邀请记录中的 view_layout 和 owner_workspace_id（使用运行时查询）
+  let _ = sqlx::query(
+    "UPDATE af_collab_member_invite SET view_layout = $1, owner_workspace_id = $2 WHERE oid = $3 AND received_uid = $4",
+  )
+  .bind(view_layout)
+  .bind(workspace_id)
+  .bind(view_id.to_string())
+  .bind(received_uid)
+  .execute(&state.pg_pool)
+  .await;
 
   Ok(Json(AppResponse::Ok()))
 }
@@ -3888,6 +3967,40 @@ async fn list_received_collab_handler(
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
   let list = get_received_collab_list(&state.pg_pool, uid).await?;
   Ok(Json(AppResponse::Ok().with_data(list)))
+}
+
+/// 辅助函数：解析数据库视图的 database_id
+/// 当分享数据库类视图(Grid/Board/Calendar)时，需要同时授予 database_id 的权限
+async fn resolve_database_id_for_shared_view(
+  state: &Data<AppState>,
+  workspace_id: &Uuid,
+  view_id: &Uuid,
+) -> Result<String, AppError> {
+  let ws_db_oid =
+    database::collab::select_workspace_database_oid(&state.pg_pool, workspace_id)
+      .await
+      .map_err(|e| AppError::Internal(anyhow!("Failed to get workspace database oid: {}", e)))?;
+  let ws_db_collab = crate::biz::collab::utils::get_latest_collab(
+    &state.collab_storage,
+    database::collab::GetCollabOrigin::Server,
+    *workspace_id,
+    ws_db_oid,
+    CollabType::WorkspaceDatabase,
+    default_client_id(),
+  )
+  .await?;
+  let ws_db =
+    collab_database::workspace_database::WorkspaceDatabase::open(ws_db_collab).map_err(|err| {
+      AppError::Internal(anyhow!("Failed to open workspace database: {}", err))
+    })?;
+  let database_id = ws_db
+    .get_database_meta_with_view_id(&view_id.to_string())
+    .ok_or(AppError::RecordNotFound(format!(
+      "Database for view {} not found in workspace {}",
+      view_id, workspace_id
+    )))?
+    .database_id;
+  Ok(database_id)
 }
 
 #[derive(Debug, Clone, Validate, Serialize, Deserialize)]

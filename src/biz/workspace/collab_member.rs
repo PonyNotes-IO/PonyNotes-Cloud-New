@@ -32,8 +32,8 @@ pub async fn add_collab_member(
     ));
   }
 
-  // 使用传入的 permission_id 参数
-  insert_collab_member(&mut tx, view_id, send_uid, received_uid, view_name, permission_id).await?;
+  // 使用传入的 permission_id 参数，同时传递 workspace_id 以记录 owner_workspace_id
+  insert_collab_member(&mut tx, view_id, send_uid, received_uid, view_name, permission_id, workspace_id).await?;
 
   // 将 permission_id 转换为 AFAccessLevel
   let access_level = match permission_id {
