@@ -3751,6 +3751,16 @@ async fn add_collab_member_handler(
         match resolve_database_id_for_shared_view(&state, &effective_owner_workspace_id, &view_id).await {
           Ok(database_id) => {
             let db_uuid = Uuid::parse_str(&database_id).unwrap_or(view_id);
+            // 持久化：在 af_collab_member 中注册 database_id，确保服务重启后权限可重建
+            let _ = sqlx::query(
+              "INSERT INTO af_collab_member (uid, oid, permission_id) VALUES ($1, $2, $3) ON CONFLICT (uid, oid) DO NOTHING",
+            )
+            .bind(received_uid)
+            .bind(&database_id)
+            .bind(invite.permission_id)
+            .execute(&state.pg_pool)
+            .await
+            .map_err(|e| tracing::warn!("self-access: failed to persist database_id member: {}", e));
             if let Err(e) = state.collab_access_control
               .update_access_level_policy(&received_uid, &db_uuid, access_level)
               .await
@@ -3826,6 +3836,16 @@ async fn add_collab_member_handler(
           _ => database_entity::dto::AFAccessLevel::ReadOnly,
         };
         let db_uuid = Uuid::parse_str(&database_id).unwrap_or(view_id);
+        // 持久化：在 af_collab_member 中注册 database_id，确保服务重启后权限可重建
+        let _ = sqlx::query(
+          "INSERT INTO af_collab_member (uid, oid, permission_id) VALUES ($1, $2, $3) ON CONFLICT (uid, oid) DO NOTHING",
+        )
+        .bind(received_uid)
+        .bind(&database_id)
+        .bind(params.permission_id)
+        .execute(&state.pg_pool)
+        .await
+        .map_err(|e| tracing::warn!("failed to persist database_id member: {}", e));
         if let Err(e) = state.collab_access_control
           .update_access_level_policy(&received_uid, &db_uuid, access_level)
           .await
