@@ -117,6 +117,19 @@ async fn create_upload(
   let file_size = req.file_size.ok_or_else(|| {
     AppError::InvalidRequest("file_size is required".to_string())
   })?;
+
+  // 单文件大小限制：统一限制为 3GB，不区分套餐
+  const SINGLE_FILE_SIZE_LIMIT: u64 = 3 * 1024 * 1024 * 1024; // 3GB
+  if file_size > SINGLE_FILE_SIZE_LIMIT {
+    return Err(
+      AppError::PlanLimitExceeded(format!(
+        "Storage limit exceeded: File size {} bytes exceeds single upload limit. Maximum single file size is 3GB.",
+        file_size
+      ))
+      .into(),
+    );
+  }
+
   check_user_storage_limit(&state.pg_pool, uid, file_size as i64).await?;
 
   let key = BlobPathV1 {
