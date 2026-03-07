@@ -46,3 +46,4 @@ credentials/
 *.keystore
 config/local.yml
 config/production.yml
+deploy_cloud.sh
