@@ -118,9 +118,23 @@ async fn create_upload(
     AppError::InvalidRequest("file_size is required".to_string())
   })?;
 
+  // 调试日志：打印接收到的文件大小
+  log::info!(
+    "[FILE_UPLOAD_DEBUG] Received file_size: {} bytes ({:.2} GB), file_id: {}, parent_dir: {}",
+    file_size,
+    file_size as f64 / (1024.0 * 1024.0 * 1024.0),
+    req.file_id,
+    req.parent_dir
+  );
+
   // 单文件大小限制：统一限制为 3GB，不区分套餐
   const SINGLE_FILE_SIZE_LIMIT: u64 = 3 * 1024 * 1024 * 1024; // 3GB
   if file_size > SINGLE_FILE_SIZE_LIMIT {
+    log::warn!(
+      "[FILE_UPLOAD_DEBUG] File size {} exceeds single upload limit of {} bytes",
+      file_size,
+      SINGLE_FILE_SIZE_LIMIT
+    );
     return Err(
       AppError::PlanLimitExceeded(format!(
         "Storage limit exceeded: File size {} bytes exceeds single upload limit. Maximum single file size is 3GB.",
