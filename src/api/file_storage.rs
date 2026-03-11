@@ -120,31 +120,65 @@ async fn create_upload(
 
   // 调试日志：打印接收到的文件大小
   log::info!(
-    "[FILE_UPLOAD_DEBUG] Received file_size: {} bytes ({:.2} GB), file_id: {}, parent_dir: {}",
+    "[FILE_UPLOAD_DEBUG] Received file_size: {} bytes ({:.2} MB), file_id: {}, parent_dir: {}",
     file_size,
-    file_size as f64 / (1024.0 * 1024.0 * 1024.0),
+    file_size as f64 / (1024.0 * 1024.0),
     req.file_id,
     req.parent_dir
   );
 
-  // 单文件大小限制：统一限制为 3GB，不区分套餐
-  const SINGLE_FILE_SIZE_LIMIT: u64 = 3 * 1024 * 1024 * 1024; // 3GB
-  if file_size > SINGLE_FILE_SIZE_LIMIT {
+  // 协作区场景：文件上传消耗workspace owner的云空间配额
+  // 获取workspace owner的uid来检查存储限制
+  let workspace = database::workspace::select_workspace(&state.pg_pool, &workspace_id).await?;
+  let owner_uid = workspace.owner_uid.ok_or_else(|| {
+    AppError::Internal(anyhow!("Workspace owner_uid is missing for workspace {}", workspace_id))
+  })?;
+
+  info!(
+    "📦 [分片上传] 资源消耗归属 - workspace_id: {}, owner_uid: {}, uploading_user_uid: {}",
+    workspace_id, owner_uid, uid
+  );
+
+  // 使用PlanLimits检查单文件大小限制（按套餐区分）
+  let resource_status = get_user_resource_limit_status(&state.pg_pool, owner_uid).await?;
+  let plan = SubscriptionPlan::try_from(workspace.workspace_type)
+    .map_err(|e| AppError::Internal(anyhow!("Invalid workspace type: {}", e)))?;
+  let single_limit_bytes = PlanLimits::from_plan(&plan).single_upload_limit;
+
+  if file_size as i64 > single_limit_bytes {
     log::warn!(
-      "[FILE_UPLOAD_DEBUG] File size {} exceeds single upload limit of {} bytes",
+      "[FILE_UPLOAD_DEBUG] File size {} exceeds single upload limit {} bytes for {} plan",
       file_size,
-      SINGLE_FILE_SIZE_LIMIT
+      single_limit_bytes,
+      resource_status.plan_code
     );
     return Err(
       AppError::PlanLimitExceeded(format!(
-        "Storage limit exceeded: File size {} bytes exceeds single upload limit. Maximum single file size is 3GB.",
-        file_size
+        "File size {} bytes exceeds single upload limit {} bytes for {} plan. Please upgrade your subscription.",
+        file_size, single_limit_bytes, resource_status.plan_code
       ))
       .into(),
     );
   }
 
-  check_user_storage_limit(&state.pg_pool, uid, file_size as i64).await?;
+  // 检查总存储配额（使用workspace owner的存储使用量）
+  let current_total_usage = get_user_total_usage_bytes(&state.pg_pool, owner_uid)
+    .await? as i64;
+  let total_limit_bytes = (resource_status.storage_limit_mb * 1024.0 * 1024.0) as i64;
+
+  if current_total_usage + file_size as i64 > total_limit_bytes {
+    log::warn!(
+      "[FILE_UPLOAD_DEBUG] Total storage limit exceeded. Current: {} bytes, Limit: {} bytes, Upload: {} bytes for {} plan",
+      current_total_usage, total_limit_bytes, file_size, resource_status.plan_code
+    );
+    return Err(
+      AppError::PlanLimitExceeded(format!(
+        "Total storage limit exceeded. Current: {} bytes, Limit: {} bytes, Trying to upload: {} bytes for {} plan. Please upgrade your subscription.",
+        current_total_usage, total_limit_bytes, file_size, resource_status.plan_code
+      ))
+      .into(),
+    );
+  }
 
   let key = BlobPathV1 {
     workspace_id,
