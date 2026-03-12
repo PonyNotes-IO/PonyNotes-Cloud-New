@@ -139,11 +139,9 @@ async fn create_upload(
     workspace_id, owner_uid, uid
   );
 
-  // 使用PlanLimits检查单文件大小限制（按套餐区分）
+  // 使用用户真实订阅的 plan_code 检查单文件大小限制
   let resource_status = get_user_resource_limit_status(&state.pg_pool, owner_uid).await?;
-  let plan = SubscriptionPlan::try_from(workspace.workspace_type)
-    .map_err(|e| AppError::Internal(anyhow!("Invalid workspace type: {}", e)))?;
-  let single_limit_bytes = PlanLimits::from_plan(&plan).single_upload_limit;
+  let single_limit_bytes = PlanLimits::from_plan_code(&resource_status.plan_code).single_upload_limit;
 
   if file_size as i64 > single_limit_bytes {
     log::warn!(
@@ -684,10 +682,8 @@ async fn put_blob_handler_v1(
   // Check subscription plan limits for file upload (使用workspace owner的订阅配额)
   let resource_status = get_user_resource_limit_status(&state.pg_pool, owner_uid).await?;
 
-  // Check single file upload size limit
-  let plan = SubscriptionPlan::try_from(workspace.workspace_type)
-    .map_err(|e| AppError::Internal(anyhow!("Invalid workspace type: {}", e)))?;
-  let single_limit_bytes = PlanLimits::from_plan(&plan).single_upload_limit;
+  // 使用用户真实订阅的 plan_code 检查单文件大小限制
+  let single_limit_bytes = PlanLimits::from_plan_code(&resource_status.plan_code).single_upload_limit;
 
   if content_length as i64 > single_limit_bytes {
     return Err(

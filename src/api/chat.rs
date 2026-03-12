@@ -4,6 +4,7 @@ use crate::biz::chat::ops::{
   get_chat_messages_with_author_uuid, get_question_message, update_chat_message,
 };
 use crate::biz::workspace::subscription_plan_limits::PlanLimits;
+use crate::biz::subscription::ops::get_user_resource_limit_status;
 use crate::state::AppState;
 use actix_web::web::{Data, Json};
 use actix_web::{web, HttpRequest, HttpResponse, Scope};
@@ -358,11 +359,12 @@ async fn answer_stream_v3_handler(
   if payload.format.output_content.is_image() {
     state.metrics.ai_metrics.record_stream_image_count(1);
     
-    // Get workspace and convert to subscription plan
     let workspace = select_workspace(&state.pg_pool, &workspace_uuid).await?;
-    let plan = SubscriptionPlan::try_from(workspace.workspace_type)
-      .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid workspace type: {}", e)))?;
-    let limits = PlanLimits::from_plan(&plan);
+    let owner_uid = workspace.owner_uid.ok_or_else(|| {
+      AppError::Internal(anyhow::anyhow!("Workspace owner_uid is missing"))
+    })?;
+    let resource_status = get_user_resource_limit_status(&state.pg_pool, owner_uid).await?;
+    let limits = PlanLimits::from_plan_code(&resource_status.plan_code);
     
     // Check if AI is unlimited for this plan
     if !limits.ai_unlimited {

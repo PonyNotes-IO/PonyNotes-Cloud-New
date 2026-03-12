@@ -402,26 +402,24 @@ async fn local_ai_config_handler(
 
 /// Helper function to check if AI usage is within limits
 async fn check_ai_usage_limit(state: &AppState, workspace_id: &Uuid) -> Result<(), AppError> {
-  // Get workspace subscription plan
   let workspace = database::workspace::select_workspace(&state.pg_pool, workspace_id).await?;
-  let plan = SubscriptionPlan::try_from(workspace.workspace_type)
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid workspace type: {}", e)))?;
+  let owner_uid = workspace.owner_uid.ok_or_else(|| {
+    AppError::Internal(anyhow::anyhow!("Workspace owner_uid is missing"))
+  })?;
+
+  let resource_status = get_user_resource_limit_status(&state.pg_pool, owner_uid).await?;
+  let limits = PlanLimits::from_plan_code(&resource_status.plan_code);
   
-  let limits = PlanLimits::from_plan(&plan);
-  
-  // If AI is unlimited, no need to check
   if limits.ai_unlimited {
     return Ok(());
   }
   
-  // Get current AI usage this month
   let current_usage = get_workspace_ai_usage_this_month(&state.pg_pool, workspace_id).await?;
   
-  // Check if usage limit is exceeded
   if !limits.can_use_ai(current_usage) {
     return Err(AppError::PlanLimitExceeded(format!(
-      "AI response limit exceeded. Plan: {:?}, Current: {}, Limit: {}. Please upgrade your subscription.",
-      plan, current_usage, limits.ai_responses_limit
+      "AI response limit exceeded. Plan: {}, Current: {}, Limit: {}. Please upgrade your subscription.",
+      resource_status.plan_code, current_usage, limits.ai_responses_limit
     )));
   }
   
@@ -1012,9 +1010,7 @@ async fn upload_file_handler(
       actix_web::error::ErrorInternalServerError("获取用户订阅信息失败")
     })?;
 
-    let plan = SubscriptionPlan::try_from(resource_status.plan_code.as_str())
-      .unwrap_or(SubscriptionPlan::Free);
-    let plan_limits = PlanLimits::from_plan(&plan);
+    let plan_limits = PlanLimits::from_plan_code(&resource_status.plan_code);
 
     // 检查单文件大小限制
     if file_size > plan_limits.single_upload_limit {
