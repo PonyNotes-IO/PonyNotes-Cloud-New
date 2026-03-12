@@ -779,13 +779,40 @@ pub async fn remove_workspace_members(
           .remove_user_from_workspace(&uid, workspace_id)
           .await?;
 
-        // TODO: Add permission cache invalidation for removed user
-        // if let Some(realtime_server) = get_realtime_server_handle() {
-        //   realtime_server.send_to_workspace(
-        //     *workspace_id,
-        //     InvalidateUserPermissions { uid }
-        //   ).await;
-        // }
+        // 获取工作区名称（使用 pg_pool 查询）
+        let workspace_name = match database::workspace::select_workspace_name_from_workspace_id(pg_pool, workspace_id).await {
+            Ok(Some(name)) => name,
+            _ => "未知工作区".to_string(),
+        };
+
+        // 发送成员被移除通知给被移除的用户
+        let notification_payload = json!({
+          "workspace_id": workspace_id.to_string(),
+          "removed_member_uid": uid,
+          "title": "工作区访问权限已移除",
+          "message": format!("您已被从工作区 {} 中移除", workspace_name),
+        });
+        if let Err(err) = create_workspace_notification(
+          pg_pool,
+          workspace_id,
+          "workspace_member_removed",
+          &notification_payload,
+          Some(uid),
+        )
+        .await
+        {
+          tracing::warn!(
+            "Failed to send workspace_member_removed notification to uid={}: {:?}",
+            uid,
+            err
+          );
+        } else {
+          tracing::info!(
+            "Sent workspace_member_removed notification to uid={} for workspace={}",
+            uid,
+            workspace_id
+          );
+        }
       },
       Err(e) => {
         tracing::warn!(
