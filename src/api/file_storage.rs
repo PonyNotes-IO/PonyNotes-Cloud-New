@@ -185,8 +185,9 @@ async fn create_upload(
     parent_dir: req.parent_dir.clone(),
     file_id: req.file_id.clone(),
   };
+  info!("📤 [分片上传] 使用{}存储后端", if state.qiniu_bucket_storage.is_some() { "七牛云" } else { "MinIO" });
   let resp = state
-    .bucket_storage
+    .upload_storage()
     .create_upload(key, req)
     .await
     .map_err(AppResponseError::from)?;
@@ -257,7 +258,7 @@ async fn upload_part_handler(
   };
 
   let resp = state
-    .bucket_storage
+    .upload_storage()
     .upload_part(key, data)
     .await
     .map_err(AppResponseError::from)?;
@@ -284,7 +285,7 @@ async fn complete_upload_handler(
     file_id: req.file_id.clone(),
   };
   state
-    .bucket_storage
+    .upload_storage()
     .complete_upload(key, req)
     .await
     .map_err(AppResponseError::from)?;
@@ -364,7 +365,7 @@ async fn put_blob_handler(
   let file_size = content.len();
   let file_stream = ByteStream::from(content);
   state
-    .bucket_storage
+    .upload_storage()
     .put_blob_with_content_type(path, file_stream, content_type, file_size)
     .await
     .map_err(AppResponseError::from)?;
@@ -385,11 +386,18 @@ async fn delete_blob_handler(
     .workspace_access_control
     .enforce_action(&uid, &workspace_id, Action::Write)
     .await?;
-  state
-    .bucket_storage
-    .delete_blob(path)
-    .await
-    .map_err(AppResponseError::from)?;
+
+  // 优先从七牛云删除，失败则尝试MinIO（兼容历史数据）
+  if let Some(qiniu_storage) = &state.qiniu_bucket_storage {
+    match qiniu_storage.delete_blob(path.clone()).await {
+      Ok(_) => {},
+      Err(_) => {
+        state.bucket_storage.delete_blob(path).await.map_err(AppResponseError::from)?;
+      }
+    }
+  } else {
+    state.bucket_storage.delete_blob(path).await.map_err(AppResponseError::from)?;
+  }
 
   Ok(AppResponse::Ok().into())
 }
@@ -417,11 +425,17 @@ async fn delete_blob_v1_handler(
     .workspace_access_control
     .enforce_action(&uid, &workspace_id, Action::Write)
     .await?;
-  state
-    .bucket_storage
-    .delete_blob(path)
-    .await
-    .map_err(AppResponseError::from)?;
+
+  if let Some(qiniu_storage) = &state.qiniu_bucket_storage {
+    match qiniu_storage.delete_blob(path.clone()).await {
+      Ok(_) => {},
+      Err(_) => {
+        state.bucket_storage.delete_blob(path).await.map_err(AppResponseError::from)?;
+      }
+    }
+  } else {
+    state.bucket_storage.delete_blob(path).await.map_err(AppResponseError::from)?;
+  }
 
   Ok(AppResponse::Ok().into())
 }
@@ -492,8 +506,25 @@ async fn get_blob_by_object_key(
     }
   }
 
-  trace!("Get blob data from bucket storage: {:?}", key.object_key());
-  let blob_result = state.bucket_storage.get_blob(key).await;
+  trace!("Get blob data from storage: {:?}", key.object_key());
+
+  // 优先从七牛云获取，失败则回退到MinIO（兼容历史数据）
+  let blob_result = if let Some(qiniu_storage) = &state.qiniu_bucket_storage {
+    match qiniu_storage.get_blob(key).await {
+      Ok(blob) => Ok(blob),
+      Err(qiniu_err) => {
+        if qiniu_err.is_record_not_found() {
+          trace!("七牛云未找到文件，尝试从MinIO获取: {:?}", key.object_key());
+          state.bucket_storage.get_blob(key).await
+        } else {
+          Err(qiniu_err)
+        }
+      }
+    }
+  } else {
+    state.bucket_storage.get_blob(key).await
+  };
+
   match blob_result {
     Ok(blob) => {
       let response = HttpResponse::Ok()
@@ -501,7 +532,7 @@ async fn get_blob_by_object_key(
           .append_header((CONTENT_TYPE, metadata.file_type))
           .append_header((LAST_MODIFIED, metadata.modified_at.to_rfc2822()))
           .append_header((CONTENT_LENGTH, blob.len()))
-          .append_header((CACHE_CONTROL, "public, immutable, max-age=31536000"))// 31536000 seconds = 1 year
+          .append_header((CACHE_CONTROL, "public, immutable, max-age=31536000"))
           .body(blob);
 
       Ok(response)
@@ -717,8 +748,9 @@ async fn put_blob_handler_v1(
   );
 
   let file_stream = ByteStream::from(content);
+  info!("📤 [文件上传V1] 使用{}存储后端", if state.qiniu_bucket_storage.is_some() { "七牛云" } else { "MinIO" });
   state
-    .bucket_storage
+    .upload_storage()
     .put_blob_with_content_type(
       BlobPathV1::from((path, file_id)),
       file_stream,
@@ -731,7 +763,7 @@ async fn put_blob_handler_v1(
 }
 
 /// Use [BlobPathV0] when get/put object by single part
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 struct BlobPathV0 {
   workspace_id: Uuid,
   file_id: String,
@@ -756,7 +788,7 @@ impl BlobKey for BlobPathV0 {
 }
 
 /// Use [BlobPathV1] when put/get object by multiple upload parts
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct BlobPathV1 {
   pub workspace_id: Uuid,
   pub parent_dir: String,

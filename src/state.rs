@@ -65,6 +65,8 @@ pub struct AppState {
   pub ws_server: Addr<WsServer>,
   /// 七牛云客户端（用于AI图片和文件存储），可选
   pub qiniu_client: Option<Arc<infra::qiniu_client::QiniuClient>>,
+  /// 七牛云S3兼容存储（用于文档文件上传，替代MinIO），可选
+  pub qiniu_bucket_storage: Option<Arc<S3BucketStorage>>,
 }
 
 impl AppState {
@@ -74,6 +76,11 @@ impl AppState {
 
   pub async fn next_user_id(&self) -> i64 {
     self.id_gen.write().await.next_id()
+  }
+
+  /// 获取用于文件上传的存储后端：优先使用七牛云，不可用时回退到MinIO
+  pub fn upload_storage(&self) -> &Arc<S3BucketStorage> {
+    self.qiniu_bucket_storage.as_ref().unwrap_or(&self.bucket_storage)
   }
 }
 

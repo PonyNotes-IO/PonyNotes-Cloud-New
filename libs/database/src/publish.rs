@@ -731,8 +731,7 @@ pub async fn select_published_collab_by_uid(
   pg_pool: &PgPool,
   uid: i64,
 ) -> Result<Vec<PublishInfo>, AppError> {
-  let mut res = sqlx::query_as!(
-    PublishInfo,
+  let rows = sqlx::query(
     r#"
       SELECT
         awn.namespace,
@@ -748,12 +747,29 @@ pub async fn select_published_collab_by_uid(
       JOIN af_workspace aw ON apc.workspace_id = aw.workspace_id
       JOIN af_workspace_namespace awn ON aw.workspace_id = awn.workspace_id AND awn.is_original = TRUE
       WHERE apc.published_by = $1 AND apc.unpublished_at IS NULL
-      ORDER BY apc.created_at DESC;
+      ORDER BY apc.created_at DESC
     "#,
-    uid,
   )
+  .bind(uid)
   .fetch_all(pg_pool)
   .await?;
+
+  let mut res: Vec<PublishInfo> = rows
+    .into_iter()
+    .map(|row| {
+      use sqlx::Row;
+      PublishInfo {
+        namespace: row.get("namespace"),
+        publish_name: row.get("publish_name"),
+        view_id: row.get("view_id"),
+        publisher_email: row.get("publisher_email"),
+        publish_timestamp: row.get("publish_timestamp"),
+        unpublished_timestamp: row.get("unpublished_timestamp"),
+        comments_enabled: row.get("comments_enabled"),
+        duplicate_enabled: row.get("duplicate_enabled"),
+      }
+    })
+    .collect();
 
   use_non_orginal_namespace_if_possible(pg_pool, &mut res).await?;
   Ok(res)
@@ -764,8 +780,7 @@ pub async fn select_received_published_collab_with_details(
   pg_pool: &PgPool,
   uid: i64,
 ) -> Result<Vec<ReceivedPublishedCollabDetail>, AppError> {
-  let res = sqlx::query_as!(
-    ReceivedPublishedCollabDetail,
+  let rows = sqlx::query(
     r#"
       SELECT
         rpc.published_view_id,
@@ -773,8 +788,8 @@ pub async fn select_received_published_collab_with_details(
         rpc.workspace_id,
         rpc.published_at,
         rpc.is_readonly,
-        COALESCE(apc.publish_name, '') AS "publish_name!",
-        COALESCE(awn.namespace, '') AS "namespace!",
+        COALESCE(apc.publish_name, '') AS publish_name,
+        COALESCE(awn.namespace, '') AS namespace,
         au.email AS publisher_email
       FROM af_received_published_collab rpc
       LEFT JOIN af_published_collab apc ON rpc.published_view_id = apc.view_id
@@ -784,10 +799,27 @@ pub async fn select_received_published_collab_with_details(
       WHERE rpc.received_by = $1
       ORDER BY rpc.received_at DESC
     "#,
-    uid,
   )
+  .bind(uid)
   .fetch_all(pg_pool)
   .await?;
+
+  let res: Vec<ReceivedPublishedCollabDetail> = rows
+    .into_iter()
+    .map(|row| {
+      use sqlx::Row;
+      ReceivedPublishedCollabDetail {
+        published_view_id: row.get("published_view_id"),
+        received_view_id: row.get("received_view_id"),
+        workspace_id: row.get("workspace_id"),
+        published_at: row.get("published_at"),
+        is_readonly: row.get("is_readonly"),
+        publish_name: row.get("publish_name"),
+        namespace: row.get("namespace"),
+        publisher_email: row.get("publisher_email"),
+      }
+    })
+    .collect();
 
   Ok(res)
 }

@@ -78,7 +78,7 @@ use crate::biz::workspace::publish::{
   PublishedCollabPostgresStore, PublishedCollabS3StoreWithPostgresFallback, PublishedCollabStore,
 };
 use crate::config::config::{
-  Config, DatabaseSetting, GoTrueSetting, PublishedCollabStorageBackend, S3Setting,
+  Config, DatabaseSetting, GoTrueSetting, PublishedCollabStorageBackend, QiniuSetting, S3Setting,
 };
 use crate::mailer::AFCloudMailer;
 use crate::middleware::metrics_mw::MetricsMiddleware;
@@ -407,6 +407,34 @@ pub async fn init_state(config: &Config) -> Result<AppState, Error> {
   );
   info!("ChatClient initialized");
 
+  // Initialize Qiniu Cloud S3-compatible bucket storage for document file uploads
+  let qiniu_bucket_storage = if config.qiniu.enabled {
+    info!("🗄️ [七牛云S3存储] 正在初始化用于文档文件上传的S3兼容存储...");
+    match get_qiniu_s3_client(&config.qiniu).await {
+      Ok(qiniu_s3_client) => {
+        let qiniu_s3_bucket_client = AwsS3BucketClientImpl::new(
+          qiniu_s3_client,
+          config.qiniu.bucket.clone(),
+          config.qiniu.s3_endpoint.clone(),
+          None,
+        );
+        let storage = Arc::new(S3BucketStorage::from_bucket_impl(
+          qiniu_s3_bucket_client,
+          pg_pool.clone(),
+        ));
+        info!("✅ [七牛云S3存储] 文档文件存储初始化成功！bucket: {}", config.qiniu.bucket);
+        Some(storage)
+      },
+      Err(e) => {
+        error!("❌ [七牛云S3存储] 初始化失败: {}，将使用MinIO作为文件存储", e);
+        None
+      }
+    }
+  } else {
+    info!("ℹ️ [七牛云S3存储] 未启用，文档文件将存储到MinIO");
+    None
+  };
+
   // Initialize Qiniu Cloud client for AI file storage (optional)
   let qiniu_client = if config.qiniu.enabled {
     info!("🗄️ [七牛云] 开始初始化...");
@@ -474,6 +502,7 @@ pub async fn init_state(config: &Config) -> Result<AppState, Error> {
     indexer_scheduler,
     ws_server,
     qiniu_client,
+    qiniu_bucket_storage,
   })
 }
 
@@ -520,6 +549,32 @@ async fn get_redis_client(
     .await
     .context("failed to get the connection manager")?;
   Ok((manager, router.into(), awareness_gossip.into()))
+}
+
+/// 创建七牛云S3兼容客户端（用于文档文件存储）
+pub async fn get_qiniu_s3_client(qiniu_setting: &QiniuSetting) -> Result<aws_sdk_s3::Client, Error> {
+  let credentials = Credentials::new(
+    qiniu_setting.access_key.clone(),
+    qiniu_setting.secret_key.expose_secret().clone(),
+    None,
+    None,
+    "qiniu",
+  );
+  let shared_credentials = SharedCredentialsProvider::new(credentials);
+
+  let config = aws_sdk_s3::Config::builder()
+    .credentials_provider(shared_credentials)
+    .force_path_style(true)
+    .region(Region::new(qiniu_setting.region.clone()))
+    .endpoint_url(&qiniu_setting.s3_endpoint)
+    .build();
+
+  let client = aws_sdk_s3::Client::from_conf(config);
+  info!(
+    "七牛云S3客户端创建成功 - bucket: {}, region: {}, endpoint: {}",
+    qiniu_setting.bucket, qiniu_setting.region, qiniu_setting.s3_endpoint
+  );
+  Ok(client)
 }
 
 pub async fn get_aws_s3_client(s3_setting: &S3Setting) -> Result<aws_sdk_s3::Client, Error> {

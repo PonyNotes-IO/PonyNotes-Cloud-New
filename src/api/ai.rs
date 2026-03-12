@@ -1,6 +1,7 @@
 use crate::api::util::ai_model_from_header;
 use crate::biz::authentication::jwt::UserUuid;
-use crate::biz::subscription::ops::{fetch_current_subscription, record_usage};
+use crate::biz::subscription::ops::{fetch_current_subscription, get_user_resource_limit_status, record_usage};
+use database::subscription::get_user_total_usage_bytes;
 use crate::biz::workspace::subscription_plan_limits::PlanLimits;
 use crate::state::AppState;
 use shared_entity::dto::subscription_dto::UsageRecordRequest;
@@ -989,7 +990,7 @@ async fn upload_file_handler(
     
     let file_size = file_data.len() as i64;
     
-    // 文件大小限制: 20MB
+    // 硬编码上限: 20MB
     if file_size > 20 * 1024 * 1024 {
       return Ok(
         HttpResponse::PayloadTooLarge()
@@ -999,6 +1000,67 @@ async fn upload_file_handler(
           }))
       );
     }
+
+    // 订阅计划验证：获取用户uid并检查单文件大小限制和总存储空间
+    let uid = state.user_cache.get_user_uid(&user_uuid).await.map_err(|e| {
+      error!("获取用户UID失败: {}", e);
+      actix_web::error::ErrorInternalServerError("用户信息获取失败")
+    })?;
+
+    let resource_status = get_user_resource_limit_status(&state.pg_pool, uid).await.map_err(|e| {
+      error!("获取用户资源限制状态失败: {}", e);
+      actix_web::error::ErrorInternalServerError("获取用户订阅信息失败")
+    })?;
+
+    let plan = SubscriptionPlan::try_from(resource_status.plan_code.as_str())
+      .unwrap_or(SubscriptionPlan::Free);
+    let plan_limits = PlanLimits::from_plan(&plan);
+
+    // 检查单文件大小限制
+    if file_size > plan_limits.single_upload_limit {
+      return Ok(
+        HttpResponse::PayloadTooLarge()
+          .json(serde_json::json!({
+            "code": "SINGLE_FILE_LIMIT_EXCEEDED",
+            "message": format!(
+              "文件 {} ({}MB) 超过当前套餐({})的单文件上传限制({}MB)",
+              filename,
+              file_size / (1024 * 1024),
+              resource_status.plan_code,
+              plan_limits.single_upload_limit / (1024 * 1024)
+            ),
+          }))
+      );
+    }
+
+    // 检查总存储空间限制
+    let current_usage = get_user_total_usage_bytes(&state.pg_pool, uid).await.map_err(|e| {
+      error!("获取用户存储用量失败: {}", e);
+      actix_web::error::ErrorInternalServerError("获取用户存储用量失败")
+    })? as i64;
+    let total_limit_bytes = (resource_status.storage_limit_mb * 1024.0 * 1024.0) as i64;
+
+    if current_usage + file_size > total_limit_bytes {
+      return Ok(
+        HttpResponse::PayloadTooLarge()
+          .json(serde_json::json!({
+            "code": "STORAGE_LIMIT_EXCEEDED",
+            "message": format!(
+              "云存储空间不足。当前已用: {}MB, 总限额: {}MB, 本次上传: {}MB (套餐: {})",
+              current_usage / (1024 * 1024),
+              total_limit_bytes / (1024 * 1024),
+              file_size / (1024 * 1024),
+              resource_status.plan_code
+            ),
+          }))
+      );
+    }
+
+    info!(
+      "📤 [AI文件上传] 验证通过 - 用户uid: {}, 文件: {}, 大小: {}B, 套餐: {}, 已用: {}MB/{}MB",
+      uid, filename, file_size, resource_status.plan_code,
+      current_usage / (1024 * 1024), total_limit_bytes / (1024 * 1024)
+    );
     
     // 提取文件类型
     let file_type = filename
