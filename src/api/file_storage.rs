@@ -152,8 +152,10 @@ async fn create_upload(
     );
     return Err(
       AppError::PlanLimitExceeded(format!(
-        "File size {} bytes exceeds single upload limit {} bytes for {} plan. Please upgrade your subscription.",
-        file_size, single_limit_bytes, resource_status.plan_code
+        "单个文件大小 {:.1}MB 超过上限 {:.0}MB（当前套餐：{}）。请上传更小的文件。",
+        file_size as f64 / (1024.0 * 1024.0),
+        single_limit_bytes as f64 / (1024.0 * 1024.0),
+        resource_status.plan_code
       ))
       .into(),
     );
@@ -171,8 +173,11 @@ async fn create_upload(
     );
     return Err(
       AppError::PlanLimitExceeded(format!(
-        "Total storage limit exceeded. Current: {} bytes, Limit: {} bytes, Trying to upload: {} bytes for {} plan. Please upgrade your subscription.",
-        current_total_usage, total_limit_bytes, file_size, resource_status.plan_code
+        "云存储空间不足。已用 {:.1}MB / 共 {:.0}MB，本次上传需要 {:.1}MB（当前套餐：{}）。请清理空间或升级套餐。",
+        current_total_usage as f64 / (1024.0 * 1024.0),
+        total_limit_bytes as f64 / (1024.0 * 1024.0),
+        file_size as f64 / (1024.0 * 1024.0),
+        resource_status.plan_code
       ))
       .into(),
     );
@@ -688,8 +693,10 @@ async fn put_blob_handler_v1(
   if content_length as i64 > single_limit_bytes {
     return Err(
       AppError::PlanLimitExceeded(format!(
-        "File size {} bytes exceeds single upload limit {} bytes for {} plan. Please upgrade your subscription.",
-        content_length, single_limit_bytes, resource_status.plan_code
+        "单个文件大小 {:.1}MB 超过上限 {:.0}MB（当前套餐：{}）。请上传更小的文件。",
+        content_length as f64 / (1024.0 * 1024.0),
+        single_limit_bytes as f64 / (1024.0 * 1024.0),
+        resource_status.plan_code
       ))
       .into(),
     );
@@ -703,8 +710,11 @@ async fn put_blob_handler_v1(
   if current_total_usage + content_length as i64 > total_limit_bytes {
     return Err(
       AppError::PlanLimitExceeded(format!(
-        "Total storage limit exceeded. Current: {} bytes, Limit: {} bytes, Trying to upload: {} bytes for {} plan. Please upgrade your subscription.",
-        current_total_usage, total_limit_bytes, content_length, resource_status.plan_code
+        "云存储空间不足。已用 {:.1}MB / 共 {:.0}MB，本次上传需要 {:.1}MB（当前套餐：{}）。请清理空间或升级套餐。",
+        current_total_usage as f64 / (1024.0 * 1024.0),
+        total_limit_bytes as f64 / (1024.0 * 1024.0),
+        content_length as f64 / (1024.0 * 1024.0),
+        resource_status.plan_code
       ))
       .into(),
     );

@@ -25,7 +25,7 @@ impl PlanLimits {
         member_limit: i64::MAX, // Local use: unlimited members
         storage_bytes_limit: 300 * 1024 * 1024, // 300MB
         ai_responses_limit: 10, // Free users: 10 AI responses per month
-        single_upload_limit: 5 * 1024 * 1024, // 5MB
+        single_upload_limit: 300 * 1024 * 1024, // 300MB（免费版总云存储量为300MB，单文件上限与总存储量一致）
         storage_unlimited: false,
         ai_unlimited: false,
       },
@@ -124,7 +124,7 @@ mod tests {
     assert!(!limits.storage_unlimited);
     assert_eq!(limits.storage_bytes_limit, 300 * 1024 * 1024);
     assert_eq!(limits.ai_responses_limit, 10);
-    assert_eq!(limits.single_upload_limit, 5 * 1024 * 1024);
+    assert_eq!(limits.single_upload_limit, 300 * 1024 * 1024);
   }
 
   #[test]
@@ -175,10 +175,10 @@ mod tests {
     assert_eq!(hiclass.single_upload_limit, 10 * 1024 * 1024 * 1024);
 
     let mfb = PlanLimits::from_plan_code("mfb");
-    assert_eq!(mfb.single_upload_limit, 5 * 1024 * 1024);
+    assert_eq!(mfb.single_upload_limit, 300 * 1024 * 1024);
 
     let unknown = PlanLimits::from_plan_code("unknown");
-    assert_eq!(unknown.single_upload_limit, 5 * 1024 * 1024);
+    assert_eq!(unknown.single_upload_limit, 300 * 1024 * 1024);
   }
 
   #[test]
