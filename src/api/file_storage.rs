@@ -152,7 +152,7 @@ async fn create_upload(
     );
     return Err(
       AppError::PlanLimitExceeded(format!(
-        "单个文件大小 {:.1}MB 超过上限 {:.0}MB（当前套餐：{}）。请上传更小的文件。",
+        "File size {:.1}MB exceeds single upload limit {:.0}MB for {} plan.",
         file_size as f64 / (1024.0 * 1024.0),
         single_limit_bytes as f64 / (1024.0 * 1024.0),
         resource_status.plan_code
@@ -173,7 +173,7 @@ async fn create_upload(
     );
     return Err(
       AppError::PlanLimitExceeded(format!(
-        "云存储空间不足。已用 {:.1}MB / 共 {:.0}MB，本次上传需要 {:.1}MB（当前套餐：{}）。请清理空间或升级套餐。",
+        "Total storage limit exceeded. Current: {:.1}MB, Limit: {:.0}MB, Upload: {:.1}MB for {} plan.",
         current_total_usage as f64 / (1024.0 * 1024.0),
         total_limit_bytes as f64 / (1024.0 * 1024.0),
         file_size as f64 / (1024.0 * 1024.0),
@@ -693,7 +693,7 @@ async fn put_blob_handler_v1(
   if content_length as i64 > single_limit_bytes {
     return Err(
       AppError::PlanLimitExceeded(format!(
-        "单个文件大小 {:.1}MB 超过上限 {:.0}MB（当前套餐：{}）。请上传更小的文件。",
+        "File size {:.1}MB exceeds single upload limit {:.0}MB for {} plan.",
         content_length as f64 / (1024.0 * 1024.0),
         single_limit_bytes as f64 / (1024.0 * 1024.0),
         resource_status.plan_code
@@ -710,7 +710,7 @@ async fn put_blob_handler_v1(
   if current_total_usage + content_length as i64 > total_limit_bytes {
     return Err(
       AppError::PlanLimitExceeded(format!(
-        "云存储空间不足。已用 {:.1}MB / 共 {:.0}MB，本次上传需要 {:.1}MB（当前套餐：{}）。请清理空间或升级套餐。",
+        "Total storage limit exceeded. Current: {:.1}MB, Limit: {:.0}MB, Upload: {:.1}MB for {} plan.",
         current_total_usage as f64 / (1024.0 * 1024.0),
         total_limit_bytes as f64 / (1024.0 * 1024.0),
         content_length as f64 / (1024.0 * 1024.0),

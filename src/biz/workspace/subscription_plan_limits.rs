@@ -33,7 +33,7 @@ impl PlanLimits {
         member_limit: 2,
         storage_bytes_limit: 10 * 1024 * 1024 * 1024, // 10GB
         ai_responses_limit: 10,
-        single_upload_limit: 3 * 1024 * 1024 * 1024, // 3GB (标准版)
+        single_upload_limit: 3 * 1024 * 1024 * 1024, // 3GB
         storage_unlimited: false,
         ai_unlimited: false,
       },
@@ -41,7 +41,7 @@ impl PlanLimits {
         member_limit: 5,
         storage_bytes_limit: 50 * 1024 * 1024 * 1024, // 50GB
         ai_responses_limit: 40,
-        single_upload_limit: 5 * 1024 * 1024 * 1024, // 5GB (专业版)
+        single_upload_limit: 3 * 1024 * 1024 * 1024, // 3GB
         storage_unlimited: false,
         ai_unlimited: false,
       },
@@ -49,7 +49,7 @@ impl PlanLimits {
         member_limit: 10,
         storage_bytes_limit: 150 * 1024 * 1024 * 1024, // 150GB
         ai_responses_limit: 120,
-        single_upload_limit: 10 * 1024 * 1024 * 1024, // 10GB (高级版)
+        single_upload_limit: 3 * 1024 * 1024 * 1024, // 3GB
         storage_unlimited: false,
         ai_unlimited: false,
       },
@@ -142,7 +142,7 @@ mod tests {
     assert_eq!(limits.member_limit, 5);
     assert_eq!(limits.storage_bytes_limit, 50 * 1024 * 1024 * 1024);
     assert_eq!(limits.ai_responses_limit, 40);
-    assert_eq!(limits.single_upload_limit, 5 * 1024 * 1024 * 1024);
+    assert_eq!(limits.single_upload_limit, 3 * 1024 * 1024 * 1024);
   }
 
   #[test]
@@ -151,7 +151,7 @@ mod tests {
     assert_eq!(limits.member_limit, 10);
     assert_eq!(limits.storage_bytes_limit, 150 * 1024 * 1024 * 1024);
     assert_eq!(limits.ai_responses_limit, 120);
-    assert_eq!(limits.single_upload_limit, 10 * 1024 * 1024 * 1024);
+    assert_eq!(limits.single_upload_limit, 3 * 1024 * 1024 * 1024);
   }
 
   #[test]
@@ -169,10 +169,10 @@ mod tests {
     assert_eq!(standard.single_upload_limit, 3 * 1024 * 1024 * 1024);
 
     let profersor = PlanLimits::from_plan_code("profersor");
-    assert_eq!(profersor.single_upload_limit, 5 * 1024 * 1024 * 1024);
+    assert_eq!(profersor.single_upload_limit, 3 * 1024 * 1024 * 1024);
 
     let hiclass = PlanLimits::from_plan_code("hiclass");
-    assert_eq!(hiclass.single_upload_limit, 10 * 1024 * 1024 * 1024);
+    assert_eq!(hiclass.single_upload_limit, 3 * 1024 * 1024 * 1024);
 
     let mfb = PlanLimits::from_plan_code("mfb");
     assert_eq!(mfb.single_upload_limit, 300 * 1024 * 1024);
