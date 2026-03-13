@@ -528,6 +528,52 @@ pub async fn delete_workspace_members(
   Ok(())
 }
 
+/// 删除工作区内所有文档的成员权限记录
+#[inline]
+pub async fn delete_collab_members_by_workspace(
+  txn: &mut Transaction<'_, Postgres>,
+  workspace_id: &Uuid,
+  uid: i64,
+) -> Result<(), AppError> {
+  sqlx::query!(
+    r#"
+    DELETE FROM af_collab_member
+    WHERE oid IN (
+      SELECT oid FROM af_collab WHERE workspace_id = $1
+    )
+    AND uid = $2
+    "#,
+    workspace_id,
+    uid,
+  )
+  .execute(txn.deref_mut())
+  .await?;
+
+  Ok(())
+}
+
+/// 删除工作区内所有文档的成员邀请记录
+#[inline]
+pub async fn delete_collab_member_invites_by_workspace(
+  txn: &mut Transaction<'_, Postgres>,
+  workspace_id: &Uuid,
+  uid: i64,
+) -> Result<(), AppError> {
+  sqlx::query!(
+    r#"
+    DELETE FROM af_collab_member_invite
+    WHERE (send_uid = $2 OR received_uid = $2)
+    AND owner_workspace_id = $1
+    "#,
+    workspace_id,
+    uid,
+  )
+  .execute(txn.deref_mut())
+  .await?;
+
+  Ok(())
+}
+
 pub fn select_workspace_member_perm_stream(
   pg_pool: &PgPool,
 ) -> BoxStream<'_, sqlx::Result<AFWorkspaceMemberPermRow>> {

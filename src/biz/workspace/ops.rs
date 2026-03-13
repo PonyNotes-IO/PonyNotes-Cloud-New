@@ -775,6 +775,13 @@ pub async fn remove_workspace_members(
     match select_uid_from_email_or_phone(txn.deref_mut(), identifier).await {
       Ok(uid) => {
         delete_workspace_members(&mut txn, workspace_id, uid).await?;
+        
+        // 删除工作区内所有文档的成员权限记录
+        database::workspace::delete_collab_members_by_workspace(&mut txn, workspace_id, uid).await?;
+        
+        // 删除工作区内所有文档的成员邀请记录
+        database::workspace::delete_collab_member_invites_by_workspace(&mut txn, workspace_id, uid).await?;
+        
         workspace_access_control
           .remove_user_from_workspace(&uid, workspace_id)
           .await?;
