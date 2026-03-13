@@ -539,7 +539,7 @@ pub async fn delete_collab_members_by_workspace(
     r#"
     DELETE FROM af_collab_member
     WHERE oid IN (
-      SELECT oid FROM af_collab WHERE workspace_id = $1
+      SELECT oid::text FROM af_collab WHERE workspace_id = $1
     )
     AND uid = $2
     "#,
