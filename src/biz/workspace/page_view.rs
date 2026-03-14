@@ -1892,6 +1892,73 @@ async fn get_page_view_collab_for_orphaned_view(
   uid: i64,
   workspace_id: &Uuid,
 ) -> Result<PageCollab, AppError> {
+  // Query af_collab_member_invite to detect the actual view layout.
+  // When a view is not found in the folder (e.g. collaborator's uid not in the folder context),
+  // we must not blindly assume Document type — Grid/Board/Calendar views store data differently.
+  #[derive(sqlx::FromRow)]
+  struct InviteInfo {
+    view_layout: i32,
+    send_uid: i64,
+  }
+  let invite_info = sqlx::query_as::<_, InviteInfo>(
+    "SELECT view_layout, send_uid FROM af_collab_member_invite WHERE oid = $1 LIMIT 1",
+  )
+  .bind(view_id.to_string())
+  .fetch_optional(pg_pool)
+  .await
+  .unwrap_or(None);
+
+  // view_layout: 0=Document, 1=Grid, 2=Board, 3=Calendar, 4=Chat
+  let is_database_view = invite_info
+    .as_ref()
+    .map(|i| i.view_layout >= 1 && i.view_layout <= 3)
+    .unwrap_or(false);
+
+  if is_database_view {
+    let layout = match invite_info.as_ref().map(|i| i.view_layout).unwrap_or(1) {
+      2 => ViewLayout::Board,
+      3 => ViewLayout::Calendar,
+      _ => ViewLayout::Grid,
+    };
+    let data = get_page_collab_data_for_database(pg_pool, collab_storage, uid, workspace_id, view_id)
+      .await
+      .map_err(|err| {
+        AppError::InvalidFolderView(format!(
+          "Unable to get page collab data for database view {}: {}",
+          view_id, err
+        ))
+      })?;
+    let owner_uid = invite_info.as_ref().map(|i| i.send_uid);
+    let owner = match owner_uid {
+      Some(o_uid) => select_web_user_from_uid(pg_pool, o_uid).await?,
+      None => None,
+    };
+    return Ok(PageCollab {
+      view: FolderView {
+        view_id: *view_id,
+        parent_view_id: None,
+        prev_view_id: None,
+        name: "".to_string(),
+        icon: None,
+        is_space: false,
+        is_private: false,
+        is_published: false,
+        is_favorite: false,
+        layout,
+        created_at: Default::default(),
+        created_by: owner_uid,
+        last_edited_by: None,
+        last_edited_time: Default::default(),
+        is_locked: Some(false),
+        extra: None,
+        children: vec![],
+      },
+      data,
+      owner,
+      last_editor: None,
+    });
+  }
+
   let data = get_page_collab_data_for_document(collab_storage, uid, workspace_id, view_id)
     .await
     .map_err(|err| {
@@ -2026,7 +2093,7 @@ async fn get_page_collab_data_for_database(
     })?;
   let ws_db_collab = get_latest_collab(
     collab_storage,
-    GetCollabOrigin::User { uid },
+    GetCollabOrigin::Server, // WorkspaceDatabase is a workspace-level resource; collaborators don't have direct member access to it
     *workspace_id,
     ws_db_oid,
     CollabType::WorkspaceDatabase,
