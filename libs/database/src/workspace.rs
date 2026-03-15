@@ -645,8 +645,6 @@ pub async fn select_workspace_member_uuid_exclude_guest(
   Ok(member_uuids)
 }
 
-/// returns a list of workspace members, sorted by their creation time.
-#[inline]
 /// Intermediate row type with primitive `role: i32` to allow non-macro sqlx query_as.
 /// `AFRole` does not implement sqlx::Decode/Type, so we decode as i32 then convert.
 #[derive(sqlx::FromRow)]
