@@ -647,13 +647,26 @@ pub async fn select_workspace_member_uuid_exclude_guest(
 
 /// returns a list of workspace members, sorted by their creation time.
 #[inline]
+/// Intermediate row type with primitive `role: i32` to allow non-macro sqlx query_as.
+/// `AFRole` does not implement sqlx::Decode/Type, so we decode as i32 then convert.
+#[derive(sqlx::FromRow)]
+struct WorkspaceMemberRawRow {
+  uid: i64,
+  name: String,
+  email: Option<String>,
+  avatar_url: Option<String>,
+  role: i32,
+  created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 /// Returns ALL workspace members including guests (no role filter).
-/// Uses the non-macro query_as to avoid SQLX offline cache requirements.
+/// Uses the non-macro `query_as` with a primitive-only intermediate struct to avoid
+/// both the SQLX offline cache requirement and the missing sqlx::Decode on AFRole.
 pub async fn select_workspace_member_list(
   pg_pool: &PgPool,
   workspace_id: &uuid::Uuid,
 ) -> Result<Vec<AFWorkspaceMemberRow>, AppError> {
-  let members = sqlx::query_as::<_, AFWorkspaceMemberRow>(
+  let rows = sqlx::query_as::<_, WorkspaceMemberRawRow>(
     r#"
     SELECT
       af_user.uid,
@@ -671,6 +684,18 @@ pub async fn select_workspace_member_list(
   .bind(workspace_id)
   .fetch_all(pg_pool)
   .await?;
+
+  let members = rows
+    .into_iter()
+    .map(|r| AFWorkspaceMemberRow {
+      uid: r.uid,
+      name: r.name,
+      email: r.email,
+      avatar_url: r.avatar_url,
+      role: AFRole::from(r.role),
+      created_at: r.created_at,
+    })
+    .collect();
   Ok(members)
 }
 
