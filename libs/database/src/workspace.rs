@@ -647,6 +647,33 @@ pub async fn select_workspace_member_uuid_exclude_guest(
 
 /// returns a list of workspace members, sorted by their creation time.
 #[inline]
+/// Returns ALL workspace members including guests (no role filter).
+/// Uses the non-macro query_as to avoid SQLX offline cache requirements.
+pub async fn select_workspace_member_list(
+  pg_pool: &PgPool,
+  workspace_id: &uuid::Uuid,
+) -> Result<Vec<AFWorkspaceMemberRow>, AppError> {
+  let members = sqlx::query_as::<_, AFWorkspaceMemberRow>(
+    r#"
+    SELECT
+      af_user.uid,
+      af_user.name,
+      af_user.email,
+      af_user.metadata ->> 'icon_url' AS avatar_url,
+      af_workspace_member.role_id AS role,
+      af_workspace_member.created_at
+    FROM public.af_workspace_member
+        JOIN public.af_user ON af_workspace_member.uid = af_user.uid
+    WHERE af_workspace_member.workspace_id = $1
+    ORDER BY af_workspace_member.created_at ASC
+    "#,
+  )
+  .bind(workspace_id)
+  .fetch_all(pg_pool)
+  .await?;
+  Ok(members)
+}
+
 pub async fn select_workspace_member_list_exclude_guest(
   pg_pool: &PgPool,
   workspace_id: &uuid::Uuid,

@@ -779,9 +779,18 @@ async fn get_workspace_members_handler(
   let requester_member_info =
     workspace::ops::get_workspace_member(uid, &state.pg_pool, &workspace_id).await?;
   let members: Vec<AFWorkspaceMember> = if requester_member_info.role == AFRole::Guest {
+    // Guest 只能看到自己和 owner
     let owner = get_workspace_owner(&state.pg_pool, &workspace_id).await?;
     vec![requester_member_info.into(), owner.into()]
+  } else if requester_member_info.role == AFRole::Owner {
+    // Owner 可以看到所有成员（含 Guest），以便在人员管理页面管理他们
+    workspace::ops::get_workspace_members_all(&state.pg_pool, &workspace_id)
+      .await?
+      .into_iter()
+      .map(|member| member.into())
+      .collect()
   } else {
+    // Member 只看非 Guest 成员
     workspace::ops::get_workspace_members_exclude_guest(&state.pg_pool, &workspace_id)
       .await?
       .into_iter()

@@ -846,6 +846,14 @@ pub async fn get_workspace_members_exclude_guest(
   select_workspace_member_list_exclude_guest(pg_pool, workspace_id).await
 }
 
+/// Returns all workspace members including guests.
+pub async fn get_workspace_members_all(
+  pg_pool: &PgPool,
+  workspace_id: &Uuid,
+) -> Result<Vec<AFWorkspaceMemberRow>, AppError> {
+  database::workspace::select_workspace_member_list(pg_pool, workspace_id).await
+}
+
 pub async fn get_workspace_member_optional(
   uid: i64,
   pg_pool: &PgPool,
