@@ -248,6 +248,7 @@ pub struct AFWorkspaceMemberRow {
 impl From<AFWorkspaceMemberRow> for AFWorkspaceMember {
   fn from(value: AFWorkspaceMemberRow) -> Self {
     AFWorkspaceMember {
+      uid: value.uid,
       name: value.name.clone(),
       email: value.email.clone(),
       role: value.role.clone(),

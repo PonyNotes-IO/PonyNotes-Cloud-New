@@ -94,12 +94,14 @@ cd "${PROJECT_DIR}"
 export DOCKER_BUILDKIT=1
 T0=$(date +%s)
 
-docker build \
+docker buildx build \
+  --platform linux/amd64 \
   -f Dockerfile \
   -t "${IMAGE_NAME}" \
   --build-arg DATABASE_URL="${DATABASE_URL}" \
   --build-arg CARGO_BUILD_JOBS=16 \
   --build-arg ENABLE_SCCACHE=true \
+  --load \
   .
 
 T1=$(date +%s)

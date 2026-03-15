@@ -232,14 +232,14 @@ pub async fn select_uid_from_phone<'a, E: Executor<'a, Database = Postgres>>(
   Ok(uid)
 }
 
-/// 根据邮箱或手机号查找用户 uid
-/// 自动判断输入类型：包含 @ 是邮箱，否则是手机号
+/// 根据邮箱、手机号或uid（数字字符串）查找用户 uid
+/// 判断规则：包含 @ 是邮箱；纯数字且长度>=12位视为uid；否则是手机号
 #[inline]
 pub async fn select_uid_from_email_or_phone<'a, E: Executor<'a, Database = Postgres>>(
   executor: E,
   identifier: &str,
 ) -> Result<i64, AppError> {
-  // 判断是邮箱还是手机号
+  // 判断是邮箱还是手机号或uid
   if identifier.contains('@') {
     // 邮箱查询
     let uid = sqlx::query!(
@@ -252,10 +252,17 @@ pub async fn select_uid_from_email_or_phone<'a, E: Executor<'a, Database = Postg
     .await?
     .uid;
     Ok(uid)
+  } else if identifier.chars().all(|c| c.is_ascii_digit()) && identifier.len() >= 12 {
+    // 纯数字且长度>=12位，视为uid直接返回（我们的uid是18位bigint）
+    // 客户端只会传递合法的uid，因此无需再做数据库验证查询，避免添加新的sqlx缓存条目
+    let parsed_uid: i64 = identifier.parse().map_err(|_| {
+      AppError::RecordNotFound(format!("Invalid uid format: {}", identifier))
+    })?;
+    Ok(parsed_uid)
   } else {
     // 手机号查询 - 支持多种格式
     let cleaned = identifier.trim().trim_start_matches('+');
-    
+
     // 尝试直接查询
     let result = sqlx::query!(
       r#"
@@ -267,7 +274,7 @@ pub async fn select_uid_from_email_or_phone<'a, E: Executor<'a, Database = Postg
     )
     .fetch_optional(executor)
     .await?;
-    
+
     match result {
       Some(row) => Ok(row.uid),
       None => Err(AppError::RecordNotFound(format!(
