@@ -4041,11 +4041,38 @@ async fn get_collab_share_info_handler(
   .map_err(AppError::from)?;
 
   match row {
-    Some(r) => Ok(Json(AppResponse::Ok().with_data(CollabShareInfo {
-      view_layout: r.view_layout,
-      owner_workspace_id: r.owner_workspace_id,
-      name: r.name,
-    }))),
+    Some(mut r) => {
+      // If view_layout=0 (default/unknown), try to look up the real layout from the folder.
+      // This handles old invite records created before the view_layout column was added.
+      if r.view_layout == 0 {
+        if let Some(workspace_id) = r.owner_workspace_id {
+          if let Ok(folder) = state.ws_server.get_folder(workspace_id).await {
+            if let Some(view_info) = folder.get_view(&query.view_id, 0) {
+              let real_layout = view_info.layout.clone() as i32;
+              if real_layout > 0 {
+                // Backfill the DB so future calls return the correct value directly
+                let _ = sqlx::query(
+                  "UPDATE af_collab_member_invite SET view_layout = $1 WHERE oid = $2 AND received_uid IS NULL AND view_layout = 0",
+                )
+                .bind(real_layout)
+                .bind(&query.view_id)
+                .execute(&state.pg_pool)
+                .await;
+                r.view_layout = real_layout;
+                if r.name.is_empty() || r.name == "加载中..." {
+                  r.name = view_info.name.clone();
+                }
+              }
+            }
+          }
+        }
+      }
+      Ok(Json(AppResponse::Ok().with_data(CollabShareInfo {
+        view_layout: r.view_layout,
+        owner_workspace_id: r.owner_workspace_id,
+        name: r.name,
+      })))
+    },
     None => Err(AppError::RecordNotFound(format!("No invite template for view_id: {}", query.view_id)).into()),
   }
 }
