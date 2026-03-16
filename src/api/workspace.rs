@@ -507,14 +507,19 @@ pub fn collab_scope() -> Scope {
 
 /// 协作分享相关路由：/api/collab/me/received 和 /api/collab/me/sent
 pub fn collab_share_scope() -> Scope {
-  web::scope("/api/collab/me")
+  web::scope("/api/collab")
     .service(
       // 别人分享给我的协作视图列表
-      web::resource("/received").route(web::get().to(list_received_collab_handler)),
+      web::resource("/me/received").route(web::get().to(list_received_collab_handler)),
     )
     .service(
       // 我分享给别人的协作视图列表
-      web::resource("/sent").route(web::get().to(list_sent_collab_handler)),
+      web::resource("/me/sent").route(web::get().to(list_sent_collab_handler)),
+    )
+    .service(
+      // 获取分享链接的邀请模板信息（view_layout, owner_workspace_id）
+      // GET /api/collab/share-info?view_id={view_id}
+      web::resource("/share-info").route(web::get().to(get_collab_share_info_handler)),
     )
 }
 
@@ -3998,6 +4003,51 @@ async fn list_received_collab_handler(
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
   let list = get_received_collab_list(&state.pg_pool, uid).await?;
   Ok(Json(AppResponse::Ok().with_data(list)))
+}
+
+/// 获取分享链接的邀请模板信息（view_layout, owner_workspace_id, name）
+/// 不需要用户先接受邀请，任何已登录用户都可以查询
+/// 用于客户端在没有 layout 参数时自动检测视图布局类型
+#[derive(Debug, Deserialize)]
+struct GetShareInfoParams {
+  view_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CollabShareInfo {
+  view_layout: i32,
+  owner_workspace_id: Option<Uuid>,
+  name: String,
+}
+
+async fn get_collab_share_info_handler(
+  _user_uuid: UserUuid,
+  query: web::Query<GetShareInfoParams>,
+  state: Data<AppState>,
+) -> Result<JsonAppResponse<CollabShareInfo>> {
+  #[derive(sqlx::FromRow)]
+  struct InviteRow {
+    view_layout: i32,
+    owner_workspace_id: Option<Uuid>,
+    name: String,
+  }
+
+  let row = sqlx::query_as::<_, InviteRow>(
+    "SELECT view_layout, owner_workspace_id, name FROM af_collab_member_invite WHERE oid = $1 AND received_uid IS NULL LIMIT 1",
+  )
+  .bind(&query.view_id)
+  .fetch_optional(&state.pg_pool)
+  .await
+  .map_err(AppError::from)?;
+
+  match row {
+    Some(r) => Ok(Json(AppResponse::Ok().with_data(CollabShareInfo {
+      view_layout: r.view_layout,
+      owner_workspace_id: r.owner_workspace_id,
+      name: r.name,
+    }))),
+    None => Err(AppError::RecordNotFound(format!("No invite template for view_id: {}", query.view_id)).into()),
+  }
 }
 
 /// 辅助函数：解析数据库视图的 database_id

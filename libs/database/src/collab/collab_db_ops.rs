@@ -714,14 +714,14 @@ pub async fn select_send_collab_list<'a, E>(executor: E, uid: i64) -> Result<Vec
 where
   E: Executor<'a, Database = Postgres>,
 {
-  let list = sqlx::query_as!(
-    AFCollabMemberInvite,
+  // 使用运行时查询（非宏）避免 sqlx 离线缓存列不匹配问题（view_layout, owner_workspace_id 为后添加字段）
+  let list = sqlx::query_as::<_, AFCollabMemberInvite>(
     r#"SELECT DISTINCT ON (oid) oid, send_uid, received_uid, created_at, name, permission_id, view_layout, owner_workspace_id
        FROM af_collab_member_invite
        WHERE send_uid = $1
        ORDER BY oid, created_at DESC"#,
-    uid
   )
+  .bind(uid)
   .fetch_all(executor)
   .await?;
   Ok(list)
@@ -731,13 +731,13 @@ pub async fn select_received_collab_list<'a, E>(executor: E, uid: i64) -> Result
 where
   E: Executor<'a, Database = Postgres>,
 {
-  let list = sqlx::query_as!(
-    AFCollabMemberInvite,
+  // 使用运行时查询（非宏）避免 sqlx 离线缓存列不匹配问题（view_layout, owner_workspace_id 为后添加字段）
+  let list = sqlx::query_as::<_, AFCollabMemberInvite>(
     r#"SELECT oid, send_uid, received_uid, created_at, name, permission_id, view_layout, owner_workspace_id
        FROM af_collab_member_invite
        WHERE received_uid = $1 AND received_uid IS NOT NULL"#,
-    uid
   )
+  .bind(uid)
   .fetch_all(executor)
   .await?;
   Ok(list)

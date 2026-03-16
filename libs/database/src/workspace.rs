@@ -559,15 +559,16 @@ pub async fn delete_collab_member_invites_by_workspace(
   workspace_id: &Uuid,
   uid: i64,
 ) -> Result<(), AppError> {
-  sqlx::query!(
+  // 使用运行时查询（非宏）避免 sqlx 离线缓存列不匹配问题（owner_workspace_id 为后添加字段）
+  sqlx::query(
     r#"
     DELETE FROM af_collab_member_invite
     WHERE (send_uid = $2 OR received_uid = $2)
     AND owner_workspace_id = $1
     "#,
-    workspace_id,
-    uid,
   )
+  .bind(workspace_id)
+  .bind(uid)
   .execute(txn.deref_mut())
   .await?;
 
