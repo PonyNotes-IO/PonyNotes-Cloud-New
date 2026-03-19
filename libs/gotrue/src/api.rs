@@ -81,7 +81,13 @@ impl Client {
     // https://github.com/supabase/auth/blob/master/internal/api/verify.go#L219
     let url = format!("{}/token?grant_type={}", self.base_url, grant.type_as_str());
     let payload = grant.json_value();
-    let resp = self.client.post(url).json(&payload).send().await?;
+    let resp = self
+      .client
+      .post(url)
+      .json(&payload)
+      .timeout(Duration::from_secs(30))
+      .send()
+      .await?;
     if resp.status().is_success() {
       let token: GotrueTokenResponse = from_body(resp).await?;
       Ok(token)

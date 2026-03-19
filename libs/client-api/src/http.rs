@@ -140,7 +140,10 @@ impl Client {
     client_id: &str,
   ) -> Self {
     let reqwest_client = reqwest::Client::builder()
-      .danger_accept_invalid_certs(true)  // 接受自签名证书，解决本地代理导致的SSL握手失败
+      .danger_accept_invalid_certs(true)
+      .no_proxy()
+      .connect_timeout(Duration::from_secs(15))
+      .timeout(Duration::from_secs(60))
       .build()
       .unwrap_or_else(|_| reqwest::Client::new());
     let client_version = Version::parse(client_id).unwrap_or_else(|_| Version::new(0, 6, 7));

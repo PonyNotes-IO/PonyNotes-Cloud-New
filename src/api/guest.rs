@@ -21,7 +21,8 @@ use uuid::Uuid;
 use crate::biz::authentication::jwt::UserUuid;
 use crate::state::AppState;
 use crate::biz::collab::me::{get_received_collab_list, get_send_collab_list};
-use database_entity::dto::AFAccessLevel;
+use crate::biz::workspace;
+use database_entity::dto::{AFAccessLevel, AFRole};
 use database::pg_row::AFCollabMemberInvite;
 
 pub fn sharing_scope() -> Scope {
@@ -146,18 +147,76 @@ async fn put_shared_view_handler(
 }
 
 async fn shared_view_access_details_handler(
-  _user_uuid: UserUuid,
-  _state: Data<AppState>,
+  user_uuid: UserUuid,
+  state: Data<AppState>,
   _json: Json<SharedViewDetailsRequest>,
-  _path: web::Path<(Uuid, Uuid)>,
+  path: web::Path<(Uuid, Uuid)>,
 ) -> Result<JsonAppResponse<SharedViewDetails>> {
-  Err(
-    AppResponseError::new(
-      ErrorCode::FeatureNotAvailable,
-      "this version of appflowy cloud server does not support guest editors",
+  let uid = state.user_cache.get_user_uid(&user_uuid).await.map_err(|e| {
+    AppResponseError::new(ErrorCode::UserUnAuthorized, e.to_string())
+  })?;
+  let (_, view_id) = path.into_inner();
+  let view_id_str = view_id.to_string();
+
+  // Get all collab members for this view
+  let members = workspace::ops::get_collab_members(&state.pg_pool, &view_id)
+    .await
+    .map_err(|e| AppResponseError::new(ErrorCode::Internal, e.to_string()))?;
+
+  // Only allow collab members or workspace members of the document's workspace to view the list
+  let is_collab_member = members.iter().any(|m| m.uid == uid);
+  let is_workspace_member = if !is_collab_member {
+    sqlx::query_scalar::<_, bool>(
+      r#"
+      SELECT EXISTS(
+        SELECT 1 FROM af_collab c
+        JOIN af_workspace_member wm ON c.workspace_id = wm.workspace_id
+        WHERE c.oid = $1 AND wm.uid = $2
+      )
+      "#,
     )
-    .into(),
-  )
+    .bind(&view_id_str)
+    .bind(uid)
+    .fetch_one(&state.pg_pool)
+    .await
+    .unwrap_or(false)
+  } else {
+    false
+  };
+
+  if !is_collab_member && !is_workspace_member {
+    return Err(AppResponseError::new(
+      ErrorCode::NotEnoughPermissions,
+      "Not authorized to view this document's members",
+    )
+    .into());
+  }
+
+  let shared_with: Vec<SharedUser> = members
+    .into_iter()
+    .map(|m| {
+      let access_level = match m.permission_id {
+        2 => AFAccessLevel::ReadAndComment,
+        3 => AFAccessLevel::ReadAndWrite,
+        4 => AFAccessLevel::FullAccess,
+        _ => AFAccessLevel::ReadOnly,
+      };
+      SharedUser {
+        view_id,
+        email: m.email.unwrap_or_default(),
+        name: m.name.unwrap_or_default(),
+        access_level,
+        role: AFRole::Member,
+        avatar_url: m.avatar_url,
+        pending_invitation: false,
+      }
+    })
+    .collect();
+
+  Ok(Json(AppResponse::Ok().with_data(SharedViewDetails {
+    view_id,
+    shared_with,
+  })))
 }
 
 async fn revoke_shared_view_access_handler(
