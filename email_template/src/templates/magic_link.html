@@ -1,126 +1,119 @@
 ---
-title: "Login for AppFlowy"
-bodyClass: #EEEEFC
+title: "小马笔记登录验证码"
+bodyClass: #F0EBF8
 ---
 
 <x-main>
   <div style="display: none">
-    To login to AppFlowy, follow this link @{{ .ConfirmationURL }}
+    您的小马笔记登录验证码：@{{ .Token }}，请在 5 分钟内使用。
   </div>
 
-  <table width="100%" border="0" cellpadding="0" cellspacing="0" bgcolor="#EEEEFC" style="font-family: Google Sans, Robot, Arial, sans-serif; padding: 24px; color: #000000;">
+  <table width="100%" border="0" cellpadding="0" cellspacing="0" bgcolor="#F0EBF8" style="font-family: -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', Arial, sans-serif; padding: 40px 24px; color: #1A1A2E;">
     <tr>
       <td align="center" valign="top">
-        <table width="600" border="0" cellpadding="0" cellspacing="0" bgcolor="#ffffff" style="border-radius: 12px; padding: 32px; margin: 0 auto;">
+        <table width="560" border="0" cellpadding="0" cellspacing="0" bgcolor="#ffffff" style="border-radius: 16px; overflow: hidden; box-shadow: 0 4px 24px rgba(101, 62, 140, 0.10); margin: 0 auto;">
+
+          <!-- 顶部品牌色条 -->
           <tr>
-            <td align="center" style="padding-bottom: 24px;">
-              <img src="{{ cdnBaseUrl }}images/appflowy.png" width="32" height="32" style="border: 0; display: block; margin: 0 auto;" />
+            <td style="background: linear-gradient(135deg, #653E8C 0%, #8B5BB5 100%); padding: 32px 40px; text-align: center;">
+              <img src="{{ cdnBaseUrl }}images/appflowy.png" width="48" height="48" style="border: 0; display: block; margin: 0 auto 16px auto; border-radius: 12px; background: rgba(255,255,255,0.15); padding: 6px;" />
+              <p style="margin: 0; font-size: 22px; font-weight: 700; color: #ffffff; letter-spacing: 0.5px;">小马笔记</p>
+              <p style="margin: 6px 0 0 0; font-size: 13px; color: rgba(255,255,255,0.75); letter-spacing: 0.3px;">让知识触手可及</p>
             </td>
           </tr>
 
+          <!-- 主体内容 -->
           <tr>
-            <td align="center" style="padding-bottom: 8px;">
-              <h1 style="font-size: 24px; font-weight: bold; margin: 0; color: #000000;">Login for AppFlowy</h1>
-            </td>
-          </tr>
+            <td style="padding: 40px 40px 32px 40px;">
 
-          <tr>
-            <td align="center" style="padding-bottom: 24px;">
-              <p style="font-size: 16px; line-height: 1.5; margin: 0;">We received a request to log in to your AppFlowy account.</p>
-              <p style="font-size: 16px; line-height: 1.5; margin: 2px 0 0 0;">You can log in using either of the following options:</p>
-            </td>
-          </tr>
-
-          <tr>
-            <td align="center" style="padding-bottom: 12px;">
-              <table width="100%" border="0" cellpadding="0" cellspacing="0" bgcolor="#F8FAFF" style="border-radius: 20px; padding: 24px 20px;">
+              <!-- 标题区 -->
+              <table width="100%" border="0" cellpadding="0" cellspacing="0">
                 <tr>
-                  <td align="center" style="padding-bottom: 16px;">
-                    <h2 style="font-size: 16px; font-weight: bold; margin: 0; color: #000000;">Option 1: Magic Link (Fast & Easy)</h2>
-                    <p style="font-size: 14px; color: #6F748C; margin: 10px 0 0 0;">Click the button or link below to log in instantly</p>
+                  <td align="center" style="padding-bottom: 8px;">
+                    <h1 style="font-size: 20px; font-weight: 700; margin: 0; color: #1A1A2E;">您的登录验证码</h1>
                   </td>
                 </tr>
-
                 <tr>
-                  <td align="center" style="padding-bottom: 16px;">
-                    <table border="0" cellpadding="0" cellspacing="0" style="margin: 0 auto;">
+                  <td align="center" style="padding-bottom: 32px;">
+                    <p style="font-size: 14px; line-height: 1.7; margin: 0; color: #6B6B8A;">我们收到了您的小马笔记登录请求，请使用以下验证码完成登录。</p>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- 验证码卡片 -->
+              <table width="100%" border="0" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td align="center">
+                    <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background: linear-gradient(135deg, #F5F0FC 0%, #EDE4F8 100%); border-radius: 12px; border: 1.5px solid #D4BCF0;">
                       <tr>
-                        <td align="center" bgcolor="#9327FF" style="border-radius: 10px; padding: 10px 16px;">
-                          <a href="@{{ .ConfirmationURL }}" style="color: #ffffff; font-weight: 600; font-size: 14px; text-decoration: none; display: inline-block;">Login to AppFlowy</a>
+                        <td align="center" style="padding: 12px 24px 8px 24px;">
+                          <p style="margin: 0; font-size: 12px; font-weight: 600; color: #8B5BB5; letter-spacing: 1.5px; text-transform: uppercase;">验证码</p>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td align="center" style="padding: 4px 24px 20px 24px;">
+                          <p style="margin: 0; font-size: 42px; font-weight: 800; letter-spacing: 10px; color: #653E8C; font-variant-numeric: tabular-nums;">@{{ .Token }}</p>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td align="center" style="padding: 0 24px 16px 24px;">
+                          <table border="0" cellpadding="0" cellspacing="0">
+                            <tr>
+                              <td style="background-color: #653E8C; border-radius: 20px; padding: 4px 14px;">
+                                <p style="margin: 0; font-size: 11px; color: #ffffff; font-weight: 600;">⏱ 5 分钟内有效</p>
+                              </td>
+                            </tr>
+                          </table>
                         </td>
                       </tr>
                     </table>
                   </td>
                 </tr>
+              </table>
 
+              <!-- 使用说明 -->
+              <table width="100%" border="0" cellpadding="0" cellspacing="0" style="margin-top: 28px;">
+                <tr>
+                  <td style="background-color: #FAFAFA; border-radius: 8px; border-left: 3px solid #653E8C; padding: 14px 16px;">
+                    <p style="margin: 0 0 4px 0; font-size: 12px; font-weight: 600; color: #1A1A2E;">使用说明</p>
+                    <p style="margin: 0; font-size: 12px; line-height: 1.6; color: #6B6B8A;">将以上 6 位验证码填入登录页面的输入框，即可完成登录。验证码将在 5 分钟后自动失效，请尽快使用。</p>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- 安全提示 -->
+              <table width="100%" border="0" cellpadding="0" cellspacing="0" style="margin-top: 16px;">
                 <tr>
                   <td align="center">
-                    <p style="padding-bottom: 16px; font-size: 12px; color: #6F748C; margin: 0;">Or paste this into your browser:</p>
-                    <p style="max-width: 384px;margin: 0;">
-                      <a href="@{{ .ConfirmationURL }}" style="font-size: 12px; text-decoration: none; text-align: center; color: #6F748C; font-weight: bold; margin: 0; word-break: break-all;">
-                        @{{ .ConfirmationURL }}
-                      </a>
-                    </p>
+                    <p style="font-size: 12px; color: #9B9BB8; margin: 0; line-height: 1.6;">如果您没有发起此次登录请求，请忽略本邮件，您的账号安全不受影响。</p>
                   </td>
+                </tr>
+              </table>
+
+            </td>
+          </tr>
+
+          <!-- 分割线 -->
+          <tr>
+            <td style="padding: 0 40px;">
+              <table width="100%" border="0" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="border-top: 1px solid #EDE4F8; font-size: 0; line-height: 0;">&nbsp;</td>
                 </tr>
               </table>
             </td>
           </tr>
 
+          <!-- 页脚 -->
           <tr>
-            <td align="center" style="padding-bottom: 24px;">
-              <table width="100%" border="0" cellpadding="0" cellspacing="0" bgcolor="#F8FAFF" style="border-radius: 20px; padding: 24px 20px;">
-                <tr>
-                  <td align="center" style="padding-bottom: 16px;">
-                    <h2 style="font-size: 16px; font-weight: bold; margin: 0; color: #000000;">Option 2: One-Time Password (OTP)</h2>
-                    <p style="font-size: 14px; color: #6F748C; margin: 10px 0 0 0;">Prefer to enter a code instead? Use the one-time code below</p>
-                  </td>
-                </tr>
-
-                <tr>
-                  <td align="center">
-                    <span style="background-color: #ffffff; padding: 8px; border-radius: 6px; font-weight: 600; font-size: 16px; display: inline-block;">@{{ .Token }}</span>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-
-          <tr>
-            <td align="center" style="padding-bottom: 24px;">
-              <p style="font-size: 12px; color: #6F748C; margin: 0;">This code and magic link will expire in 5 minutes for security reasons.</p>
-              <p style="font-size: 12px; color: #6F748C; margin: 0;">If you didn't initiate this login, you can safely ignore this email. No action is needed.</p>
-            </td>
-          </tr>
-
-          <tr>
-            <td align="center">
-              <p style="border-top: 1px solid #E4E8F5; padding-top: 24px; font-size: 12px; color: #6F748C; margin: 0 0 15px 0;">Bring projects, knowledge, and teams together with the power of AI.</p>
-
-              <p style="margin: 0 0 15px 0;">
-                <a href="https://discord.gg/9Q2xaN37tV" style="text-decoration: none; display: inline-block; margin: 0 10px 0 0;">
-                  <img src="{{ cdnBaseUrl }}images/discord.png" width="20" height="20" alt="Discord" style="border: 0;" />
-                </a>
-                <a href="https://github.com/AppFlowy-IO/AppFlowy" style="text-decoration: none; display: inline-block; margin: 0 10px 0 0;">
-                  <img src="{{ cdnBaseUrl }}images/github.png" width="20" height="20" alt="GitHub" style="border: 0;" />
-                </a>
-                <a href="https://www.reddit.com/r/AppFlowy" style="text-decoration: none; display: inline-block; margin: 0 10px 0 0;">
-                  <img src="{{ cdnBaseUrl }}images/reddit.png" width="20" height="20" alt="Reddit" style="border: 0;" />
-                </a>
-                <a href="https://twitter.com/appflowy" style="text-decoration: none; display: inline-block; margin: 0 10px 0 0;">
-                  <img src="{{ cdnBaseUrl }}images/twitter.png" width="20" height="20" alt="Twitter" style="border: 0;" />
-                </a>
-                <a href="https://www.youtube.com/@AppFlowyHQ" style="text-decoration: none; display: inline-block;">
-                  <img src="{{ cdnBaseUrl }}images/youtube.png" width="20" height="20" alt="Youtube" style="border: 0;" />
-                </a>
-              </p>
-
-              <p style="font-size: 12px; color: #6F748C; margin: 0 0 10px 0;">Copyright © 2025, AppFlowy Inc.</p>
-              <p style="font-size: 12px; color: #6F748C; margin: 0;">
-                Need Help? <a href="mailto:support@appflowy.io" style="color: #6F748C;">support@appflowy.io</a>
+            <td align="center" style="padding: 24px 40px 32px 40px;">
+              <p style="font-size: 12px; color: #9B9BB8; margin: 0 0 6px 0;">© 2025 小马笔记 · 让知识触手可及</p>
+              <p style="font-size: 12px; color: #9B9BB8; margin: 0;">
+                如需帮助，请联系 <a href="mailto:support@ponynotes.io" style="color: #8B5BB5; text-decoration: none;">support@ponynotes.io</a>
               </p>
             </td>
           </tr>
+
         </table>
       </td>
     </tr>
