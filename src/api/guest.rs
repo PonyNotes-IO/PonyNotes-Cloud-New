@@ -5,7 +5,7 @@ use actix_web::{
 use app_error::ErrorCode;
 use shared_entity::{
   dto::guest_dto::{
-    RevokeSharedViewAccessRequest, ShareViewWithGuestRequest, SharedViewDetails,
+    RevokeSharedViewAccessRequest, ShareViewWithGuestRequest, SharedUser, SharedViewDetails,
     SharedViewDetailsRequest, SharedView, SharedViews, ListSharedViewResponse, SharedViewInfo,
   },
   response::{AppResponse, AppResponseError, JsonAppResponse},

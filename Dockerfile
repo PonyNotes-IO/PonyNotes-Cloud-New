@@ -81,10 +81,13 @@ WORKDIR /app
 # 使用阿里云镜像源解决国内网络问题
 RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
     sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list 2>/dev/null || true
-RUN apt-get update -y \
-  && apt-get install -y --no-install-recommends openssl ca-certificates curl \
+RUN for i in 1 2 3; do \
+      apt-get update -y && \
+      apt-get install -y --no-install-recommends --fix-missing openssl ca-certificates curl && \
+      break || \
+      (echo "Retry $i failed, cleaning and retrying..." && rm -rf /var/lib/apt/lists/* && sleep 2); \
+    done \
   && update-ca-certificates \
-  # Clean up
   && apt-get autoremove -y \
   && apt-get clean -y \
   && rm -rf /var/lib/apt/lists/*
