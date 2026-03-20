@@ -1,6 +1,6 @@
 ---
-title: "小马笔记登录验证码"
-bodyClass: #F0EBF8
+title: "小马笔记验证码"
+bodyClass: #FFF8F5
 ---
 
 <x-main>
@@ -8,17 +8,17 @@ bodyClass: #F0EBF8
     您的小马笔记登录验证码：@{{ .Token }}，请在 5 分钟内使用。
   </div>
 
-  <table width="100%" border="0" cellpadding="0" cellspacing="0" bgcolor="#F0EBF8" style="font-family: -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', Arial, sans-serif; padding: 40px 24px; color: #1A1A2E;">
+  <table width="100%" border="0" cellpadding="0" cellspacing="0" bgcolor="#FFF8F5" style="font-family: -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', Arial, sans-serif; padding: 40px 24px; color: #3D404F;">
     <tr>
       <td align="center" valign="top">
-        <table width="560" border="0" cellpadding="0" cellspacing="0" bgcolor="#ffffff" style="border-radius: 16px; overflow: hidden; box-shadow: 0 4px 24px rgba(101, 62, 140, 0.10); margin: 0 auto;">
+        <table width="560" border="0" cellpadding="0" cellspacing="0" bgcolor="#ffffff" style="border-radius: 16px; overflow: hidden; box-shadow: 0 4px 24px rgba(255, 56, 0, 0.10); margin: 0 auto;">
 
-          <!-- 顶部品牌色条 -->
+          <!-- 顶部 logo -->
           <tr>
-            <td style="background: linear-gradient(135deg, #653E8C 0%, #8B5BB5 100%); padding: 32px 40px; text-align: center;">
-              <img src="{{ cdnBaseUrl }}images/appflowy.png" width="48" height="48" style="border: 0; display: block; margin: 0 auto 16px auto; border-radius: 12px; background: rgba(255,255,255,0.15); padding: 6px;" />
-              <p style="margin: 0; font-size: 22px; font-weight: 700; color: #ffffff; letter-spacing: 0.5px;">小马笔记</p>
-              <p style="margin: 6px 0 0 0; font-size: 13px; color: rgba(255,255,255,0.75); letter-spacing: 0.3px;">让知识触手可及</p>
+            <td style="border-top: 4px solid #FF3800; padding: 36px 40px 24px 40px; text-align: center; background: #ffffff;">
+              <img src="data:image/png;base64,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" width="72" height="72" style="border: 0; display: block; margin: 0 auto 14px auto;" />
+              <p style="margin: 0; font-size: 20px; font-weight: 700; color: #3D404F; letter-spacing: 0.5px;">小马笔记</p>
+              <p style="margin: 6px 0 0 0; font-size: 12px; color: #989EB7; letter-spacing: 0.3px;">让知识触手可及</p>
             </td>
           </tr>
 
@@ -30,12 +30,12 @@ bodyClass: #F0EBF8
               <table width="100%" border="0" cellpadding="0" cellspacing="0">
                 <tr>
                   <td align="center" style="padding-bottom: 8px;">
-                    <h1 style="font-size: 20px; font-weight: 700; margin: 0; color: #1A1A2E;">您的登录验证码</h1>
+                    <h1 style="font-size: 20px; font-weight: 700; margin: 0; color: #3D404F;">您的登录验证码</h1>
                   </td>
                 </tr>
                 <tr>
                   <td align="center" style="padding-bottom: 32px;">
-                    <p style="font-size: 14px; line-height: 1.7; margin: 0; color: #6B6B8A;">我们收到了您的小马笔记登录请求，请使用以下验证码完成登录。</p>
+                    <p style="font-size: 14px; line-height: 1.7; margin: 0; color: #6F748C;">我们收到了您的小马笔记登录请求，请使用以下验证码完成登录。</p>
                   </td>
                 </tr>
               </table>
@@ -44,22 +44,22 @@ bodyClass: #F0EBF8
               <table width="100%" border="0" cellpadding="0" cellspacing="0">
                 <tr>
                   <td align="center">
-                    <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background: linear-gradient(135deg, #F5F0FC 0%, #EDE4F8 100%); border-radius: 12px; border: 1.5px solid #D4BCF0;">
+                    <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background: linear-gradient(135deg, #FFF3EE 0%, #FFE8DF 100%); border-radius: 12px; border: 1.5px solid #FFCAB8;">
                       <tr>
                         <td align="center" style="padding: 12px 24px 8px 24px;">
-                          <p style="margin: 0; font-size: 12px; font-weight: 600; color: #8B5BB5; letter-spacing: 1.5px; text-transform: uppercase;">验证码</p>
+                          <p style="margin: 0; font-size: 12px; font-weight: 600; color: #FF3800; letter-spacing: 1.5px; text-transform: uppercase;">验证码</p>
                         </td>
                       </tr>
                       <tr>
                         <td align="center" style="padding: 4px 24px 20px 24px;">
-                          <p style="margin: 0; font-size: 42px; font-weight: 800; letter-spacing: 10px; color: #653E8C; font-variant-numeric: tabular-nums;">@{{ .Token }}</p>
+                          <p style="margin: 0; font-size: 42px; font-weight: 800; letter-spacing: 10px; color: #FF3800; font-variant-numeric: tabular-nums;">@{{ .Token }}</p>
                         </td>
                       </tr>
                       <tr>
                         <td align="center" style="padding: 0 24px 16px 24px;">
                           <table border="0" cellpadding="0" cellspacing="0">
                             <tr>
-                              <td style="background-color: #653E8C; border-radius: 20px; padding: 4px 14px;">
+                              <td style="background-color: #FF3800; border-radius: 20px; padding: 4px 14px;">
                                 <p style="margin: 0; font-size: 11px; color: #ffffff; font-weight: 600;">⏱ 5 分钟内有效</p>
                               </td>
                             </tr>
@@ -74,9 +74,9 @@ bodyClass: #F0EBF8
               <!-- 使用说明 -->
               <table width="100%" border="0" cellpadding="0" cellspacing="0" style="margin-top: 28px;">
                 <tr>
-                  <td style="background-color: #FAFAFA; border-radius: 8px; border-left: 3px solid #653E8C; padding: 14px 16px;">
-                    <p style="margin: 0 0 4px 0; font-size: 12px; font-weight: 600; color: #1A1A2E;">使用说明</p>
-                    <p style="margin: 0; font-size: 12px; line-height: 1.6; color: #6B6B8A;">将以上 6 位验证码填入登录页面的输入框，即可完成登录。验证码将在 5 分钟后自动失效，请尽快使用。</p>
+                  <td style="background-color: #FAFAFA; border-radius: 8px; border-left: 3px solid #FF3800; padding: 14px 16px;">
+                    <p style="margin: 0 0 4px 0; font-size: 12px; font-weight: 600; color: #3D404F;">使用说明</p>
+                    <p style="margin: 0; font-size: 12px; line-height: 1.6; color: #6F748C;">将以上 6 位验证码填入登录页面的输入框，即可完成登录。验证码将在 5 分钟后自动失效，请尽快使用。</p>
                   </td>
                 </tr>
               </table>
@@ -85,7 +85,7 @@ bodyClass: #F0EBF8
               <table width="100%" border="0" cellpadding="0" cellspacing="0" style="margin-top: 16px;">
                 <tr>
                   <td align="center">
-                    <p style="font-size: 12px; color: #9B9BB8; margin: 0; line-height: 1.6;">如果您没有发起此次登录请求，请忽略本邮件，您的账号安全不受影响。</p>
+                    <p style="font-size: 12px; color: #989EB7; margin: 0; line-height: 1.6;">如果您没有发起此次登录请求，请忽略本邮件，您的账号安全不受影响。</p>
                   </td>
                 </tr>
               </table>
@@ -98,7 +98,7 @@ bodyClass: #F0EBF8
             <td style="padding: 0 40px;">
               <table width="100%" border="0" cellpadding="0" cellspacing="0">
                 <tr>
-                  <td style="border-top: 1px solid #EDE4F8; font-size: 0; line-height: 0;">&nbsp;</td>
+                  <td style="border-top: 1px solid #FFE0D6; font-size: 0; line-height: 0;">&nbsp;</td>
                 </tr>
               </table>
             </td>
@@ -107,9 +107,9 @@ bodyClass: #F0EBF8
           <!-- 页脚 -->
           <tr>
             <td align="center" style="padding: 24px 40px 32px 40px;">
-              <p style="font-size: 12px; color: #9B9BB8; margin: 0 0 6px 0;">© 2025 小马笔记 · 让知识触手可及</p>
-              <p style="font-size: 12px; color: #9B9BB8; margin: 0;">
-                如需帮助，请联系 <a href="mailto:support@xiaomabiji.com" style="color: #8B5BB5; text-decoration: none;">support@xiaomabiji.com</a>
+              <p style="font-size: 12px; color: #989EB7; margin: 0 0 6px 0;">© 2025 小马笔记 · 让知识触手可及</p>
+              <p style="font-size: 12px; color: #989EB7; margin: 0;">
+                如需帮助，请联系 <a href="mailto:support@xiaomabiji.com" style="color: #FF3800; text-decoration: none;">support@xiaomabiji.com</a>
               </p>
             </td>
           </tr>
