@@ -71,7 +71,7 @@ echo ""
 # ══════════════════════════════════════
 # 步骤 1：获取数据库连接字符串
 # ══════════════════════════════════════
-echo -e "${YELLOW}[1/5] 获取数据库配置...${NC}"
+echo -e "${YELLOW}[1/6] 获取数据库配置...${NC}"
 RETRY=0
 while [ $RETRY -lt 3 ]; do
     REMOTE_ENV=$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 "${SERVER_USER}@${SERVER_IP}" "cat ${SERVER_DOCKER_DIR}/.env 2>/dev/null" 2>&1) && break
@@ -86,16 +86,25 @@ fi
 echo -e "${GREEN}  ✅ 已获取 (长度:${#DATABASE_URL})${NC}"
 
 # ══════════════════════════════════════
-# 步骤 2：构建 Docker 镜像（x86_64 原生）
+# 步骤 2：构建邮件模板
 # ══════════════════════════════════════
 echo ""
-echo -e "${YELLOW}[2/5] 构建 Docker 镜像 (x86_64 原生)...${NC}"
+echo -e "${YELLOW}[2/6] 构建邮件模板...${NC}"
+cd "${PROJECT_DIR}/email_template"
+pnpm install --frozen-lockfile
+pnpm build
+echo -e "${GREEN}  ✅ 邮件模板构建完成${NC}"
+
+# ══════════════════════════════════════
+# 步骤 3：构建 Docker 镜像（x86_64 原生）
+# ══════════════════════════════════════
+echo ""
+echo -e "${YELLOW}[3/6] 构建 Docker 镜像 (x86_64 原生)...${NC}"
 cd "${PROJECT_DIR}"
 export DOCKER_BUILDKIT=1
 T0=$(date +%s)
 
 docker buildx build \
-  --platform linux/amd64 \
   -f Dockerfile \
   -t "${IMAGE_NAME}" \
   --build-arg DATABASE_URL="${DATABASE_URL}" \
@@ -111,7 +120,7 @@ echo -e "${GREEN}  ✅ 构建成功 ($(( (T1-T0)/60 ))分$(( (T1-T0)%60 ))秒)${
 # 步骤 3：导出镜像
 # ══════════════════════════════════════
 echo ""
-echo -e "${YELLOW}[3/5] 导出镜像...${NC}"
+echo -e "${YELLOW}[4/6] 导出镜像...${NC}"
 TAR_FILE=$(mktemp).tar
 docker save "${IMAGE_NAME}" -o "${TAR_FILE}"
 TAR_SIZE=$(du -h "${TAR_FILE}" | cut -f1)
@@ -121,7 +130,7 @@ echo -e "${GREEN}  ✅ 导出完成 (${TAR_SIZE})${NC}"
 # 步骤 4：上传到服务器
 # ══════════════════════════════════════
 echo ""
-echo -e "${YELLOW}[4/5] 上传镜像到服务器...${NC}"
+echo -e "${YELLOW}[5/6] 上传镜像到服务器...${NC}"
 scp -o StrictHostKeyChecking=no -o ConnectTimeout=60 "${TAR_FILE}" "${SERVER_USER}@${SERVER_IP}:${SERVER_DOCKER_DIR}/appflowy_cloud.tar"
 rm -f "${TAR_FILE}"
 echo -e "${GREEN}  ✅ 上传完成${NC}"
@@ -130,7 +139,7 @@ echo -e "${GREEN}  ✅ 上传完成${NC}"
 # 步骤 5：服务器部署
 # ══════════════════════════════════════
 echo ""
-echo -e "${YELLOW}[5/5] 服务器部署...${NC}"
+echo -e "${YELLOW}[6/6] 服务器部署...${NC}"
 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 "${SERVER_USER}@${SERVER_IP}" "cd '${SERVER_DOCKER_DIR}' && \
     docker compose -f docker-compose-dev.yml down appflowy_cloud 2>/dev/null || true && \
     docker rmi '${IMAGE_NAME}' 2>/dev/null || true && \
