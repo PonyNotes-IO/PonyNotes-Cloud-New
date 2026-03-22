@@ -764,6 +764,12 @@ pub async fn remove_workspace_members(
     .await
     .context("Begin transaction to delete workspace members")?;
 
+  // 收集需要通知的成员信息，在事务提交后再发送通知。
+  // 必须先提交事务再发通知：PostgreSQL 的 pg_notify 在事务提交后才真正投递，
+  // 若通知在事务提交前发出，被踢出的用户客户端收到通知后立即查询服务端时，
+  // 事务尚未提交，服务端仍会返回该工作区，导致客户端检测不到变化，无法自动切换工作区。
+  let mut to_notify: Vec<(i64, String)> = Vec::new();
+
   for identifier in member_identifiers {
     // Skip empty identifiers
     if identifier.is_empty() {
@@ -775,13 +781,13 @@ pub async fn remove_workspace_members(
     match select_uid_from_email_or_phone(txn.deref_mut(), identifier).await {
       Ok(uid) => {
         delete_workspace_members(&mut txn, workspace_id, uid).await?;
-        
+
         // 删除工作区内所有文档的成员权限记录
         database::workspace::delete_collab_members_by_workspace(&mut txn, workspace_id, uid).await?;
-        
+
         // 删除工作区内所有文档的成员邀请记录
         database::workspace::delete_collab_member_invites_by_workspace(&mut txn, workspace_id, uid).await?;
-        
+
         workspace_access_control
           .remove_user_from_workspace(&uid, workspace_id)
           .await?;
@@ -792,34 +798,7 @@ pub async fn remove_workspace_members(
             _ => "未知工作区".to_string(),
         };
 
-        // 发送成员被移除通知给被移除的用户
-        let notification_payload = json!({
-          "workspace_id": workspace_id.to_string(),
-          "removed_member_uid": uid,
-          "title": "工作区访问权限已移除",
-          "message": format!("您已被从工作区 {} 中移除", workspace_name),
-        });
-        if let Err(err) = create_workspace_notification(
-          pg_pool,
-          workspace_id,
-          "workspace_member_removed",
-          &notification_payload,
-          Some(uid),
-        )
-        .await
-        {
-          tracing::warn!(
-            "Failed to send workspace_member_removed notification to uid={}: {:?}",
-            uid,
-            err
-          );
-        } else {
-          tracing::info!(
-            "Sent workspace_member_removed notification to uid={} for workspace={}",
-            uid,
-            workspace_id
-          );
-        }
+        to_notify.push((uid, workspace_name));
       },
       Err(e) => {
         tracing::warn!(
@@ -832,10 +811,45 @@ pub async fn remove_workspace_members(
     }
   }
 
+  // 先提交事务，确保成员删除已持久化到数据库
   txn
     .commit()
     .await
     .context("Commit transaction to delete workspace members")?;
+
+  // 事务提交后再发送 WebSocket 通知。
+  // 此时被踢出的用户客户端收到通知并立即查询服务端，能够得到不含该工作区的最新列表，
+  // 从而触发本地 DidUpdateUserWorkspaces 通知，Flutter 层会立即切换到自己的工作区。
+  for (uid, workspace_name) in to_notify {
+    let notification_payload = json!({
+      "workspace_id": workspace_id.to_string(),
+      "removed_member_uid": uid,
+      "title": "工作区访问权限已移除",
+      "message": format!("您已被从工作区 {} 中移除", workspace_name),
+    });
+    if let Err(err) = create_workspace_notification(
+      pg_pool,
+      workspace_id,
+      "workspace_member_removed",
+      &notification_payload,
+      Some(uid),
+    )
+    .await
+    {
+      tracing::warn!(
+        "Failed to send workspace_member_removed notification to uid={}: {:?}",
+        uid,
+        err
+      );
+    } else {
+      tracing::info!(
+        "Sent workspace_member_removed notification to uid={} for workspace={}",
+        uid,
+        workspace_id
+      );
+    }
+  }
+
   Ok(())
 }
 

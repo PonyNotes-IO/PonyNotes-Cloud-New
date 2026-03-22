@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::biz::authentication::jwt::{authorization_from_token, UserUuid};
+use crate::biz::notification::ops::{get_pending_notifications, mark_notifications_processed};
 use crate::state::AppState;
 use actix::Addr;
 use actix_http::header::AUTHORIZATION;
@@ -258,6 +259,7 @@ async fn start_connect(
       listen_on_user_change(state, uid, tx.clone());
 
       // Receive system notifications and send them to the client.
+      // Also delivers any pending (unprocessed) notifications that arrived while the client was offline.
       listen_on_system_notification(state, uid, tx);
 
       match ws::WsResponseBuilder::new(client, request, payload)
@@ -310,9 +312,51 @@ fn listen_on_user_change(state: &Data<AppState>, uid: i64, tx: Sender<RealtimeMe
 }
 
 /// 监听系统通知并发送给客户端（v1 版本 WebSocket）
+/// 连接建立时先补发离线期间未处理的通知，再持续监听新通知
 fn listen_on_system_notification(state: &Data<AppState>, uid: i64, tx: Sender<RealtimeMessage>) {
   let mut notification_recv = state.pg_listeners.subscribe_system_notification(uid);
+  let pg_pool = state.pg_pool.clone();
   actix::spawn(async move {
+    // 补发离线期间积压的未处理通知
+    match get_pending_notifications(&pg_pool, uid).await {
+      Ok(pending) if !pending.is_empty() => {
+        debug!(
+          "Delivering {} pending notifications to uid={} on reconnect",
+          pending.len(),
+          uid
+        );
+        let mut delivered_ids = Vec::with_capacity(pending.len());
+        for notification in pending {
+          let msg = UserMessage::SystemNotification(AFSystemNotification {
+            id: notification.id.to_string(),
+            workspace_id: notification
+              .workspace_id
+              .map(|id| id.to_string())
+              .unwrap_or_default(),
+            notification_type: notification.notification_type,
+            title: extract_title_from_payload(&notification.payload),
+            message: extract_message_from_payload(&notification.payload),
+            payload_json: notification.payload.to_string(),
+            created_at: notification.created_at.timestamp(),
+            recipient_uid: notification.recipient_uid.unwrap_or(0),
+          });
+          if tx.send(RealtimeMessage::User(msg)).await.is_err() {
+            return;
+          }
+          delivered_ids.push(notification.id);
+        }
+        // 标记已推送的通知为已处理
+        if let Err(e) = mark_notifications_processed(&pg_pool, &delivered_ids).await {
+          error!("Failed to mark pending notifications as processed for uid={}: {:?}", uid, e);
+        }
+      },
+      Ok(_) => {},
+      Err(e) => {
+        error!("Failed to fetch pending notifications for uid={}: {:?}", uid, e);
+      },
+    }
+
+    // 持续监听新到达的通知
     while let Some(notification) = notification_recv.recv().await {
       trace!(
         "Receive system notification for v1 ws: uid={}, type={}, id={}",
@@ -320,6 +364,10 @@ fn listen_on_system_notification(state: &Data<AppState>, uid: i64, tx: Sender<Re
         notification.notification_type,
         notification.id
       );
+      // 标记新通知为已处理
+      if let Err(e) = mark_notifications_processed(&pg_pool, &[notification.id]).await {
+        error!("Failed to mark notification {} as processed: {:?}", notification.id, e);
+      }
       // 构造 AFSystemNotification 并通过 UserMessage 发送
       let msg = UserMessage::SystemNotification(AFSystemNotification {
         id: notification.id.to_string(),

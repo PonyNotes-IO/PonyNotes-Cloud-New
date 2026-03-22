@@ -2,7 +2,7 @@ use anyhow::Error;
 use database::listener::PostgresDBListener;
 use database::pg_row::{AFNotificationRow, AFSystemNotification, AFUserNotification};
 use sqlx::PgPool;
-use tracing::trace;
+use tracing::{info, trace, warn};
 
 pub struct PgListeners {
   user_listener: UserListener,
@@ -24,7 +24,18 @@ impl PgListeners {
     let (tx, rx) = tokio::sync::mpsc::channel(100);
     let mut user_notify = self.user_listener.notify.subscribe();
     tokio::spawn(async move {
-      while let Ok(notification) = user_notify.recv().await {
+      loop {
+        let notification = match user_notify.recv().await {
+          Ok(n) => n,
+          Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+            warn!("user_notify receiver lagged, skipped {} messages", n);
+            continue;
+          },
+          Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+            info!("user_notify channel closed");
+            break;
+          },
+        };
         if let Some(row) = notification.payload.as_ref() {
           if row.uid == uid {
             let _ = tx.send(notification).await;
@@ -44,7 +55,21 @@ impl PgListeners {
     let (tx, rx) = tokio::sync::mpsc::channel(100);
     let mut notify = self.notification_listener.notify.subscribe();
     tokio::spawn(async move {
-      while let Ok(notification) = notify.recv().await {
+      loop {
+        let notification = match notify.recv().await {
+          Ok(n) => n,
+          Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+            warn!(
+              "system notification receiver for uid={} lagged, skipped {} messages",
+              uid, n
+            );
+            continue;
+          },
+          Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+            info!("system notification channel closed for uid={}", uid);
+            break;
+          },
+        };
         if let Some(row) = notification.payload.as_ref() {
           // 推送给指定接收者或广播通知（recipient_uid 为 None）
           let should_send = row.recipient_uid.is_none() || row.recipient_uid == Some(uid);

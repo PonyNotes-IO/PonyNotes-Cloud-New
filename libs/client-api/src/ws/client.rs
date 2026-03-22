@@ -96,7 +96,7 @@ impl WSClient {
     let channels = Arc::new(RwLock::new(HashMap::new()));
     let ping = Arc::new(Mutex::from(None));
     let http_sender = Arc::new(http_sender);
-    let (user_channel, _) = channel(1);
+    let (user_channel, _) = channel(100);
     let (rt_msg_sender, _) = channel(config.buffer_capacity);
     let connect_provider = Arc::new(connect_provider);
     let aggregate_queue = Arc::new(AggregateMessageQueue::new(MAXIMUM_BATCH_MESSAGE_SIZE));

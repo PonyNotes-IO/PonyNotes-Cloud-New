@@ -96,16 +96,30 @@ pnpm build
 echo -e "${GREEN}  ✅ 邮件模板构建完成${NC}"
 
 # ══════════════════════════════════════
-# 步骤 3：构建 Docker 镜像（x86_64 原生）
+# 步骤 3：构建 Docker 镜像
 # ══════════════════════════════════════
 echo ""
-echo -e "${YELLOW}[3/6] 构建 Docker 镜像 (x86_64 原生)...${NC}"
+echo -e "${YELLOW}[3/6] 构建 Docker 镜像...${NC}"
 cd "${PROJECT_DIR}"
 export DOCKER_BUILDKIT=1
+
+# 检测当前机器 CPU 架构
+# Apple Silicon (arm64/aarch64) 需要加 --platform linux/amd64 进行跨平台编译
+# Intel Mac (x86_64) 与目标服务器架构相同，无需指定 platform
+HOST_ARCH=$(uname -m)
+PLATFORM_ARGS=()
+if [ "${HOST_ARCH}" = "arm64" ] || [ "${HOST_ARCH}" = "aarch64" ]; then
+    PLATFORM_ARGS=(--platform linux/amd64)
+    echo -e "${BLUE}  检测到 Apple Silicon (${HOST_ARCH})，启用跨平台编译 → linux/amd64${NC}"
+else
+    echo -e "${BLUE}  检测到 Intel x86_64，原生构建 linux/amd64${NC}"
+fi
+
 T0=$(date +%s)
 
 docker buildx build \
   -f Dockerfile \
+  "${PLATFORM_ARGS[@]}" \
   -t "${IMAGE_NAME}" \
   --build-arg DATABASE_URL="${DATABASE_URL}" \
   --build-arg CARGO_BUILD_JOBS=16 \
