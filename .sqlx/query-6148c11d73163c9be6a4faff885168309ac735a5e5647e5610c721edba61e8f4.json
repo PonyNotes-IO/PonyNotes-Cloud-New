@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n    UPDATE af_notification\n    SET processed = TRUE\n    WHERE id = ANY($1)\n    ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6148c11d73163c9be6a4faff885168309ac735a5e5647e5610c721edba61e8f4"
+}

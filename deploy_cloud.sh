@@ -86,16 +86,6 @@ fi
 echo -e "${GREEN}  ✅ 已获取 (长度:${#DATABASE_URL})${NC}"
 
 # ══════════════════════════════════════
-# 步骤 2：构建邮件模板
-# ══════════════════════════════════════
-echo ""
-echo -e "${YELLOW}[2/6] 构建邮件模板...${NC}"
-cd "${PROJECT_DIR}/email_template"
-pnpm install --frozen-lockfile
-pnpm build
-echo -e "${GREEN}  ✅ 邮件模板构建完成${NC}"
-
-# ══════════════════════════════════════
 # 步骤 3：构建 Docker 镜像
 # ══════════════════════════════════════
 echo ""
