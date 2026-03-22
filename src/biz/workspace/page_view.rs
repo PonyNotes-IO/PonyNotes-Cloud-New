@@ -956,14 +956,26 @@ async fn move_view_out_from_trash(
   folder: &mut Folder,
   uid: i64,
 ) -> Result<Vec<u8>, AppError> {
+  // Save favorite status before removing from trash
+  let was_favorite = folder.get_view(view_id).map(|v| v.is_favorite).unwrap_or(false);
   let encoded_update = {
     let mut txn = folder.collab.transact_mut();
+    // Remove from trash
     folder.body.views.update_view(
       &mut txn,
       view_id,
       |update| update.set_trash(false).done(),
       uid,
     );
+    // Restore favorite status if it was favorited before
+    if was_favorite {
+      folder.body.views.update_view(
+        &mut txn,
+        view_id,
+        |update| update.set_favorite(true).done(),
+        uid,
+      );
+    }
     txn.encode_update_v1()
   };
   Ok(encoded_update)
@@ -1004,8 +1016,18 @@ async fn extend_recent_views(
 }
 
 async fn move_all_views_out_from_trash(folder: &mut Folder, uid: i64) -> Result<Vec<u8>, AppError> {
+  // Get all trash items and check their favorite status before clearing
+  let trash_items = folder.get_my_trash_info(uid);
+  let favorite_ids: Vec<String> = trash_items
+    .iter()
+    .filter(|item| folder.get_view(&item.id).map(|v| v.is_favorite).unwrap_or(false))
+    .map(|item| item.id.clone())
+    .collect();
+
   let encoded_update = {
     let mut txn = folder.collab.transact_mut();
+
+    // Clear the trash section
     if let Some(op) = folder
       .body
       .section
@@ -1013,6 +1035,17 @@ async fn move_all_views_out_from_trash(folder: &mut Folder, uid: i64) -> Result<
     {
       op.clear(&mut txn);
     };
+
+    // Restore favorite status for items that were favorites
+    for view_id in &favorite_ids {
+      folder.body.views.update_view(
+        &mut txn,
+        view_id,
+        |update| update.set_favorite(true).done(),
+        uid,
+      );
+    }
+
     txn.encode_update_v1()
   };
 
