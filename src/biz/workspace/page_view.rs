@@ -957,7 +957,7 @@ async fn move_view_out_from_trash(
   uid: i64,
 ) -> Result<Vec<u8>, AppError> {
   // Save favorite status before removing from trash
-  let was_favorite = folder.get_view(view_id).map(|v| v.is_favorite).unwrap_or(false);
+  let was_favorite = folder.get_view(view_id, uid).map(|v| v.is_favorite).unwrap_or(false);
   let encoded_update = {
     let mut txn = folder.collab.transact_mut();
     // Remove from trash
@@ -1020,7 +1020,7 @@ async fn move_all_views_out_from_trash(folder: &mut Folder, uid: i64) -> Result<
   let trash_items = folder.get_my_trash_info(uid);
   let favorite_ids: Vec<String> = trash_items
     .iter()
-    .filter(|item| folder.get_view(&item.id).map(|v| v.is_favorite).unwrap_or(false))
+    .filter(|item| folder.get_view(&item.id, uid).map(|v| v.is_favorite).unwrap_or(false))
     .map(|item| item.id.clone())
     .collect();
 
