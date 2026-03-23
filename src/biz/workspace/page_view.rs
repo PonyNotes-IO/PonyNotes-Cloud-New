@@ -781,12 +781,37 @@ async fn update_favorite_view(
 
   let encoded_update = {
     let mut txn = folder.collab.transact_mut();
-    folder.body.views.update_view(
-      &mut txn,
-      view_id,
-      |update| update.set_favorite(is_favorite).set_extra(extra).done(),
-      uid,
-    );
+    // When adding to favorites: set is_favorite = true AND add to section
+    // When removing from favorites: only remove from section, do NOT set is_favorite = false
+    // This preserves the favorite status for trash restore
+    if let Some(op) = folder
+      .body
+      .section
+      .section_op(&txn, collab_folder::Section::Favorite, uid)
+    {
+      if is_favorite {
+        op.add_sections_item(&mut txn, vec![SectionItem::new(view_id.to_string())]);
+      } else {
+        op.delete_section_items_with_txn(&mut txn, vec![view_id.to_string()]);
+      }
+    }
+    // Update is_favorite only when adding to favorites (not when removing)
+    if is_favorite {
+      folder.body.views.update_view(
+        &mut txn,
+        view_id,
+        |update| update.set_favorite(true).set_extra(extra).done(),
+        uid,
+      );
+    } else {
+      // When removing from favorites, only update extra (is_pinned), keep is_favorite unchanged
+      folder.body.views.update_view(
+        &mut txn,
+        view_id,
+        |update| update.set_extra(extra).done(),
+        uid,
+      );
+    }
     txn.encode_update_v1()
   };
   Ok(encoded_update)
