@@ -967,7 +967,7 @@ async fn move_view_out_from_trash(
       |update| update.set_trash(false).done(),
       uid,
     );
-    // Restore favorite status if it was favorited before
+    // Restore favorite status and add to favorite section if it was favorited before
     if was_favorite {
       folder.body.views.update_view(
         &mut txn,
@@ -975,6 +975,14 @@ async fn move_view_out_from_trash(
         |update| update.set_favorite(true).done(),
         uid,
       );
+      // Add to favorite section
+      if let Some(op) = folder
+        .body
+        .section
+        .section_op(&txn, collab_folder::Section::Favorite, uid)
+      {
+        op.add_sections_item(&mut txn, vec![SectionItem::new(view_id.to_string())]);
+      }
     }
     txn.encode_update_v1()
   };
@@ -1036,14 +1044,28 @@ async fn move_all_views_out_from_trash(folder: &mut Folder, uid: i64) -> Result<
       op.clear(&mut txn);
     };
 
-    // Restore favorite status for items that were favorites
-    for view_id in &favorite_ids {
-      folder.body.views.update_view(
-        &mut txn,
-        view_id,
-        |update| update.set_favorite(true).done(),
-        uid,
-      );
+    // Restore favorite status and add to favorite section for items that were favorites
+    if !favorite_ids.is_empty() {
+      for view_id in &favorite_ids {
+        folder.body.views.update_view(
+          &mut txn,
+          view_id,
+          |update| update.set_favorite(true).done(),
+          uid,
+        );
+      }
+      // Add all favorite items to favorite section
+      if let Some(op) = folder
+        .body
+        .section
+        .section_op(&txn, collab_folder::Section::Favorite, uid)
+      {
+        let section_items: Vec<SectionItem> = favorite_ids
+          .iter()
+          .map(|id| SectionItem::new(id.clone()))
+          .collect();
+        op.add_sections_item(&mut txn, section_items);
+      }
     }
 
     txn.encode_update_v1()
