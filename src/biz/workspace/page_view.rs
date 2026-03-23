@@ -932,14 +932,7 @@ async fn move_view_to_trash(
 
   let encoded_update = {
     let mut txn = folder.collab.transact_mut();
-    current_view_and_descendants.iter().for_each(|view_id| {
-      folder.body.views.update_view(
-        &mut txn,
-        view_id,
-        |update| update.set_favorite(false).done(),
-        uid,
-      );
-    });
+    // Only set trash = true, do NOT change is_favorite to preserve favorite status
     folder.body.views.update_view(
       &mut txn,
       view_id,
