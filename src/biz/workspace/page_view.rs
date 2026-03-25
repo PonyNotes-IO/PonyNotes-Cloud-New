@@ -948,22 +948,50 @@ async fn move_view_to_trash(
   folder: &mut Folder,
   uid: i64,
 ) -> Result<Vec<u8>, AppError> {
-  let mut current_view_and_descendants = folder
-    .get_views_belong_to(view_id, uid)
+  let view_ids_to_trash = {
+    let mut ids = folder.get_views_belong_to(view_id, uid).iter().map(|v| v.id.clone()).collect_vec();
+    ids.push(view_id.to_string());
+    ids
+  };
+
+  // Read all view data before starting the transaction to avoid borrow conflicts.
+  let view_data: Vec<(String, bool, Option<serde_json::Value>)> = view_ids_to_trash
     .iter()
-    .map(|v| v.id.clone())
-    .collect_vec();
-  current_view_and_descendants.push(view_id.to_string());
+    .map(|vid| {
+      let view = folder.get_view(vid, uid);
+      let is_favorite = view.as_ref().map(|v| v.is_favorite).unwrap_or(false);
+      let extra = view.and_then(|v| {
+        v.extra
+          .as_ref()
+          .and_then(|e| serde_json::from_str::<serde_json::Value>(e).ok())
+      });
+      (vid.clone(), is_favorite, extra)
+    })
+    .collect();
 
   let encoded_update = {
     let mut txn = folder.collab.transact_mut();
-    // Only set trash = true, do NOT change is_favorite to preserve favorite status
-    folder.body.views.update_view(
-      &mut txn,
-      view_id,
-      |update| update.set_trash(true).done(),
-      uid,
-    );
+    for (vid, is_favorite, extra) in &view_data {
+      let current_is_favorite = extra
+        .as_ref()
+        .and_then(|json| json.get("was_favorite"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(*is_favorite);
+
+      let extra_str = if let Some(mut e) = extra.clone() {
+        e["was_favorite"] = serde_json::Value::Bool(current_is_favorite);
+        e.to_string()
+      } else {
+        json!({"was_favorite": current_is_favorite}).to_string()
+      };
+
+      folder.body.views.update_view(
+        &mut txn,
+        vid,
+        |update| update.set_extra(extra_str).set_trash(true).done(),
+        uid,
+      );
+    }
     txn.encode_update_v1()
   };
   Ok(encoded_update)
@@ -974,8 +1002,23 @@ async fn move_view_out_from_trash(
   folder: &mut Folder,
   uid: i64,
 ) -> Result<Vec<u8>, AppError> {
-  // Save favorite status before removing from trash
-  let was_favorite = folder.get_view(view_id, uid).map(|v| v.is_favorite).unwrap_or(false);
+  // Read is_favorite from extra["was_favorite"] (saved by move_view_to_trash).
+  // Fall back to the current is_favorite field for backward compatibility.
+  let (was_favorite, extra_json_for_clear) = folder
+    .get_view(view_id, uid)
+    .map(|v| {
+      let extra = v
+        .extra
+        .as_ref()
+        .and_then(|e| serde_json::from_str::<serde_json::Value>(e).ok());
+      let was = extra
+        .as_ref()
+        .and_then(|json| json.get("was_favorite").and_then(|b| b.as_bool()));
+      let has_was = extra.as_ref().map_or(false, |e| e.get("was_favorite").is_some());
+      (was.unwrap_or(v.is_favorite), if has_was { extra } else { None })
+    })
+    .unwrap_or((false, None));
+
   let encoded_update = {
     let mut txn = folder.collab.transact_mut();
     // Remove from trash
@@ -1001,6 +1044,19 @@ async fn move_view_out_from_trash(
       {
         op.add_sections_item(&mut txn, vec![SectionItem::new(view_id.to_string())]);
       }
+    }
+    // Clear the was_favorite flag from extra after restore
+    if let Some(extra) = extra_json_for_clear {
+      let mut new_extra = extra;
+      new_extra
+        .as_object_mut()
+        .map(|obj| obj.remove("was_favorite"));
+      folder.body.views.update_view(
+        &mut txn,
+        view_id,
+        |update| update.set_extra(new_extra.to_string()).done(),
+        uid,
+      );
     }
     txn.encode_update_v1()
   };
@@ -1042,12 +1098,38 @@ async fn extend_recent_views(
 }
 
 async fn move_all_views_out_from_trash(folder: &mut Folder, uid: i64) -> Result<Vec<u8>, AppError> {
-  // Get all trash items and check their favorite status before clearing
+  // Get all trash items and check their favorite status before clearing.
+  // Read from extra["was_favorite"] first (saved by move_view_to_trash),
+  // then fall back to the is_favorite field.
   let trash_items = folder.get_my_trash_info(uid);
-  let favorite_ids: Vec<String> = trash_items
+  // Read all view data before starting the transaction to avoid borrow conflicts.
+  let view_data: Vec<(String, bool, Option<serde_json::Value>)> = trash_items
     .iter()
-    .filter(|item| folder.get_view(&item.id, uid).map(|v| v.is_favorite).unwrap_or(false))
-    .map(|item| item.id.clone())
+    .map(|item| {
+      let view = folder.get_view(&item.id, uid);
+      let extra = view.as_ref().and_then(|v| {
+        v.extra
+          .as_ref()
+          .and_then(|e| serde_json::from_str::<serde_json::Value>(e).ok())
+      });
+      let was_favorite = extra
+        .as_ref()
+        .and_then(|json| json.get("was_favorite").and_then(|b| b.as_bool()))
+        .unwrap_or_else(|| view.as_ref().map(|v| v.is_favorite).unwrap_or(false));
+      (item.id.clone(), was_favorite, extra)
+    })
+    .collect();
+
+  let favorite_ids: Vec<String> = view_data
+    .iter()
+    .filter(|(_, was_favorite, _)| *was_favorite)
+    .map(|(id, _, _)| id.clone())
+    .collect();
+
+  let items_needing_extra_clear: Vec<(String, serde_json::Value)> = view_data
+    .iter()
+    .filter(|(_, _, extra)| extra.as_ref().map_or(false, |e| e.get("was_favorite").is_some()))
+    .map(|(id, _, extra)| (id.clone(), extra.clone().unwrap_or_default()))
     .collect();
 
   let encoded_update = {
@@ -1084,6 +1166,20 @@ async fn move_all_views_out_from_trash(folder: &mut Folder, uid: i64) -> Result<
           .collect();
         op.add_sections_item(&mut txn, section_items);
       }
+    }
+
+    // Clear was_favorite from extra for all restored items
+    for (view_id, extra) in &items_needing_extra_clear {
+      let mut new_extra = extra.clone();
+      new_extra
+        .as_object_mut()
+        .map(|obj| obj.remove("was_favorite"));
+      folder.body.views.update_view(
+        &mut txn,
+        view_id,
+        |update| update.set_extra(new_extra.to_string()).done(),
+        uid,
+      );
     }
 
     txn.encode_update_v1()
