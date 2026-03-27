@@ -199,8 +199,8 @@ pub async fn establish_ws_connection_v2(
 
     // 持续监听新到达的通知
     while let Some(notification) = system_notification_recv.recv().await {
-      trace!(
-        "Pushing system notification to WebSocket v2: uid={}, type={}, id={}",
+      debug!(
+        "[ws_v2] Pushing system notification to uid={}: type={}, id={}",
         uid,
         notification.notification_type,
         notification.id
@@ -401,8 +401,8 @@ fn listen_on_system_notification(state: &Data<AppState>, uid: i64, tx: Sender<Re
 
     // 持续监听新到达的通知
     while let Some(notification) = notification_recv.recv().await {
-      trace!(
-        "Receive system notification for v1 ws: uid={}, type={}, id={}",
+      debug!(
+        "[ws_v1] Pushing system notification to uid={}: type={}, id={}",
         uid,
         notification.notification_type,
         notification.id

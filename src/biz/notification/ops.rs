@@ -11,6 +11,10 @@ pub async fn create_workspace_notification(
   payload_json: &serde_json::Value,
   recipient_uid: Option<i64>,
 ) -> Result<(), AppError> {
+  tracing::info!(
+    "[notification] inserting: type={}, workspace={}, recipient={:?}",
+    notification_type, workspace_id, recipient_uid
+  );
   // Insert a notification row; the DB trigger will emit a pg_notify so realtime workers / listeners can pick it up.
   sqlx::query!(
     r#"
@@ -26,6 +30,10 @@ pub async fn create_workspace_notification(
   .await
   .context("Insert notification row")?;
 
+  tracing::info!(
+    "[notification] inserted OK: type={}, recipient={:?}",
+    notification_type, recipient_uid
+  );
   Ok(())
 }
 

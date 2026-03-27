@@ -70,20 +70,28 @@ impl PgListeners {
             break;
           },
         };
-        if let Some(row) = notification.payload.as_ref() {
-          // 推送给指定接收者或广播通知（recipient_uid 为 None）
-          let should_send = row.recipient_uid.is_none() || row.recipient_uid == Some(uid);
-          if should_send {
-            trace!(
-              "Sending system notification to uid={}: type={}, id={}",
-              uid,
-              row.notification_type,
-              row.id
-            );
-            if tx.send(row.clone()).await.is_err() {
-              break;
+        match notification.payload.as_ref() {
+          None => {
+            warn!("system notification deserialized but payload is None for uid={}", uid);
+          },
+          Some(row) => {
+            // 推送给指定接收者或广播通知（recipient_uid 为 None）
+            let should_send = row.recipient_uid.is_none() || row.recipient_uid == Some(uid);
+            if should_send {
+              info!(
+                "[pg_listener] Forwarding system notification to uid={}: type={}, id={}, recipient={:?}",
+                uid, row.notification_type, row.id, row.recipient_uid
+              );
+              if tx.send(row.clone()).await.is_err() {
+                break;
+              }
+            } else {
+              trace!(
+                "[pg_listener] Skipping notification id={} for uid={} (recipient={:?})",
+                row.id, uid, row.recipient_uid
+              );
             }
-          }
+          },
         }
       }
     });

@@ -48,6 +48,8 @@ pub fn user_scope() -> Scope {
         .route(web::get().to(get_notification_preferences_handler))
         .route(web::post().to(post_notification_preferences_handler)),
     )
+    // 诊断接口：查询当前用户的所有通知（含已处理）
+    .service(web::resource("/notifications").route(web::get().to(list_user_notifications_handler)))
 }
 
 #[tracing::instrument(skip(state, path), err)]
@@ -343,4 +345,53 @@ async fn get_uid_by_email_or_phone_handler(
   };
 
   Ok(AppResponse::Ok().with_data(response).into())
+}
+
+/// 诊断接口：查询当前用户在 af_notification 中的最近 50 条通知（含已处理）
+/// GET /api/user/notifications
+async fn list_user_notifications_handler(
+  user_uuid: UserUuid,
+  state: Data<AppState>,
+) -> Result<HttpResponse> {
+  let uid = state
+    .user_cache
+    .get_user_uid(&user_uuid)
+    .await
+    .map_err(AppResponseError::from)?;
+
+  let rows = sqlx::query(
+    r#"
+    SELECT id, workspace_id, notification_type, payload, recipient_uid, created_at, processed
+    FROM af_notification
+    WHERE recipient_uid = $1
+    ORDER BY created_at DESC
+    LIMIT 50
+    "#,
+  )
+  .bind(uid)
+  .fetch_all(&state.pg_pool)
+  .await
+  .map_err(|e| AppResponseError::from(AppError::from(e)))?;
+
+  let notifications: Vec<serde_json::Value> = rows
+    .iter()
+    .map(|row| {
+      use sqlx::Row;
+      json!({
+        "id": row.get::<uuid::Uuid, _>("id").to_string(),
+        "workspace_id": row.get::<Option<uuid::Uuid>, _>("workspace_id").map(|v| v.to_string()),
+        "notification_type": row.get::<String, _>("notification_type"),
+        "payload": row.get::<serde_json::Value, _>("payload"),
+        "recipient_uid": row.get::<Option<i64>, _>("recipient_uid"),
+        "created_at": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
+        "processed": row.get::<bool, _>("processed"),
+      })
+    })
+    .collect();
+
+  Ok(HttpResponse::Ok().json(json!({
+    "uid": uid,
+    "count": notifications.len(),
+    "notifications": notifications,
+  })))
 }

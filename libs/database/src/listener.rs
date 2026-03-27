@@ -27,15 +27,18 @@ where
           notification.channel(),
           notification.payload()
         );
-        match serde_json::from_str::<T>(notification.payload()) {
+        let raw = notification.payload();
+        match serde_json::from_str::<T>(raw) {
           Ok(change) => {
+            trace!("Deserialized pg_notify payload OK (channel={})", notification.channel());
             let _ = tx.send(change);
           },
           Err(err) => {
             error!(
-              "Failed to deserialize change: {:?}, payload: {}",
+              "[pg_listener] Failed to deserialize payload on channel '{}': {:?}\nraw={}",
+              notification.channel(),
               err,
-              notification.payload()
+              &raw[..raw.len().min(500)]
             );
           },
         }
