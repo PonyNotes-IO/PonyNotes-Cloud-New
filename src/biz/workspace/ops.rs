@@ -456,6 +456,9 @@ pub async fn invite_workspace_members(
     }
   }
 
+  // 收集需要事务提交后发送的通知 (invitee_uid, role_name)
+  let mut pending_invite_notifications: Vec<(i64, String)> = Vec::new();
+
   for invitation in invitations {
     let inviter_name = inviter_name.clone();
     let workspace_name = workspace_name.clone();
@@ -520,32 +523,13 @@ pub async fn invite_workspace_members(
           .execute(txn.deref_mut())
           .await?;
 
-          // 发送站内通知给被邀请的用户
-          if let Ok(invitee_uid) = invitee_uid_result {
-            let payload = serde_json::json!({
-              "invite_id": invite_id.to_string(),
-              "workspace_id": workspace_id.to_string(),
-              "inviter_name": inviter_name,
-              "workspace_name": workspace_name,
-              "role": match invitation.role {
-                AFRole::Owner => "Owner",
-                AFRole::Member => "Member",
-                AFRole::Guest => "Guest",
-              },
-              "message": format!("{} 邀请你加入工作空间 {}，可以点击账号左上角切换空间。", inviter_name, workspace_name)
-            });
-            // 使用 reminder 类型，确保前端能正确显示在"提醒" tab 中
-            // 文案：提醒用户被邀请加入工作空间
-            if let Err(err) = create_workspace_notification(
-              pg_pool,
-              workspace_id,
-              "reminder", // 使用 reminder 类型
-              &payload,
-              Some(invitee_uid),
-            ).await {
-              tracing::warn!("Failed to create notification for invited user {}: {:?}", invitation.email, err);
-            }
-          }
+          // 收集通知信息，事务提交后再发送
+          let role_name = match invitation.role {
+            AFRole::Owner => "所有者",
+            AFRole::Member => "成员",
+            AFRole::Guest => "访客",
+          };
+          pending_invite_notifications.push((invitee_uid, role_name.to_string()));
         } else {
           // 用户未注册，创建pending邀请记录
           insert_workspace_invitation(
@@ -612,33 +596,14 @@ pub async fn invite_workspace_members(
             .execute(txn.deref_mut())
             .await?;
 
-            // 发送站内通知给被邀请的用户
+            // 收集通知信息，事务提交后再发送
             if let Ok(invitee_uid) = invitee_uid_result {
-          let role_name = match invitation.role {
-            AFRole::Owner => "所有者",
-            AFRole::Member => "成员",
-            AFRole::Guest => "访客",
-          };
-          let payload = serde_json::json!({
-            "invite_id": invite_id.to_string(),
-            "workspace_id": workspace_id.to_string(),
-            "inviter_name": inviter_name,
-            "workspace_name": workspace_name,
-            "role": role_name,
-            "title": "您收到了工作区邀请",
-            "message": format!("用户{}邀请您加入{}的工作区：{}，您的角色是：{}", inviter_name, inviter_name, workspace_name, role_name)
-          });
-              // 使用 reminder 类型，确保前端能正确显示在"提醒" tab 中
-              // 文案：提醒用户被邀请加入工作空间
-              if let Err(err) = create_workspace_notification(
-                pg_pool,
-                workspace_id,
-                "reminder", // 使用 reminder 类型
-                &payload,
-                Some(invitee_uid),
-              ).await {
-                tracing::warn!("Failed to create notification for invited user {}: {:?}", invitation.email, err);
-              }
+              let role_name = match invitation.role {
+                AFRole::Owner => "所有者",
+                AFRole::Member => "成员",
+                AFRole::Guest => "访客",
+              };
+              pending_invite_notifications.push((invitee_uid, role_name.to_string()));
             }
           }
         }
@@ -685,6 +650,28 @@ pub async fn invite_workspace_members(
     .commit()
     .await
     .context("Commit transaction to invite workspace members")?;
+
+  // 事务提交后发送邀请通知，此时成员记录已入库，不会有竞态问题
+  for (invitee_uid, role_name) in pending_invite_notifications {
+    let payload = json!({
+      "workspace_id": workspace_id.to_string(),
+      "inviter_name": inviter_name,
+      "workspace_name": workspace_name,
+      "role": role_name,
+      "title": "您收到了工作区邀请",
+      "message": format!("用户{}邀请您加入{}的工作区：{}，您的角色是：{}", inviter_name, inviter_name, workspace_name, role_name),
+    });
+    if let Err(err) = create_workspace_notification(
+      pg_pool,
+      workspace_id,
+      "reminder",
+      &payload,
+      Some(invitee_uid),
+    ).await {
+      tracing::warn!("Failed to send invite notification to uid={}: {:?}", invitee_uid, err);
+    }
+  }
+
   Ok(())
 }
 

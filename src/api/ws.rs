@@ -154,17 +154,60 @@ pub async fn establish_ws_connection_v2(
     }
   });
 
-  // 订阅系统通知
+  // 订阅系统通知（含补发离线期间积压的未处理通知）
   let tx_system = tx.clone();
+  let pg_pool_notif = state.pg_pool.clone();
   let mut system_notification_recv = state.pg_listeners.subscribe_system_notification(uid);
   actix::spawn(async move {
+    // 先补发离线期间积压的未处理通知
+    match get_pending_notifications(&pg_pool_notif, uid).await {
+      Ok(pending) if !pending.is_empty() => {
+        debug!(
+          "v2: delivering {} pending notifications to uid={} on connect",
+          pending.len(),
+          uid
+        );
+        let mut delivered_ids = Vec::with_capacity(pending.len());
+        for notification in pending {
+          let msg = ServerMessage::Notification {
+            notification: WorkspaceNotification::SystemNotification {
+              id: notification.id.to_string(),
+              workspace_id: notification
+                .workspace_id
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+              notification_type: notification.notification_type,
+              title: extract_title_from_payload(&notification.payload),
+              message: extract_message_from_payload(&notification.payload),
+              payload_json: notification.payload.to_string(),
+              created_at: notification.created_at.timestamp(),
+              recipient_uid: notification.recipient_uid.unwrap_or(0),
+            },
+          };
+          if tx_system.send(msg).await.is_err() {
+            return;
+          }
+          delivered_ids.push(notification.id);
+        }
+        if let Err(e) = mark_notifications_processed(&pg_pool_notif, &delivered_ids).await {
+          error!("v2: failed to mark pending notifications as processed for uid={}: {:?}", uid, e);
+        }
+      },
+      Ok(_) => {},
+      Err(e) => error!("v2: failed to fetch pending notifications for uid={}: {:?}", uid, e),
+    }
+
+    // 持续监听新到达的通知
     while let Some(notification) = system_notification_recv.recv().await {
       trace!(
-        "Pushing system notification to WebSocket: uid={}, type={}, id={}",
+        "Pushing system notification to WebSocket v2: uid={}, type={}, id={}",
         uid,
         notification.notification_type,
         notification.id
       );
+      if let Err(e) = mark_notifications_processed(&pg_pool_notif, &[notification.id]).await {
+        error!("v2: failed to mark notification as processed: {:?}", e);
+      }
       let _ = tx_system
         .send(ServerMessage::Notification {
           notification: WorkspaceNotification::SystemNotification {
