@@ -11,6 +11,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use database::collab::{delete_collab_member, delete_collab_member_invite};
+use crate::biz::notification::ops::create_workspace_notification;
 
 pub async fn add_collab_member(
   pg_pool: &PgPool,
@@ -47,6 +48,22 @@ pub async fn add_collab_member(
     .update_access_level_policy(&received_uid, &view_id, access_level)
     .await?;
   tx.commit().await?;
+
+  // 通知被分享的用户
+  let sender_name = database::user::select_name_from_uid(pg_pool, send_uid)
+    .await
+    .unwrap_or_else(|_| "用户".to_string());
+  let payload = serde_json::json!({
+    "view_id": view_id.to_string(),
+    "view_name": view_name,
+    "shared_by": send_uid,
+    "title": "有文档被共享给你",
+    "message": format!("【{}】将文档「{}」共享给了你，请及时查看", sender_name, view_name),
+  });
+  if let Err(err) = create_workspace_notification(pg_pool, workspace_id, "collab_shared", &payload, Some(received_uid)).await {
+    tracing::warn!("Failed to send collab share notification to uid={}: {:?}", received_uid, err);
+  }
+
   Ok(())
 }
 
@@ -76,6 +93,16 @@ pub async fn edit_collab_member_permission(
     .await?
     .ok_or(AppError::InvalidRequest("无效的权限id".to_string()))?;
 
+  // 查询旧权限用于通知
+  let old_permission_id: Option<i32> = sqlx::query_scalar(
+    "SELECT permission_id FROM af_collab_member WHERE oid = $1 AND uid = $2",
+  )
+  .bind(view_id.to_string())
+  .bind(uid)
+  .fetch_optional(pg_pool)
+  .await
+  .unwrap_or(None);
+
   update_collab_member_permission(pg_pool, view_id, uid, new_permission_id).await?;
 
   // 同步更新 af_collab_member_invite 表中的权限，保持邀请记录与实际权限一致
@@ -85,6 +112,55 @@ pub async fn edit_collab_member_permission(
   access_control
     .update_access_level_policy(&uid, &view_id, permission.access_level)
     .await?;
+
+  // 发送权限变更通知给被修改权限的用户
+  let view_name: Option<String> = sqlx::query_scalar(
+    "SELECT name FROM af_collab_member_invite WHERE oid = $1 AND received_uid = $2 LIMIT 1",
+  )
+  .bind(view_id.to_string())
+  .bind(uid)
+  .fetch_optional(pg_pool)
+  .await
+  .unwrap_or(None);
+
+  let perm_to_name = |p: i32| match p {
+    2 => "评论",
+    3 => "编辑",
+    4 => "完全访问",
+    _ => "查看",
+  };
+  let new_perm_name = perm_to_name(new_permission_id);
+  let now = chrono::Utc::now();
+  let timestamp = format!(
+    "{}年{}月{}日 {:02}:{:02}",
+    now.format("%Y"),
+    now.format("%-m"),
+    now.format("%-d"),
+    now.format("%H"),
+    now.format("%M"),
+  );
+  let doc_name = view_name.as_deref().unwrap_or("未知文章");
+  let message = if let Some(old_id) = old_permission_id {
+    let old_perm_name = perm_to_name(old_id);
+    format!(
+      "您的对于文章「{}」的权限于{}已从「{}」调整为「{}」，请知悉",
+      doc_name, timestamp, old_perm_name, new_perm_name
+    )
+  } else {
+    format!(
+      "您的对于文章「{}」的权限于{}已调整为「{}」，请知悉",
+      doc_name, timestamp, new_perm_name
+    )
+  };
+  let payload = serde_json::json!({
+    "view_id": view_id.to_string(),
+    "view_name": doc_name,
+    "title": "文档权限已变更",
+    "message": message,
+  });
+  if let Err(err) = create_workspace_notification(pg_pool, workspace_id, "collab_permission_changed", &payload, Some(uid)).await {
+    tracing::warn!("Failed to send permission change notification to uid={}: {:?}", uid, err);
+  }
 
   Ok(())
 }

@@ -2682,13 +2682,18 @@ pub async fn update_page_mention(
   upsert_page_mention(pg_pool, workspace_id, view_id, uid, update).await?;
 
   if update.require_notification {
+    // 获取提及者名称
+    let mentioner_name = database::user::select_name_from_uid(pg_pool, uid)
+      .await
+      .unwrap_or_else(|_| "有人".to_string());
+
     let payload = serde_json::json!({
       "view_id": view_id,
       "view_name": update.view_name,
       "block_id": update.block_id,
       "mentioned_by": uid,
       "title": "有人提到你",
-      "message": format!("他在笔记“{}”中提到了你", update.view_name),
+      "message": format!("{}（{}）在「{}」中@你了，立即查看", mentioner_name, mentioner_name, update.view_name),
     });
 
     // 获取被提到的人的 UID

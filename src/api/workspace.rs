@@ -849,6 +849,7 @@ async fn remove_workspace_member_handler(
     &workspace_id,
     &member_emails,
     state.workspace_access_control.clone(),
+    Some(uid),
   )
   .await?;
 
@@ -1084,6 +1085,7 @@ async fn update_workspace_member_handler(
     &workspace_id,
     &changeset,
     state.workspace_access_control.clone(),
+    uid,
   )
   .await?;
 
@@ -3790,9 +3792,31 @@ async fn add_collab_member_handler(
         }
       }
       
+      // 通知分享者（A）：B 刚刚打开了分享链接
+      let opener_name = database::user::select_name_from_uid(&state.pg_pool, uid)
+        .await
+        .unwrap_or_else(|_| "用户".to_string());
+      let note_name = &invite.name;
+      let link_open_payload = serde_json::json!({
+        "view_id": view_id.to_string(),
+        "view_name": note_name,
+        "opened_by": uid,
+        "title": "有人打开了你的分享笔记",
+        "message": format!("{}用户刚刚打开了您分享给他的笔记「{}」", opener_name, note_name),
+      });
+      if let Err(err) = crate::biz::notification::ops::create_workspace_notification(
+        &state.pg_pool,
+        &workspace_id,
+        "collab_share_link_opened",
+        &link_open_payload,
+        Some(invite.send_uid),
+      ).await {
+        tracing::warn!("Failed to send share link opened notification: {:?}", err);
+      }
+
       return Ok(Json(AppResponse::Ok()));
     }
-    
+
     tracing::info!("no pending invite found, skipping");
     return Ok(Json(AppResponse::Ok()));
   }

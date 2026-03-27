@@ -614,17 +614,19 @@ pub async fn invite_workspace_members(
 
             // 发送站内通知给被邀请的用户
             if let Ok(invitee_uid) = invitee_uid_result {
+          let role_name = match invitation.role {
+            AFRole::Owner => "所有者",
+            AFRole::Member => "成员",
+            AFRole::Guest => "访客",
+          };
           let payload = serde_json::json!({
             "invite_id": invite_id.to_string(),
             "workspace_id": workspace_id.to_string(),
             "inviter_name": inviter_name,
             "workspace_name": workspace_name,
-            "role": match invitation.role {
-              AFRole::Owner => "Owner",
-              AFRole::Member => "Member",
-              AFRole::Guest => "Guest",
-            },
-            "message": format!("{} 邀请你加入工作空间 {}，可以点击账号左上角切换空间。", inviter_name, workspace_name)
+            "role": role_name,
+            "title": "您收到了工作区邀请",
+            "message": format!("用户{}邀请您加入{}的工作区：{}，您的角色是：{}", inviter_name, inviter_name, workspace_name, role_name)
           });
               // 使用 reminder 类型，确保前端能正确显示在"提醒" tab 中
               // 文案：提醒用户被邀请加入工作空间
@@ -746,7 +748,7 @@ pub async fn leave_workspace(
 ) -> Result<(), AppResponseError> {
   let email = database::user::select_email_from_user_uuid(pg_pool, user_uuid).await?;
   if let Some(email) = email {
-    remove_workspace_members(pg_pool, workspace_id, &[email], workspace_access_control).await
+    remove_workspace_members(pg_pool, workspace_id, &[email], workspace_access_control, None).await
   } else {
     // User has no email, cannot remove by email
     Ok(())
@@ -758,6 +760,7 @@ pub async fn remove_workspace_members(
   workspace_id: &Uuid,
   member_identifiers: &[String],
   workspace_access_control: Arc<dyn WorkspaceAccessControl>,
+  operator_uid: Option<i64>,
 ) -> Result<(), AppResponseError> {
   let mut txn = pg_pool
     .begin()
@@ -820,12 +823,19 @@ pub async fn remove_workspace_members(
   // 事务提交后再发送 WebSocket 通知。
   // 此时被踢出的用户客户端收到通知并立即查询服务端，能够得到不含该工作区的最新列表，
   // 从而触发本地 DidUpdateUserWorkspaces 通知，Flutter 层会立即切换到自己的工作区。
+  let operator_name = if let Some(op_uid) = operator_uid {
+    database::user::select_name_from_uid(pg_pool, op_uid)
+      .await
+      .unwrap_or_else(|_| "管理员".to_string())
+  } else {
+    "管理员".to_string()
+  };
   for (uid, workspace_name) in to_notify {
     let notification_payload = json!({
       "workspace_id": workspace_id.to_string(),
       "removed_member_uid": uid,
-      "title": "工作区访问权限已移除",
-      "message": format!("您已被从工作区 {} 中移除", workspace_name),
+      "title": "工作区成员已移除",
+      "message": format!("{}用户已经移除了您所在工作区：{}", operator_name, workspace_name),
     });
     if let Err(err) = create_workspace_notification(
       pg_pool,
@@ -930,6 +940,7 @@ pub async fn update_workspace_member(
   workspace_id: &Uuid,
   changeset: &WorkspaceMemberChangeset,
   workspace_access_control: Arc<dyn WorkspaceAccessControl>,
+  operator_uid: i64,
 ) -> Result<(), AppError> {
   if let Some(role) = &changeset.role {
     // 使用已解析的 uid 直接更新成员角色，不再依赖 email
@@ -947,6 +958,29 @@ pub async fn update_workspace_member(
     workspace_access_control
       .insert_role(uid, workspace_id, role.clone())
       .await?;
+
+    // 发通知给被修改角色的成员
+    let role_name = match role {
+      AFRole::Owner => "所有者",
+      AFRole::Member => "成员",
+      AFRole::Guest => "访客",
+    };
+    let workspace_name = database::workspace::select_workspace_name_from_workspace_id(pg_pool, workspace_id)
+      .await
+      .ok()
+      .flatten()
+      .unwrap_or_default();
+    let operator_name = database::user::select_name_from_uid(pg_pool, operator_uid)
+      .await
+      .unwrap_or_else(|_| "管理员".to_string());
+    let payload = json!({
+      "workspace_id": workspace_id.to_string(),
+      "title": "工作区角色已变更",
+      "message": format!("{}用户已经修改了您在工作区：{}的角色，新角色为：{}", operator_name, workspace_name, role_name),
+    });
+    if let Err(err) = create_workspace_notification(pg_pool, workspace_id, "workspace_member_role_changed", &payload, Some(*uid)).await {
+      tracing::warn!("Failed to send role change notification to uid={}: {:?}", uid, err);
+    }
   }
 
   Ok(())

@@ -365,6 +365,17 @@ pub async fn select_phone_from_user_uid(pool: &PgPool, user_uid: i64) -> Result<
 }
 
 #[inline]
+pub async fn select_name_from_uid(pool: &PgPool, uid: i64) -> Result<String, AppError> {
+  let name: String = sqlx::query_scalar(
+    r#"SELECT name FROM af_user WHERE uid = $1"#,
+  )
+  .bind(uid)
+  .fetch_one(pool)
+  .await?;
+  Ok(name)
+}
+
+#[inline]
 pub async fn select_name_from_uuid(pool: &PgPool, user_uuid: &Uuid) -> Result<String, AppError> {
   let email = sqlx::query_scalar!(
     r#"
