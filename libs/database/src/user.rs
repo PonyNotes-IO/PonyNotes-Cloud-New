@@ -448,3 +448,111 @@ pub async fn select_user_with_avatar<'a, E: Executor<'a, Database = Postgres>>(
   .await?;
   Ok(user)
 }
+
+/// Check if a phone number is registered in af_user.phone for a DIFFERENT user than user_uuid.
+/// Returns true if the phone belongs to another user (old phone scenario).
+#[inline]
+pub async fn phone_exists_for_another_user(
+  pool: &PgPool,
+  phone: &str,
+  current_user_uuid: &Uuid,
+) -> Result<bool, AppError> {
+  let exists = sqlx::query_scalar!(
+    r#"
+    SELECT EXISTS(
+      SELECT 1 FROM af_user
+      WHERE phone = $1 AND uuid != $2
+      AND phone IS NOT NULL AND phone != ''
+    ) AS "exists!"
+    "#,
+    phone,
+    current_user_uuid
+  )
+  .fetch_one(pool)
+  .await?;
+  Ok(exists)
+}
+
+/// Update bind_mobile for a user (set after social login phone binding)
+#[inline]
+#[instrument(skip(pool), err)]
+pub async fn update_bind_mobile(
+  pool: &PgPool,
+  user_uuid: &Uuid,
+  bind_mobile: &str,
+) -> Result<(), AppError> {
+  sqlx::query!(
+    r#"UPDATE af_user SET bind_mobile = $1 WHERE uuid = $2"#,
+    bind_mobile,
+    user_uuid
+  )
+  .execute(pool)
+  .await?;
+  Ok(())
+}
+
+/// Update wechat_openid for a user (set during WeChat login)
+#[inline]
+#[instrument(skip(pool), err)]
+pub async fn update_wechat_openid(
+  pool: &PgPool,
+  user_uuid: &Uuid,
+  openid: &str,
+) -> Result<(), AppError> {
+  sqlx::query!(
+    r#"UPDATE af_user SET wechat_openid = $1 WHERE uuid = $2"#,
+    openid,
+    user_uuid
+  )
+  .execute(pool)
+  .await?;
+  Ok(())
+}
+
+/// Update douyin_openid for a user (set during Douyin login)
+#[inline]
+#[instrument(skip(pool), err)]
+pub async fn update_douyin_openid(
+  pool: &PgPool,
+  user_uuid: &Uuid,
+  openid: &str,
+) -> Result<(), AppError> {
+  sqlx::query!(
+    r#"UPDATE af_user SET douyin_openid = $1 WHERE uuid = $2"#,
+    openid,
+    user_uuid
+  )
+  .execute(pool)
+  .await?;
+  Ok(())
+}
+
+/// Select uid by WeChat openid
+#[inline]
+pub async fn select_uid_from_wechat_openid(
+  pool: &PgPool,
+  openid: &str,
+) -> Result<i64, AppError> {
+  let uid = sqlx::query_scalar!(
+    r#"SELECT uid FROM af_user WHERE wechat_openid = $1"#,
+    openid
+  )
+  .fetch_one(pool)
+  .await?;
+  Ok(uid)
+}
+
+/// Select uid by Douyin openid
+#[inline]
+pub async fn select_uid_from_douyin_openid(
+  pool: &PgPool,
+  openid: &str,
+) -> Result<i64, AppError> {
+  let uid = sqlx::query_scalar!(
+    r#"SELECT uid FROM af_user WHERE douyin_openid = $1"#,
+    openid
+  )
+  .fetch_one(pool)
+  .await?;
+  Ok(uid)
+}

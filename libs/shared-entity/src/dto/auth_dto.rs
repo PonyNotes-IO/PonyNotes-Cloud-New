@@ -124,3 +124,12 @@ pub struct GetUidByEmailOrPhoneResponse {
   pub uid: i64,
   pub identifier_type: String, // "email" 或 "phone"
 }
+
+/// Response for phone binding indicating what was updated
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct BindPhoneResponse {
+  /// Whether af_user.phone was updated (true for new phone binding)
+  pub phone_updated: bool,
+  /// Whether af_user.bind_mobile was updated (always true on success)
+  pub bind_mobile_updated: bool,
+}

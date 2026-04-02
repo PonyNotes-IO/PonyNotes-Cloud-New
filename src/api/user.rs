@@ -17,9 +17,9 @@ use app_error::AppError;
 use database_entity::dto::{AFUserProfile, AFUserWorkspaceInfo, UserImageAssetSource};
 use semver::Version;
 use shared_entity::dto::auth_dto::{
-  CheckEmailParams, DeleteUserQuery, GetUidByEmailOrPhoneQuery, GetUidByEmailOrPhoneResponse,
-  SearchUserQuery, SearchUserResponse, SendPhoneOtpParams, SignInTokenResponse,
-  UpdateUserParams, VerifyAndBindPhoneParams,
+  BindPhoneResponse, CheckEmailParams, DeleteUserQuery, GetUidByEmailOrPhoneQuery,
+  GetUidByEmailOrPhoneResponse, SearchUserQuery, SearchUserResponse, SendPhoneOtpParams,
+  SignInTokenResponse, UpdateUserParams, VerifyAndBindPhoneParams,
 };
 use shared_entity::response::AppResponseError;
 use shared_entity::response::{AppResponse, JsonAppResponse};
@@ -110,13 +110,13 @@ async fn verify_and_bind_phone_handler(
   auth: Authorization,
   payload: Json<VerifyAndBindPhoneParams>,
   state: Data<AppState>,
-) -> Result<JsonAppResponse<()>> {
+) -> Result<JsonAppResponse<BindPhoneResponse>> {
   let user_uuid = auth.uuid()?;
   let params = payload.into_inner();
 
-  verify_and_bind_phone(&user_uuid, &params.phone, &params.otp, state.as_ref()).await?;
+  let result = verify_and_bind_phone(&user_uuid, &params.phone, &params.otp, state.as_ref()).await?;
 
-  Ok(AppResponse::Ok().into())
+  Ok(AppResponse::Ok().with_data(result).into())
 }
 
 #[tracing::instrument(skip(state), err)]
@@ -201,33 +201,13 @@ async fn send_phone_otp_handler(
   let params = payload.into_inner();
   let user_uuid = auth.uuid()?;
 
-  // This endpoint is for logged-in users to bind or change their phone number
-  // Note: Phone number registration (signup) goes through GoTrue's /otp or /signup endpoints,
-  // which don't require authentication and don't go through this handler.
-  //
-  // For logged-in users:
-  // - SSO users (WeChat/DouYin) already have a temporary phone number created during login
-  // - So binding a real phone number is actually a "phone change" scenario
-  // - Even if a logged-in user somehow has no phone (shouldn't happen due to DB constraints),
-  //   we still use the standard flow (send_phone_otp) since the user is already authenticated
-  let user_info = state
-    .gotrue_client
-    .user_info(&auth.token)
-    .await
-    .map_err(AppResponseError::from)?;
-  
-  let current_phone = user_info.phone;
-
-  // Use the standard phone change flow for all logged-in users.
-  // This initiates phone_change in GoTrue and sends OTP via SMS (channel=sms).
   event!(
     tracing::Level::INFO,
-    "Logged-in user {} (current phone: {}) binding/changing to phone {} - using standard phone change flow",
+    "Logged-in user {} binding/changing to phone {}",
     user_uuid,
-    if current_phone.is_empty() { "(none)" } else { &current_phone },
     params.phone
   );
-  send_phone_otp(&auth.token, &params.phone, state.as_ref()).await?;
+  send_phone_otp(&auth.token, &user_uuid, &params.phone, state.as_ref()).await?;
 
   Ok(AppResponse::Ok().into())
 }

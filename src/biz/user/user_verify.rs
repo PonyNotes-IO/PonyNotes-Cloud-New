@@ -105,22 +105,44 @@ pub async fn verify_token(access_token: &str, state: &AppState) -> Result<bool, 
       .await
       .context("fail to commit transaction to initialize workspace")?;
     state.metrics.collab_metrics.observe_pg_tx(start.elapsed());
+
+    // Extract and store social login openid (wechat/douyin) from GoTrue identities
+    if let Some(identities) = &user.identities {
+      for identity in identities {
+        let openid = identity.id.as_str();
+        if !openid.is_empty() {
+          match identity.provider.as_str() {
+            "wechat" => {
+              if let Err(e) = database::user::update_wechat_openid(&state.pg_pool, &user_uuid, openid).await {
+                event!(tracing::Level::WARN, "Failed to store wechat_openid for user {}: {}", user_uuid, e);
+              }
+            }
+            "douyin" => {
+              if let Err(e) = database::user::update_douyin_openid(&state.pg_pool, &user_uuid, openid).await {
+                event!(tracing::Level::WARN, "Failed to store douyin_openid for user {}: {}", user_uuid, e);
+              }
+            }
+            _ => {}
+          }
+        }
+      }
+    }
   } else {
     trace!("user already exists:{},{}", user.id, user.email);
     // For existing users, ensure their workspace roles are cached in Casbin
     // This is important after server restarts or when Casbin cache is cleared
     use database::user::select_uid_from_uuid;
     use database::workspace::select_user_workspace_ids;
-    
+
     let uid = select_uid_from_uuid(txn.deref_mut(), &user_uuid).await?;
     let workspace_ids = select_user_workspace_ids(txn.deref_mut(), &user_uuid).await?;
-    
+
     // Commit the transaction before caching roles
     txn
       .commit()
       .await
       .context("fail to commit transaction to verify token")?;
-    
+
     // Cache all workspace roles for this user
     for (workspace_id, role) in workspace_ids {
       if let Err(e) = state
@@ -136,6 +158,28 @@ pub async fn verify_token(access_token: &str, state: &AppState) -> Result<bool, 
           workspace_id,
           e
         );
+      }
+    }
+
+    // Extract and store social login openid (wechat/douyin) from GoTrue identities
+    if let Some(identities) = &user.identities {
+      for identity in identities {
+        let openid = identity.id.as_str();
+        if !openid.is_empty() {
+          match identity.provider.as_str() {
+            "wechat" => {
+              if let Err(e) = database::user::update_wechat_openid(&state.pg_pool, &user_uuid, openid).await {
+                event!(tracing::Level::WARN, "Failed to store wechat_openid for user {}: {}", user_uuid, e);
+              }
+            }
+            "douyin" => {
+              if let Err(e) = database::user::update_douyin_openid(&state.pg_pool, &user_uuid, openid).await {
+                event!(tracing::Level::WARN, "Failed to store douyin_openid for user {}: {}", user_uuid, e);
+              }
+            }
+            _ => {}
+          }
+        }
       }
     }
   }
@@ -179,44 +223,24 @@ pub async fn verify_and_bind_phone(
   phone: &str,
   otp: &str,
   state: &AppState,
-) -> Result<(), AppError> {
+) -> Result<shared_entity::dto::auth_dto::BindPhoneResponse, AppError> {
   use database::user::update_user;
   use gotrue::params::VerifyParams;
-  
-  // Check current user's phone in GoTrue using admin API
-  // Note: SSO users already have a temporary phone number, so this is always a phone change
-  let admin_token = state.gotrue_admin.token().await?;
-  let current_user = state
-    .gotrue_client
-    .admin_user_details(&admin_token, &user_uuid.to_string())
+  use shared_entity::dto::auth_dto::BindPhoneResponse;
+
+  // Check if this is an old phone (belongs to another user)
+  let is_old_phone = database::user::phone_exists_for_another_user(&state.pg_pool, phone, user_uuid)
     .await
-    .ok();
-  
-  let current_phone = current_user
-    .as_ref()
-    .map(|u| u.phone.as_str())
-    .unwrap_or("");
-  
-  // IMPORTANT: This function is ONLY called from /api/user/verify-phone endpoint,
-  // which is ONLY used for logged-in users binding/changing their phone number.
-  // All callers use send_phone_otp() which calls GoTrue's update_user API.
-  // GoTrue's update_user API ALWAYS creates a phone_change record, even if the user has no current phone.
-  // Therefore, we MUST always use PhoneChange verification type here.
-  // 
-  // This does NOT affect other login flows:
-  // - Normal phone login: Uses GoTrue's /token or /otp + /verify endpoints directly
-  // - Forgot password: Uses GoTrue's /recover + /verify endpoints directly
-  // - These flows never call this function
-  let verify_type = gotrue::params::VerifyType::PhoneChange;
-  
-  event!(
-    tracing::Level::INFO,
-    "User {} (current phone: {}) verifying phone {} - using PhoneChange verification type (always, because OTP was sent via update_user)",
-    user_uuid,
-    if current_phone.is_empty() { "(none)" } else { current_phone },
-    phone
-  );
-  
+    .unwrap_or(false);
+
+  let verify_type = if is_old_phone {
+    // OTP was sent via /otp endpoint, verify with type=sms
+    gotrue::params::VerifyType::Sms
+  } else {
+    // OTP was sent via update_user phone change, verify with type=phone_change
+    gotrue::params::VerifyType::PhoneChange
+  };
+
   let verify_type_str = match verify_type {
     gotrue::params::VerifyType::Sms => "sms",
     gotrue::params::VerifyType::PhoneChange => "phone_change",
@@ -225,20 +249,13 @@ pub async fn verify_and_bind_phone(
   };
   event!(
     tracing::Level::INFO,
-    "Verifying phone OTP for user: {}, phone: {} (raw), verification_type: {}",
+    "Verifying phone OTP for user: {}, phone: {}, is_old_phone: {}, verification_type: {}",
     user_uuid,
     phone,
+    is_old_phone,
     verify_type_str
   );
-  
-  event!(
-    tracing::Level::INFO,
-    "Verifying phone OTP for user: {}, phone: {}, verification_type: {}",
-    user_uuid,
-    phone,
-    verify_type_str
-  );
-  
+
   // Note: GoTrue's validatePhone will normalize the phone format (remove + prefix)
   // Frontend should ensure consistent format, but GoTrue will handle normalization
   let verify_params = VerifyParams {
@@ -247,60 +264,61 @@ pub async fn verify_and_bind_phone(
     token: otp.to_string(),
     email: String::new(),
   };
-  
+
   let verify_result = state
     .gotrue_client
     .verify(&verify_params)
     .await;
-  
+
   match verify_result {
     Ok(_token_response) => {
       event!(
         tracing::Level::INFO,
-        "Phone OTP verified successfully, GoTrue has updated auth.users.phone for user: {}, phone: {}",
+        "Phone OTP verified successfully for user: {}, phone: {}",
         user_uuid,
         phone
       );
-      
-      // Step 2: Sync the phone number to our business database
-      // GoTrue has already updated auth.users.phone, now we update af_user.phone
-      event!(
-        tracing::Level::INFO,
-        "Updating af_user.phone for user: {}, phone: {}",
-        user_uuid,
-        phone
-      );
-      
-      update_user(&state.pg_pool, user_uuid, None, None, Some(phone.to_string()), None).await?;
-      
-      // Verify the update was successful
-      let updated_phone = database::user::select_phone_from_user_uuid(&state.pg_pool, user_uuid).await?;
-      event!(
-        tracing::Level::INFO,
-        "Phone number update verification - user: {}, requested phone: {}, actual phone in DB: {:?}",
-        user_uuid,
-        phone,
-        updated_phone
-      );
-      
-      if updated_phone.as_ref().map(|p| p.as_str()) != Some(phone) {
+
+      if is_old_phone {
+        // Old phone: only update bind_mobile, NOT phone (can't - UNIQUE constraint, phone belongs to another user)
         event!(
-          tracing::Level::ERROR,
-          "Phone number update mismatch! user: {}, requested: {}, actual in DB: {:?}",
+          tracing::Level::INFO,
+          "Old phone binding: only updating bind_mobile for user {}, phone: {}",
           user_uuid,
-          phone,
-          updated_phone
+          phone
         );
+        database::user::update_bind_mobile(&state.pg_pool, user_uuid, phone).await?;
+        event!(
+          tracing::Level::INFO,
+          "bind_mobile updated successfully for user: {}, phone: {} (two separate accounts remain)",
+          user_uuid,
+          phone
+        );
+        Ok(BindPhoneResponse {
+          phone_updated: false,
+          bind_mobile_updated: true,
+        })
+      } else {
+        // New phone: update both phone and bind_mobile
+        event!(
+          tracing::Level::INFO,
+          "New phone binding: updating both phone and bind_mobile for user {}, phone: {}",
+          user_uuid,
+          phone
+        );
+        update_user(&state.pg_pool, user_uuid, None, None, Some(phone.to_string()), None).await?;
+        database::user::update_bind_mobile(&state.pg_pool, user_uuid, phone).await?;
+        event!(
+          tracing::Level::INFO,
+          "Phone and bind_mobile updated for user: {}, phone: {} (unified account)",
+          user_uuid,
+          phone
+        );
+        Ok(BindPhoneResponse {
+          phone_updated: true,
+          bind_mobile_updated: true,
+        })
       }
-      
-      event!(
-        tracing::Level::INFO,
-        "Phone number change completed successfully for user: {}, phone: {}",
-        user_uuid,
-        phone
-      );
-      
-      Ok(())
     }
     Err(e) => {
       event!(
@@ -318,48 +336,79 @@ pub async fn verify_and_bind_phone(
   }
 }
 
-/// Initiate phone number change by calling GoTrue's update_user
-/// 
-/// This function follows GoTrue's standard phone change flow:
+/// Initiate phone number OTP by calling GoTrue's update_user (new phone) or /otp (old phone).
+///
+/// For new phones (not yet in af_user.phone for any user): follows GoTrue's standard phone change flow:
 /// 1. Calls GoTrue's update_user API with the new phone number and channel=sms
 /// 2. GoTrue sends an OTP to the new phone number
 /// 3. GoTrue stores the new phone in a pending state (new_phone field)
-/// 4. User must verify the OTP using verify_and_bind_phone to complete the change
-/// 
+/// 4. User must verify the OTP using verify_and_bind_phone with type=phone_change
+///
+/// For old phones (already in af_user.phone for another user): uses GoTrue's /otp endpoint:
+/// 1. Calls GoTrue's magic_link (phone /otp) with the phone number
+/// 2. GoTrue sends an OTP to the phone number (no uniqueness check needed)
+/// 3. User must verify the OTP using verify_and_bind_phone with type=sms
+///
 /// IMPORTANT: This requires the user's access_token to authenticate the request.
-/// This function is used for phone number change (换绑) scenarios where the user already has a phone number.
 #[instrument(skip(state), err)]
 pub async fn send_phone_otp(
   access_token: &str,
+  user_uuid: &uuid::Uuid,
   phone: &str,
   state: &AppState,
 ) -> Result<(), AppError> {
   use gotrue_entity::dto::UpdateGotrueUserParams;
-  
+
+  // Check if this phone belongs to another user (old phone scenario)
+  let is_old_phone = database::user::phone_exists_for_another_user(&state.pg_pool, phone, user_uuid)
+    .await
+    .unwrap_or(false);
+
+  if is_old_phone {
+    // Old phone: use GoTrue's /otp endpoint (phone sign-in flow, no uniqueness check)
+    // OTP will be verified with type=sms (not phone_change) at verify step
+    event!(
+      tracing::Level::INFO,
+      "Phone {} belongs to another user - using /otp endpoint for OTP (old phone binding)",
+      phone
+    );
+
+    use gotrue::params::MagicLinkParams;
+    let mut otp_params = MagicLinkParams::default();
+    otp_params.phone = phone.to_string();
+
+    return state
+      .gotrue_client
+      .magic_link(&otp_params, None)
+      .await
+      .map(|_| ())
+      .map_err(|e| AppError::InvalidRequest(format!("发送验证码失败: {}", e)));
+  }
+
   event!(
     tracing::Level::INFO,
     "Initiating phone change to: {}",
     phone
   );
-  
+
   // Call GoTrue's update_user API to initiate phone change
   // IMPORTANT: Must set channel to "sms" to trigger SMS sending
   // Note: GoTrue's validatePhone will normalize the phone format (remove + prefix)
   let mut update_params = UpdateGotrueUserParams::new();
   update_params.phone = phone.to_string();
   update_params.channel = "sms".to_string(); // This is critical!
-  
+
   event!(
     tracing::Level::INFO,
     "Calling GoTrue update_user with phone: {}, channel: sms",
     phone
   );
-  
+
   let result = state
     .gotrue_client
     .update_user(access_token, &update_params)
     .await;
-  
+
   match result {
     Ok(_user) => {
       event!(
@@ -376,17 +425,17 @@ pub async fn send_phone_otp(
         phone,
         e
       );
-      
+
       // Check if the error is about phone number already being registered
       let error_msg = e.to_string();
-      let friendly_msg = if error_msg.contains("already been registered") 
-        || error_msg.contains("phone number has already") 
+      let friendly_msg = if error_msg.contains("already been registered")
+        || error_msg.contains("phone number has already")
         || error_msg.contains("phone exists") {
         format!("该手机号 {} 已被其他用户注册，请使用其他手机号", phone)
       } else {
         format!("发送验证码失败: {}", error_msg)
       };
-      
+
       Err(AppError::InvalidRequest(friendly_msg))
     }
   }
