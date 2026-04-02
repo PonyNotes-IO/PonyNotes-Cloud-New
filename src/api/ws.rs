@@ -205,13 +205,11 @@ pub async fn establish_ws_connection_v2(
         notification.notification_type,
         notification.id
       );
-      if let Err(e) = mark_notifications_processed(&pg_pool_notif, &[notification.id]).await {
-        error!("v2: failed to mark notification as processed: {:?}", e);
-      }
-      let _ = tx_system
+      let notification_id = notification.id;
+      let send_result = tx_system
         .send(ServerMessage::Notification {
           notification: WorkspaceNotification::SystemNotification {
-            id: notification.id.to_string(),
+            id: notification_id.to_string(),
             workspace_id: notification
               .workspace_id
               .map(|id| id.to_string())
@@ -225,6 +223,13 @@ pub async fn establish_ws_connection_v2(
           },
         })
         .await;
+      if send_result.is_err() {
+        break;
+      }
+      // 仅在成功投递后才标记通知为已处理
+      if let Err(e) = mark_notifications_processed(&pg_pool_notif, &[notification_id]).await {
+        error!("v2: failed to mark notification as processed: {:?}", e);
+      }
     }
   });
 
@@ -407,13 +412,10 @@ fn listen_on_system_notification(state: &Data<AppState>, uid: i64, tx: Sender<Re
         notification.notification_type,
         notification.id
       );
-      // 标记新通知为已处理
-      if let Err(e) = mark_notifications_processed(&pg_pool, &[notification.id]).await {
-        error!("Failed to mark notification {} as processed: {:?}", notification.id, e);
-      }
       // 构造 AFSystemNotification 并通过 UserMessage 发送
+      let notification_id = notification.id;
       let msg = UserMessage::SystemNotification(AFSystemNotification {
-        id: notification.id.to_string(),
+        id: notification_id.to_string(),
         workspace_id: notification
           .workspace_id
           .map(|id| id.to_string())
@@ -427,6 +429,10 @@ fn listen_on_system_notification(state: &Data<AppState>, uid: i64, tx: Sender<Re
       });
       if tx.send(RealtimeMessage::User(msg)).await.is_err() {
         break;
+      }
+      // 仅在成功投递后才标记通知为已处理，避免因连接断开导致通知丢失
+      if let Err(e) = mark_notifications_processed(&pg_pool, &[notification_id]).await {
+        error!("Failed to mark notification {} as processed: {:?}", notification_id, e);
       }
     }
   });

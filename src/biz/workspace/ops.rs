@@ -664,7 +664,7 @@ pub async fn invite_workspace_members(
     if let Err(err) = create_workspace_notification(
       pg_pool,
       workspace_id,
-      "reminder",
+      "workspace_member_invite",
       &payload,
       Some(invitee_uid),
     ).await {
