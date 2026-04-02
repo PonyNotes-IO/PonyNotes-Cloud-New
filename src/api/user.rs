@@ -4,7 +4,7 @@ use crate::biz::user::image_asset::{get_user_image_asset, upload_user_image_asse
 use crate::biz::user::user_delete::delete_user;
 use crate::biz::user::user_info::{get_profile, get_user_workspace_info, update_user};
 use crate::biz::user::user_search::{get_uid_by_email_or_phone, search_users_by_email};
-use crate::biz::user::user_verify::{send_phone_otp, verify_and_bind_phone, verify_token};
+use crate::biz::user::user_verify::{check_email_registered, send_phone_otp, verify_and_bind_phone, verify_token};
 use crate::biz::subscription::ops::check_user_storage_limit;
 use crate::state::AppState;
 use actix_http::StatusCode;
@@ -17,9 +17,9 @@ use app_error::AppError;
 use database_entity::dto::{AFUserProfile, AFUserWorkspaceInfo, UserImageAssetSource};
 use semver::Version;
 use shared_entity::dto::auth_dto::{
-  DeleteUserQuery, GetUidByEmailOrPhoneQuery, GetUidByEmailOrPhoneResponse, SearchUserQuery,
-  SearchUserResponse, SendPhoneOtpParams, SignInTokenResponse, UpdateUserParams,
-  VerifyAndBindPhoneParams,
+  CheckEmailParams, DeleteUserQuery, GetUidByEmailOrPhoneQuery, GetUidByEmailOrPhoneResponse,
+  SearchUserQuery, SearchUserResponse, SendPhoneOtpParams, SignInTokenResponse,
+  UpdateUserParams, VerifyAndBindPhoneParams,
 };
 use shared_entity::response::AppResponseError;
 use shared_entity::response::{AppResponse, JsonAppResponse};
@@ -33,6 +33,7 @@ pub fn user_scope() -> Scope {
     .service(web::resource("/update").route(web::post().to(update_user_handler)))
     .service(web::resource("/send-phone-otp").route(web::post().to(send_phone_otp_handler)))
     .service(web::resource("/verify-phone").route(web::post().to(verify_and_bind_phone_handler)))
+    .service(web::resource("/check-email-registered").route(web::post().to(check_email_registered_handler)))
     .service(web::resource("/profile").route(web::get().to(get_user_profile_handler)))
     .service(web::resource("/workspace").route(web::get().to(get_user_workspace_info_handler)))
     .service(web::resource("/asset/image").route(web::post().to(post_user_image_asset_handler)))
@@ -227,8 +228,37 @@ async fn send_phone_otp_handler(
     params.phone
   );
   send_phone_otp(&auth.token, &params.phone, state.as_ref()).await?;
-  
+
   Ok(AppResponse::Ok().into())
+}
+
+#[derive(Debug, serde::Serialize)]
+struct CheckEmailRegisteredResponse {
+  email_exists: bool,
+  is_own_email: bool,
+  existing_uid: Option<i64>,
+  message: Option<String>,
+}
+
+#[tracing::instrument(skip(state, auth, payload), err)]
+async fn check_email_registered_handler(
+  auth: Authorization,
+  payload: Json<CheckEmailParams>,
+  state: Data<AppState>,
+) -> Result<JsonAppResponse<CheckEmailRegisteredResponse>> {
+  let params = payload.into_inner();
+  let user_uuid = auth.uuid()?;
+
+  let result = check_email_registered(&user_uuid, &params.email, state.as_ref()).await?;
+
+  Ok(AppResponse::Ok()
+    .with_data(CheckEmailRegisteredResponse {
+      email_exists: result.email_exists,
+      is_own_email: result.is_own_email,
+      existing_uid: result.existing_uid,
+      message: result.message,
+    })
+    .into())
 }
 
 #[tracing::instrument(skip(state, auth), err)]

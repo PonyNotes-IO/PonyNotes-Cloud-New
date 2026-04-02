@@ -5,12 +5,13 @@ use std::time::Instant;
 use tracing::{event, instrument, trace};
 
 use app_error::AppError;
-use database::user::{create_user, is_user_exist};
+use database::user::{create_user, is_user_exist, select_email_from_user_uuid};
 use database::workspace::select_workspace;
 use database_entity::dto::AFRole;
 use workspace_template::document::getting_started::GettingStartedTemplate;
 
 use crate::biz::user::user_init::initialize_workspace_for_user;
+use crate::biz::user::user_search::get_uid_by_email_or_phone;
 use crate::state::AppState;
 
 /// Verify the token from the gotrue server and create the user if it is a new user
@@ -503,4 +504,69 @@ pub async fn send_phone_otp_for_sso_user(
       }
     }
   }
+}
+
+/// Check if an email is already registered by another user
+/// Used for email binding/change pre-check before sending verification code
+#[instrument(skip(state), err)]
+pub async fn check_email_registered(
+  user_uuid: &uuid::Uuid,
+  email: &str,
+  state: &AppState,
+) -> Result<CheckEmailRegisteredResult, AppError> {
+  // Get current user's email
+  let current_email = select_email_from_user_uuid(&state.pg_pool, user_uuid)
+    .await?
+    .unwrap_or_default();
+
+  // Check if the email belongs to the current user
+  if current_email == email {
+    return Ok(CheckEmailRegisteredResult {
+      email_exists: false,
+      is_own_email: true,
+      existing_uid: None,
+      message: None,
+    });
+  }
+
+  // Check if email is registered by another user by querying auth.users
+  let existing_result = get_uid_by_email_or_phone(
+    &state.pg_pool,
+    email,
+  )
+  .await;
+
+  match existing_result {
+    Ok((uid, _)) => {
+      event!(
+        tracing::Level::INFO,
+        "CheckEmailRegistered: email {} is registered by uid {}",
+        email,
+        uid
+      );
+      Ok(CheckEmailRegisteredResult {
+        email_exists: true,
+        is_own_email: false,
+        existing_uid: Some(uid),
+        message: Some("该邮箱已被其他账号注册".to_string()),
+      })
+    }
+    Err(_) => {
+      // No user found with this email → email is available
+      Ok(CheckEmailRegisteredResult {
+        email_exists: false,
+        is_own_email: false,
+        existing_uid: None,
+        message: None,
+      })
+    }
+  }
+}
+
+#[derive(Debug)]
+pub struct CheckEmailRegisteredResult {
+  pub email_exists: bool,
+  pub is_own_email: bool,
+  pub existing_uid: Option<i64>,
+  pub message: Option<String>,
 }

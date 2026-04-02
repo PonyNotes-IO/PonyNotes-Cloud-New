@@ -110,6 +110,11 @@ pub struct SendPhoneOtpParams {
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct CheckEmailParams {
+  pub email: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct GetUidByEmailOrPhoneQuery {
   pub identifier: String, // 手机号或邮箱
 }
