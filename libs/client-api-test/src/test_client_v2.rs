@@ -1200,6 +1200,7 @@ pub async fn collect_answer(mut stream: QuestionStream) -> String {
         answer.push_str(&value);
       },
       QuestionStreamValue::Metadata { .. } => {},
+      QuestionStreamValue::Thinking { .. } => {},
       QuestionStreamValue::SuggestedQuestion { .. } => {},
       QuestionStreamValue::FollowUp { .. } => {},
     }

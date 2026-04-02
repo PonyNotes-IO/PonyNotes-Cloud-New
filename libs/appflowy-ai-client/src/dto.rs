@@ -10,6 +10,7 @@ pub const STREAM_ANSWER_KEY: &str = "1";
 pub const STREAM_IMAGE_KEY: &str = "2";
 pub const STREAM_KEEP_ALIVE_KEY: &str = "3";
 pub const STREAM_COMMENT_KEY: &str = "4";
+pub const STREAM_THINKING_KEY: &str = "5";
 
 /// 聊天请求参数
 #[derive(Debug, Clone, Serialize, Deserialize)]

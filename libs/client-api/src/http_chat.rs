@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use shared_entity::dto::ai_dto::{
   CalculateSimilarityParams, ChatQuestionQuery, RepeatedRelatedQuestion, SimilarityResponse,
-  STREAM_ANSWER_KEY, STREAM_COMMENT_KEY, STREAM_IMAGE_KEY, STREAM_METADATA_KEY,
+  STREAM_ANSWER_KEY, STREAM_COMMENT_KEY, STREAM_IMAGE_KEY, STREAM_METADATA_KEY, STREAM_THINKING_KEY,
 };
 use shared_entity::dto::chat_dto::{ChatSettings, UpdateChatParams};
 use shared_entity::response::{AppResponse, AppResponseError};
@@ -378,6 +378,10 @@ pub enum QuestionStreamValue {
   Metadata {
     value: Value,
   },
+  /// 深度思考过程（reasoning_content），由支持思考的模型（如 DeepSeek R1/V3.2）产生
+  Thinking {
+    value: String,
+  },
   SuggestedQuestion {
     context_suggested_questions: Vec<ContextSuggestedQuestion>,
   },
@@ -410,6 +414,13 @@ impl Stream for QuestionStream {
             .and_then(|s| s.as_str().map(ToString::to_string))
           {
             return Poll::Ready(Some(Ok(QuestionStreamValue::Answer { value: answer })));
+          }
+
+          if let Some(thinking) = value
+            .remove(STREAM_THINKING_KEY)
+            .and_then(|s| s.as_str().map(ToString::to_string))
+          {
+            return Poll::Ready(Some(Ok(QuestionStreamValue::Thinking { value: thinking })));
           }
 
           if let Some(image) = value

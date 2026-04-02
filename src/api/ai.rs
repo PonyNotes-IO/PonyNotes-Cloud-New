@@ -12,7 +12,7 @@ use actix_web::{web, HttpRequest, HttpResponse, Scope};
 use app_error::AppError;
 use appflowy_ai_client::dto::{
   CalculateSimilarityParams, LocalAIConfig, ModelList, SimilarityResponse, TranslateRowParams,
-  TranslateRowResponse, STREAM_ANSWER_KEY,
+  TranslateRowResponse, STREAM_ANSWER_KEY, STREAM_THINKING_KEY,
 };
 use appflowy_ai_client::{AIModel, AIModelInfo, AvailableModelsResponse, ChatRequestParams};
 
@@ -186,23 +186,41 @@ fn convert_openai_stream_to_json_stream(
                   if let Some(choices) = obj.get("choices").and_then(|c| c.as_array()) {
                     if let Some(first_choice) = choices.first() {
                       if let Some(delta) = first_choice.get("delta").and_then(|d| d.as_object()) {
-                        // 优先使用 content，如果没有或为空则使用 reasoning_content（豆包模型的思考过程）
-                        let content = delta.get("content")
+                        // 提取 reasoning_content（深度思考过程），单独发送为 key "5"
+                        if let Some(thinking_text) = delta.get("reasoning_content")
                           .and_then(|c| c.as_str())
                           .filter(|s| !s.is_empty())
-                          .or_else(|| {
-                            delta.get("reasoning_content")
-                              .and_then(|c| c.as_str())
-                              .filter(|s| !s.is_empty())
-                          });
-                        
-                        if let Some(content_text) = content {
-                          // 转换为内部格式
+                        {
+                          let mut thinking_obj = serde_json::Map::new();
+                          thinking_obj.insert(STREAM_THINKING_KEY.to_string(), Value::String(thinking_text.to_string()));
+                          if let Ok(json_str) = serde_json::to_string(&Value::Object(thinking_obj)) {
+                            json_output.push_str(&json_str);
+                            json_output.push('\n');
+                          }
+                        }
+
+                        // 提取正常回答内容，发送为 key "1"
+                        if let Some(content_text) = delta.get("content")
+                          .and_then(|c| c.as_str())
+                          .filter(|s| !s.is_empty())
+                        {
                           let mut internal_obj = serde_json::Map::new();
                           internal_obj.insert(STREAM_ANSWER_KEY.to_string(), Value::String(content_text.to_string()));
-                          
-                          // 序列化为JSON字符串
                           if let Ok(json_str) = serde_json::to_string(&Value::Object(internal_obj)) {
+                            json_output.push_str(&json_str);
+                            json_output.push('\n');
+                          }
+                        }
+                      }
+
+                      // 处理联网搜索结果（search_results 字段），发送为 metadata key "0"
+                      if let Some(search_results) = first_choice.get("search_results") {
+                        if !search_results.is_null() {
+                          let mut meta_obj = serde_json::Map::new();
+                          meta_obj.insert("search_results".to_string(), search_results.clone());
+                          let mut outer_obj = serde_json::Map::new();
+                          outer_obj.insert("0".to_string(), Value::Object(meta_obj));
+                          if let Ok(json_str) = serde_json::to_string(&Value::Object(outer_obj)) {
                             json_output.push_str(&json_str);
                             json_output.push('\n');
                           }
