@@ -13,7 +13,7 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-PROJECT_DIR="/Users/kuncao/github.com/PonyNotes-IO/PonyNotes-Cloud-New"
+PROJECT_DIR="/Users/caokun/Projects/github.com/PonyNotes-IO/PonyNotes-Cloud-New"
 SERVER_IP="8.152.101.166"
 SERVER_USER="root"
 SERVER_DOCKER_DIR="/root/docker-compose"
@@ -92,6 +92,7 @@ echo ""
 echo -e "${YELLOW}[3/6] 构建 Docker 镜像...${NC}"
 cd "${PROJECT_DIR}"
 export DOCKER_BUILDKIT=1
+PLATFORM_ARGS=("--platform" "linux/amd64")
 T0=$(date +%s)
 
 docker buildx build \
