@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n    SELECT EXISTS(\n      SELECT 1 FROM af_user\n      WHERE phone = $1 AND uuid != $2\n      AND phone IS NOT NULL AND phone != ''\n    ) AS \"exists!\"\n    ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "97e4b3ffeedc155d8743d58f511fc784dd24cc7fd9a882abb2722aa4a0ac143e"
+}

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE af_user SET bind_mobile = $1 WHERE uuid = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "117d56176f8b06b59c5ea5d8b1c4afa5c38de9730f8d91e4e6ef9555bcc00ef2"
+}
