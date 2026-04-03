@@ -229,6 +229,8 @@ pub enum SignUpResponse {
 pub struct UpdateGotrueUserParams {
   #[serde(skip_serializing_if = "String::is_empty")]
   pub email: String,
+  #[serde(skip_serializing_if = "String::is_empty")]
+  pub email_otp: String,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub password: Option<String>,
   #[serde(skip_serializing_if = "String::is_empty")]
@@ -259,6 +261,11 @@ impl UpdateGotrueUserParams {
 
   pub fn with_opt_password<T: ToString>(mut self, password: Option<T>) -> Self {
     self.password = password.map(|v| v.to_string());
+    self
+  }
+
+  pub fn with_email_otp<T: ToString>(mut self, email_otp: Option<T>) -> Self {
+    self.email_otp = email_otp.map(|v| v.to_string()).unwrap_or_default();
     self
   }
 }

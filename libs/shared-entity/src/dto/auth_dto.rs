@@ -34,6 +34,8 @@ pub struct UpdateUserParams {
   pub email: Option<String>,
   pub phone: Option<String>,
   pub metadata: Option<UserMetaData>,
+  /// Email OTP for verifying email binding without going through signInWithPasscode
+  pub email_otp: Option<String>,
 }
 
 impl UpdateUserParams {
@@ -101,6 +103,12 @@ pub struct DeleteUserQuery {
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct VerifyAndBindPhoneParams {
   pub phone: String,
+  pub otp: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct VerifyAndBindEmailParams {
+  pub email: String,
   pub otp: String,
 }
 

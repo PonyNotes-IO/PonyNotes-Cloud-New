@@ -619,3 +619,100 @@ pub struct CheckEmailRegisteredResult {
   pub existing_uid: Option<i64>,
   pub message: Option<String>,
 }
+
+/// Verify email OTP and bind email address
+///
+/// This function handles the email binding flow:
+/// 1. User receives OTP sent by sendEmailVerificationCode (GoTrue /otp endpoint)
+/// 2. User calls this function with the email and OTP
+/// 3. We verify with Gotrue using MagicLink type (email OTP)
+/// 4. Gotrue validates the OTP and confirms email ownership
+/// 5. We update the email in af_user table (CRITICAL: the original Flutter code
+///    only updated Gotrue but NOT af_user, causing email to appear unbound after relogin)
+#[instrument(skip(state), err)]
+pub async fn verify_and_bind_email(
+  user_uuid: &uuid::Uuid,
+  email: &str,
+  otp: &str,
+  state: &AppState,
+) -> Result<(), AppError> {
+  use database::user::update_user;
+  use gotrue::params::VerifyParams;
+
+  event!(
+    tracing::Level::INFO,
+    "User {} verifying email {} with OTP",
+    user_uuid,
+    email
+  );
+
+  // Verify OTP via Gotrue using MagicLink type (email OTP verification)
+  let verify_params = VerifyParams {
+    type_: gotrue::params::VerifyType::MagicLink,
+    email: email.to_string(),
+    phone: String::new(),
+    token: otp.to_string(),
+  };
+
+  let verify_result = state
+    .gotrue_client
+    .verify(&verify_params)
+    .await;
+
+  match verify_result {
+    Ok(_token_response) => {
+      event!(
+        tracing::Level::INFO,
+        "Email OTP verified successfully for user: {}, email: {}",
+        user_uuid,
+        email
+      );
+
+      // Step 2: Update af_user.email in the business database
+      // This is the CRITICAL fix: previously Flutter only updated Gotrue
+      // (via PUT /user) but not af_user, causing email to disappear after relogin
+      update_user(
+        &state.pg_pool,
+        user_uuid,
+        None,
+        Some(email.to_string()),
+        None,
+        None,
+      )
+      .await?;
+
+      // Verify the update was successful
+      let updated_email =
+        select_email_from_user_uuid(&state.pg_pool, user_uuid).await?;
+      event!(
+        tracing::Level::INFO,
+        "Email binding verification - user: {}, requested email: {}, actual email in DB: {:?}",
+        user_uuid,
+        email,
+        updated_email
+      );
+
+      event!(
+        tracing::Level::INFO,
+        "Email binding completed successfully for user: {}, email: {}",
+        user_uuid,
+        email
+      );
+
+      Ok(())
+    }
+    Err(e) => {
+      event!(
+        tracing::Level::WARN,
+        "Email OTP verification failed for user: {}, email: {}, error: {}",
+        user_uuid,
+        email,
+        e
+      );
+      Err(AppError::InvalidRequest(format!(
+        "验证码错误或已过期: {}",
+        e
+      )))
+    }
+  }
+}

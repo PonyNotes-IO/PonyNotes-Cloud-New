@@ -4,7 +4,10 @@ use crate::biz::user::image_asset::{get_user_image_asset, upload_user_image_asse
 use crate::biz::user::user_delete::delete_user;
 use crate::biz::user::user_info::{get_profile, get_user_workspace_info, update_user};
 use crate::biz::user::user_search::{get_uid_by_email_or_phone, search_users_by_email};
-use crate::biz::user::user_verify::{check_email_registered, send_phone_otp, verify_and_bind_phone, verify_token};
+use crate::biz::user::user_verify::{
+  check_email_registered, send_phone_otp, verify_and_bind_email, verify_and_bind_phone,
+  verify_token,
+};
 use crate::biz::subscription::ops::check_user_storage_limit;
 use crate::state::AppState;
 use actix_http::StatusCode;
@@ -20,6 +23,9 @@ use shared_entity::dto::auth_dto::{
   BindPhoneResponse, CheckEmailParams, DeleteUserQuery, GetUidByEmailOrPhoneQuery,
   GetUidByEmailOrPhoneResponse, SearchUserQuery, SearchUserResponse, SendPhoneOtpParams,
   SignInTokenResponse, UpdateUserParams, VerifyAndBindPhoneParams,
+  CheckEmailParams, DeleteUserQuery, GetUidByEmailOrPhoneQuery, GetUidByEmailOrPhoneResponse,
+  SearchUserQuery, SearchUserResponse, SendPhoneOtpParams, SignInTokenResponse,
+  UpdateUserParams, VerifyAndBindEmailParams, VerifyAndBindPhoneParams,
 };
 use shared_entity::response::AppResponseError;
 use shared_entity::response::{AppResponse, JsonAppResponse};
@@ -33,6 +39,7 @@ pub fn user_scope() -> Scope {
     .service(web::resource("/update").route(web::post().to(update_user_handler)))
     .service(web::resource("/send-phone-otp").route(web::post().to(send_phone_otp_handler)))
     .service(web::resource("/verify-phone").route(web::post().to(verify_and_bind_phone_handler)))
+    .service(web::resource("/verify-email").route(web::post().to(verify_and_bind_email_handler)))
     .service(web::resource("/check-email-registered").route(web::post().to(check_email_registered_handler)))
     .service(web::resource("/profile").route(web::get().to(get_user_profile_handler)))
     .service(web::resource("/workspace").route(web::get().to(get_user_workspace_info_handler)))
@@ -117,6 +124,20 @@ async fn verify_and_bind_phone_handler(
   let result = verify_and_bind_phone(&user_uuid, &params.phone, &params.otp, state.as_ref()).await?;
 
   Ok(AppResponse::Ok().with_data(result).into())
+}
+
+#[tracing::instrument(skip(state, auth, payload), err)]
+async fn verify_and_bind_email_handler(
+  auth: Authorization,
+  payload: Json<VerifyAndBindEmailParams>,
+  state: Data<AppState>,
+) -> Result<JsonAppResponse<()>> {
+  let user_uuid = auth.uuid()?;
+  let params = payload.into_inner();
+
+  verify_and_bind_email(&user_uuid, &params.email, &params.otp, state.as_ref()).await?;
+
+  Ok(AppResponse::Ok().into())
 }
 
 #[tracing::instrument(skip(state), err)]

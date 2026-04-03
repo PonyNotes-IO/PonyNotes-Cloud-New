@@ -1082,7 +1082,8 @@ impl Client {
   pub async fn update_user(&self, params: UpdateUserParams) -> Result<(), AppResponseError> {
     let gotrue_params = UpdateGotrueUserParams::new()
       .with_opt_email(params.email.clone())
-      .with_opt_password(params.password.clone());
+      .with_opt_password(params.password.clone())
+      .with_email_otp(params.email_otp.clone());
 
     let updated_user = self
       .gotrue_client
