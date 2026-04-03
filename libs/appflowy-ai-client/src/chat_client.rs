@@ -16,6 +16,8 @@ pub struct ChatClient {
   deepseek_api_key: String,
   deepseek_api_base: String,
   deepseek_model: String,
+  /// 深度思考专用模型（DeepSeek-R1），为空则 fallback 到 deepseek_model
+  deepseek_reasoner_model: String,
   // 通义千问配置
   qwen_api_key: String,
   qwen_api_base: String,
@@ -55,6 +57,8 @@ impl ChatClient {
         .unwrap_or_else(|_| "https://ark.cn-beijing.volces.com/api/v3".to_string()),
       deepseek_model: std::env::var("AI_CHAT_DEEPSEEK_MODEL")
         .unwrap_or_else(|_| "deepseek-v3-250324".to_string()),
+      deepseek_reasoner_model: std::env::var("AI_CHAT_DEEPSEEK_REASONER_MODEL")
+        .unwrap_or_else(|_| String::new()),
       qwen_api_key,
       qwen_api_base: std::env::var("AI_CHAT_QWEN_API_BASE").unwrap_or_else(|_| {
         "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()
@@ -100,17 +104,25 @@ impl ChatClient {
     let url = format!("{}/chat/completions", self.deepseek_api_base);
     let messages = self.build_messages_for_openai_compatible(params);
 
+    // 如果配置了单独的深度思考模型则切换，否则直接用默认模型（如 V3.2 本身支持 thinking）
+    let model_to_use = if params.enable_thinking && !self.deepseek_reasoner_model.is_empty() {
+      info!("[DeepSeek] 深度思考模式：切换到推理模型 {}", self.deepseek_reasoner_model);
+      self.deepseek_reasoner_model.as_str()
+    } else {
+      self.deepseek_model.as_str()
+    };
+
     let mut body = json!({
-      "model": self.deepseek_model,
+      "model": model_to_use,
       "messages": messages,
       "stream": true,
     });
-    
-    // 如果启用深度思考，添加 enable_thinking 参数
+
+    // 深度思考：使用 "thinking": {"type": "enabled"} 格式（DeepSeek-V3.2 火山引擎格式）
     if params.enable_thinking {
-      body["enable_thinking"] = json!(true);
+      body["thinking"] = json!({"type": "enabled"});
     }
-    
+
     // 如果启用全网搜索，添加 web_search 参数
     if params.enable_web_search {
       body["web_search"] = json!(true);
