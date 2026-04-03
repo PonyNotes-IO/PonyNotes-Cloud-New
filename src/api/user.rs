@@ -22,10 +22,7 @@ use semver::Version;
 use shared_entity::dto::auth_dto::{
   BindPhoneResponse, CheckEmailParams, DeleteUserQuery, GetUidByEmailOrPhoneQuery,
   GetUidByEmailOrPhoneResponse, SearchUserQuery, SearchUserResponse, SendPhoneOtpParams,
-  SignInTokenResponse, UpdateUserParams, VerifyAndBindPhoneParams,
-  CheckEmailParams, DeleteUserQuery, GetUidByEmailOrPhoneQuery, GetUidByEmailOrPhoneResponse,
-  SearchUserQuery, SearchUserResponse, SendPhoneOtpParams, SignInTokenResponse,
-  UpdateUserParams, VerifyAndBindEmailParams, VerifyAndBindPhoneParams,
+  SignInTokenResponse, UpdateUserParams, VerifyAndBindEmailParams, VerifyAndBindPhoneParams,
 };
 use shared_entity::response::AppResponseError;
 use shared_entity::response::{AppResponse, JsonAppResponse};
