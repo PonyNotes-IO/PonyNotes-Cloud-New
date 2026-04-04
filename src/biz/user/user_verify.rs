@@ -140,8 +140,9 @@ pub async fn verify_token(access_token: &str, state: &AppState) -> Result<bool, 
       }
     }
 
-    Ok(is_new)
   }
+
+  Ok(is_new)
 }
 
 // Best effort to get user's name after oauth
