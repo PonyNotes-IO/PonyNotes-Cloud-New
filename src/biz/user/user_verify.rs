@@ -5,7 +5,7 @@ use std::time::Instant;
 use tracing::{event, instrument, trace};
 
 use app_error::AppError;
-use database::user::{create_user, is_user_exist, select_email_from_user_uuid};
+use database::user::{create_user, is_user_exist, select_email_from_user_uuid, select_uid_from_uuid};
 use database::workspace::select_workspace;
 use database_entity::dto::AFRole;
 use workspace_template::document::getting_started::GettingStartedTemplate;
@@ -228,18 +228,25 @@ pub async fn verify_and_bind_phone(
   use gotrue::params::VerifyParams;
   use shared_entity::dto::auth_dto::BindPhoneResponse;
 
-  // Check if this is an old phone (belongs to another user)
-  let is_old_phone = database::user::phone_exists_for_another_user(&state.pg_pool, phone, user_uuid)
+  // Check if this phone belongs to another user - reject immediately if so
+  // This must be checked BEFORE sending OTP, not just before updating
+  let phone_exists = database::user::phone_exists_for_another_user(&state.pg_pool, phone, user_uuid)
     .await
     .unwrap_or(false);
 
-  let verify_type = if is_old_phone {
-    // OTP was sent via /otp endpoint, verify with type=sms
-    gotrue::params::VerifyType::Sms
-  } else {
-    // OTP was sent via update_user phone change, verify with type=phone_change
-    gotrue::params::VerifyType::PhoneChange
-  };
+  if phone_exists {
+    event!(
+      tracing::Level::WARN,
+      "Phone {} is already registered by another user, rejecting binding for user {}",
+      phone,
+      user_uuid
+    );
+    return Err(AppError::InvalidRequest(format!(
+      "该手机号已被其他账号注册",
+    )));
+  }
+
+  let verify_type = gotrue::params::VerifyType::PhoneChange;
 
   let verify_type_str = match verify_type {
     gotrue::params::VerifyType::Sms => "sms",
@@ -249,10 +256,9 @@ pub async fn verify_and_bind_phone(
   };
   event!(
     tracing::Level::INFO,
-    "Verifying phone OTP for user: {}, phone: {}, is_old_phone: {}, verification_type: {}",
+    "Verifying phone OTP for user: {}, phone: {}, verification_type: {}",
     user_uuid,
     phone,
-    is_old_phone,
     verify_type_str
   );
 
@@ -279,46 +285,25 @@ pub async fn verify_and_bind_phone(
         phone
       );
 
-      if is_old_phone {
-        // Old phone: only update bind_mobile, NOT phone (can't - UNIQUE constraint, phone belongs to another user)
-        event!(
-          tracing::Level::INFO,
-          "Old phone binding: only updating bind_mobile for user {}, phone: {}",
-          user_uuid,
-          phone
-        );
-        database::user::update_bind_mobile(&state.pg_pool, user_uuid, phone).await?;
-        event!(
-          tracing::Level::INFO,
-          "bind_mobile updated successfully for user: {}, phone: {} (two separate accounts remain)",
-          user_uuid,
-          phone
-        );
-        Ok(BindPhoneResponse {
-          phone_updated: false,
-          bind_mobile_updated: true,
-        })
-      } else {
-        // New phone: update both phone and bind_mobile
-        event!(
-          tracing::Level::INFO,
-          "New phone binding: updating both phone and bind_mobile for user {}, phone: {}",
-          user_uuid,
-          phone
-        );
-        update_user(&state.pg_pool, user_uuid, None, None, Some(phone.to_string()), None).await?;
-        database::user::update_bind_mobile(&state.pg_pool, user_uuid, phone).await?;
-        event!(
-          tracing::Level::INFO,
-          "Phone and bind_mobile updated for user: {}, phone: {} (unified account)",
-          user_uuid,
-          phone
-        );
-        Ok(BindPhoneResponse {
-          phone_updated: true,
-          bind_mobile_updated: true,
-        })
-      }
+      // Update both phone and bind_mobile
+      event!(
+        tracing::Level::INFO,
+        "New phone binding: updating both phone and bind_mobile for user {}, phone: {}",
+        user_uuid,
+        phone
+      );
+      update_user(&state.pg_pool, user_uuid, None, None, Some(phone.to_string()), None).await?;
+      database::user::update_bind_mobile(&state.pg_pool, user_uuid, phone).await?;
+      event!(
+        tracing::Level::INFO,
+        "Phone and bind_mobile updated for user: {}, phone: {} (unified account)",
+        user_uuid,
+        phone
+      );
+      Ok(BindPhoneResponse {
+        phone_updated: true,
+        bind_mobile_updated: true,
+      })
     }
     Err(e) => {
       event!(
@@ -359,30 +344,22 @@ pub async fn send_phone_otp(
 ) -> Result<(), AppError> {
   use gotrue_entity::dto::UpdateGotrueUserParams;
 
-  // Check if this phone belongs to another user (old phone scenario)
+  // Check if this phone belongs to another user - reject immediately if so
+  // This prevents sending OTP to a phone that cannot be bound
   let is_old_phone = database::user::phone_exists_for_another_user(&state.pg_pool, phone, user_uuid)
     .await
     .unwrap_or(false);
 
   if is_old_phone {
-    // Old phone: use GoTrue's /otp endpoint (phone sign-in flow, no uniqueness check)
-    // OTP will be verified with type=sms (not phone_change) at verify step
     event!(
-      tracing::Level::INFO,
-      "Phone {} belongs to another user - using /otp endpoint for OTP (old phone binding)",
-      phone
+      tracing::Level::WARN,
+      "Phone {} belongs to another user - rejecting OTP send for user {}",
+      phone,
+      user_uuid
     );
-
-    use gotrue::params::MagicLinkParams;
-    let mut otp_params = MagicLinkParams::default();
-    otp_params.phone = phone.to_string();
-
-    return state
-      .gotrue_client
-      .magic_link(&otp_params, None)
-      .await
-      .map(|_| ())
-      .map_err(|e| AppError::InvalidRequest(format!("发送验证码失败: {}", e)));
+    return Err(AppError::InvalidRequest(format!(
+      "该手机号已被其他账号注册",
+    )));
   }
 
   event!(
@@ -668,9 +645,29 @@ pub async fn verify_and_bind_email(
         email
       );
 
-      // Step 2: Update af_user.email in the business database
-      // This is the CRITICAL fix: previously Flutter only updated Gotrue
-      // (via PUT /user) but not af_user, causing email to disappear after relogin
+      // Step 2: Check if email is already registered by another user
+      // This check must happen BEFORE update_user to avoid database constraint errors
+      // that would silently return HTTP 200 (due to AppError's ResponseError impl)
+      let current_uid = select_uid_from_uuid(&state.pg_pool, user_uuid).await?;
+      if let Ok((existing_uid, _)) =
+        get_uid_by_email_or_phone(&state.pg_pool, email).await
+      {
+        // A user with this email already exists
+        if existing_uid != current_uid {
+          event!(
+            tracing::Level::WARN,
+            "Email binding rejected: email {} is already registered by uid {}",
+            email,
+            existing_uid
+          );
+          return Err(AppError::InvalidRequest(format!(
+            "该邮箱已被其他账号注册",
+          )));
+        }
+        // else: it's the same user's own email (e.g., re-binding), allow to continue
+      }
+
+      // Step 3: Update af_user.email in the business database
       update_user(
         &state.pg_pool,
         user_uuid,
