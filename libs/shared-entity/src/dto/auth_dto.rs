@@ -138,6 +138,4 @@ pub struct GetUidByEmailOrPhoneResponse {
 pub struct BindPhoneResponse {
   /// Whether af_user.phone was updated (true for new phone binding)
   pub phone_updated: bool,
-  /// Whether af_user.bind_mobile was updated (always true on success)
-  pub bind_mobile_updated: bool,
 }

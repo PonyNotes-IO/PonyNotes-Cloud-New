@@ -106,27 +106,6 @@ pub async fn verify_token(access_token: &str, state: &AppState) -> Result<bool, 
       .context("fail to commit transaction to initialize workspace")?;
     state.metrics.collab_metrics.observe_pg_tx(start.elapsed());
 
-    // Extract and store social login openid (wechat/douyin) from GoTrue identities
-    if let Some(identities) = &user.identities {
-      for identity in identities {
-        let openid = identity.id.as_str();
-        if !openid.is_empty() {
-          match identity.provider.as_str() {
-            "wechat" => {
-              if let Err(e) = database::user::update_wechat_openid(&state.pg_pool, &user_uuid, openid).await {
-                event!(tracing::Level::WARN, "Failed to store wechat_openid for user {}: {}", user_uuid, e);
-              }
-            }
-            "douyin" => {
-              if let Err(e) = database::user::update_douyin_openid(&state.pg_pool, &user_uuid, openid).await {
-                event!(tracing::Level::WARN, "Failed to store douyin_openid for user {}: {}", user_uuid, e);
-              }
-            }
-            _ => {}
-          }
-        }
-      }
-    }
   } else {
     trace!("user already exists:{},{}", user.id, user.email);
     // For existing users, ensure their workspace roles are cached in Casbin
@@ -161,30 +140,7 @@ pub async fn verify_token(access_token: &str, state: &AppState) -> Result<bool, 
       }
     }
 
-    // Extract and store social login openid (wechat/douyin) from GoTrue identities
-    if let Some(identities) = &user.identities {
-      for identity in identities {
-        let openid = identity.id.as_str();
-        if !openid.is_empty() {
-          match identity.provider.as_str() {
-            "wechat" => {
-              if let Err(e) = database::user::update_wechat_openid(&state.pg_pool, &user_uuid, openid).await {
-                event!(tracing::Level::WARN, "Failed to store wechat_openid for user {}: {}", user_uuid, e);
-              }
-            }
-            "douyin" => {
-              if let Err(e) = database::user::update_douyin_openid(&state.pg_pool, &user_uuid, openid).await {
-                event!(tracing::Level::WARN, "Failed to store douyin_openid for user {}: {}", user_uuid, e);
-              }
-            }
-            _ => {}
-          }
-        }
-      }
-    }
-  }
-
-  Ok(is_new)
+    Ok(is_new)
 }
 
 // Best effort to get user's name after oauth
@@ -285,25 +241,23 @@ pub async fn verify_and_bind_phone(
         phone
       );
 
-      // Update both phone and bind_mobile
+      // Update phone
       event!(
         tracing::Level::INFO,
-        "New phone binding: updating both phone and bind_mobile for user {}, phone: {}",
+        "New phone binding: updating phone for user {}, phone: {}",
         user_uuid,
         phone
       );
       update_user(&state.pg_pool, user_uuid, None, None, Some(phone.to_string()), None).await?;
-      database::user::update_bind_mobile(&state.pg_pool, user_uuid, phone).await?;
       event!(
         tracing::Level::INFO,
-        "Phone and bind_mobile updated for user: {}, phone: {} (unified account)",
+        "Phone binding updated for user {}, phone: {}",
         user_uuid,
         phone
       );
-      Ok(BindPhoneResponse {
-        phone_updated: true,
-        bind_mobile_updated: true,
-      })
+  Ok(BindPhoneResponse {
+    phone_updated: true,
+  })
     }
     Err(e) => {
       event!(
