@@ -169,13 +169,6 @@ fn name_from_user_metadata(value: &serde_json::Value) -> String {
 /// 4. GoTrue automatically updates auth.users.phone upon successful verification
 /// 5. We sync the change to our business database (af_user table)
 /// 
-/// Flow for phone change:
-/// 1. User calls send_phone_otp which triggers GoTrue's update_user (sends OTP)
-/// 2. User receives OTP and calls this function to verify
-/// 3. This function verifies with type=PhoneChange
-/// 4. GoTrue automatically updates auth.users.phone upon successful verification
-/// 5. We sync the change to our business database (af_user table)
-#[instrument(skip(state), err)]
 pub async fn verify_and_bind_phone(
   user_uuid: &uuid::Uuid,
   phone: &str,
@@ -267,6 +260,72 @@ pub async fn verify_and_bind_phone(
         "Phone OTP verification failed for user: {}, phone: {}, error: {}",
         user_uuid,
         phone,
+        e
+      );
+      Err(AppError::InvalidRequest(format!(
+        "验证码错误或已过期: {}",
+        e
+      )))
+    }
+  }
+}
+
+/// Verify phone OTP for identity reauthentication (without binding).
+///
+/// Unlike `verify_and_bind_phone` which uses `type=phone_change` and also updates `auth.users.phone`,
+/// this function uses `type=sms` so the OTP is verified without modifying any user data.
+///
+/// Used by the Flutter identity verification dialog when a logged-in user needs to
+/// re-authenticate with their existing phone number (e.g., before sensitive operations).
+///
+/// Flow:
+/// 1. User already has a phone bound to their account (from af_user.phone)
+/// 2. User requests OTP via `send_phone_otp` -> GoTrue sends SMS
+/// 3. User submits OTP -> this function verifies with type=sms
+/// 4. If verified, the caller's identity is confirmed (no data is changed)
+#[instrument(skip(state), err)]
+pub async fn verify_phone_reauthentication(
+  user_uuid: &uuid::Uuid,
+  phone: &str,
+  otp: &str,
+  state: &AppState,
+) -> Result<(), AppError> {
+  use gotrue::params::VerifyParams;
+
+  event!(
+    tracing::Level::INFO,
+    "Verifying phone OTP for reauthentication: user={}, phone={}",
+    user_uuid,
+    phone
+  );
+
+  // Use type=sms (not phone_change) so GoTrue only verifies the OTP without modifying phone
+  let verify_params = VerifyParams {
+    type_: gotrue::params::VerifyType::Sms,
+    phone: phone.to_string(),
+    token: otp.to_string(),
+    email: String::new(),
+  };
+
+  let verify_result = state
+    .gotrue_client
+    .verify(&verify_params)
+    .await;
+
+  match verify_result {
+    Ok(_) => {
+      event!(
+        tracing::Level::INFO,
+        "Phone reauthentication verified successfully: user={}",
+        user_uuid
+      );
+      Ok(())
+    }
+    Err(e) => {
+      event!(
+        tracing::Level::WARN,
+        "Phone reauthentication failed: user={}, error={}",
+        user_uuid,
         e
       );
       Err(AppError::InvalidRequest(format!(

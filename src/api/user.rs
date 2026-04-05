@@ -6,7 +6,7 @@ use crate::biz::user::user_info::{get_profile, get_user_workspace_info, update_u
 use crate::biz::user::user_search::{get_uid_by_email_or_phone, search_users_by_email};
 use crate::biz::user::user_verify::{
   check_email_registered, send_phone_otp, verify_and_bind_email, verify_and_bind_phone,
-  verify_token,
+  verify_phone_reauthentication, verify_token,
 };
 use crate::biz::subscription::ops::check_user_storage_limit;
 use crate::state::AppState;
@@ -36,6 +36,7 @@ pub fn user_scope() -> Scope {
     .service(web::resource("/update").route(web::post().to(update_user_handler)))
     .service(web::resource("/send-phone-otp").route(web::post().to(send_phone_otp_handler)))
     .service(web::resource("/verify-phone").route(web::post().to(verify_and_bind_phone_handler)))
+    .service(web::resource("/verify-phone-reauthentication").route(web::post().to(verify_phone_reauthentication_handler)))
     .service(web::resource("/verify-email").route(web::post().to(verify_and_bind_email_handler)))
     .service(web::resource("/check-email-registered").route(web::post().to(check_email_registered_handler)))
     .service(web::resource("/profile").route(web::get().to(get_user_profile_handler)))
@@ -121,6 +122,28 @@ async fn verify_and_bind_phone_handler(
   let result = verify_and_bind_phone(&user_uuid, &params.phone, &params.otp, state.as_ref()).await?;
 
   Ok(AppResponse::Ok().with_data(result).into())
+}
+
+/// Verify phone OTP for identity reauthentication (does NOT bind or update phone).
+/// Uses type=sms so GoTrue only verifies the OTP without modifying any user data.
+#[derive(Debug, serde::Deserialize)]
+struct VerifyPhoneReauthenticationParams {
+  pub phone: String,
+  pub otp: String,
+}
+
+#[tracing::instrument(skip(state, auth, payload), err)]
+async fn verify_phone_reauthentication_handler(
+  auth: Authorization,
+  payload: Json<VerifyPhoneReauthenticationParams>,
+  state: Data<AppState>,
+) -> Result<JsonAppResponse<()>> {
+  let user_uuid = auth.uuid()?;
+  let params = payload.into_inner();
+
+  verify_phone_reauthentication(&user_uuid, &params.phone, &params.otp, state.as_ref()).await?;
+
+  Ok(AppResponse::Ok().into())
 }
 
 #[tracing::instrument(skip(state, auth, payload), err)]
