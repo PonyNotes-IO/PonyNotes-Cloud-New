@@ -12,7 +12,7 @@ use actix_web::{web, HttpRequest, HttpResponse, Scope};
 use app_error::AppError;
 use appflowy_ai_client::dto::{
   CalculateSimilarityParams, LocalAIConfig, ModelList, SimilarityResponse, TranslateRowParams,
-  TranslateRowResponse, STREAM_ANSWER_KEY, STREAM_THINKING_KEY,
+  TranslateRowResponse, STREAM_ANSWER_KEY, STREAM_METADATA_KEY, STREAM_THINKING_KEY,
 };
 use appflowy_ai_client::{AIModel, AIModelInfo, AvailableModelsResponse, ChatRequestParams};
 
@@ -213,17 +213,32 @@ fn convert_openai_stream_to_json_stream(
                         }
                       }
 
-                      // 处理联网搜索结果（search_results 字段），发送为 metadata key "0"
-                      if let Some(search_results) = first_choice.get("search_results") {
-                        if !search_results.is_null() {
-                          let mut meta_obj = serde_json::Map::new();
-                          meta_obj.insert("search_results".to_string(), search_results.clone());
-                          let mut outer_obj = serde_json::Map::new();
-                          outer_obj.insert("0".to_string(), Value::Object(meta_obj));
-                          if let Ok(json_str) = serde_json::to_string(&Value::Object(outer_obj)) {
-                            json_output.push_str(&json_str);
-                            json_output.push('\n');
-                          }
+                    }
+                  }
+
+                  // 处理联网搜索结果 - Ark API 将 references 放在顶层 JSON 而非 choices 内
+                  // 格式: {"references": [{"url": "...", "title": "...", "content": "..."}]}
+                  if let Some(references) = obj.get("references").and_then(|r| r.as_array()) {
+                    if !references.is_empty() {
+                      // 将 Ark references 格式转换为客户端期望的 {id, name, source} 格式
+                      let converted: Vec<Value> = references.iter().filter_map(|r| {
+                        let url = r.get("url").and_then(|u| u.as_str())?;
+                        let title = r.get("title")
+                          .and_then(|t| t.as_str())
+                          .unwrap_or("未知来源");
+                        Some(serde_json::json!({
+                          "id": url,
+                          "name": title,
+                          "source": url,
+                        }))
+                      }).collect();
+
+                      if !converted.is_empty() {
+                        let mut outer_obj = serde_json::Map::new();
+                        outer_obj.insert(STREAM_METADATA_KEY.to_string(), Value::Array(converted));
+                        if let Ok(json_str) = serde_json::to_string(&Value::Object(outer_obj)) {
+                          json_output.push_str(&json_str);
+                          json_output.push('\n');
                         }
                       }
                     }
