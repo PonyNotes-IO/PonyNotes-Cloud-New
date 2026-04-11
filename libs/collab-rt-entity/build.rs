@@ -20,6 +20,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .compile_protos(&proto_files, &["proto/"])?;
 
   // Run cargo fmt to format the code
-  Command::new("cargo").arg("fmt").status()?;
+  //Command::new("cargo").arg("fmt").status()?;
   Ok(())
 }
