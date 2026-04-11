@@ -128,8 +128,9 @@ impl ChatClient {
       body["web_search"] = json!(true);
     }
 
-    debug!("DeepSeek request URL: {}", url);
-    debug!("DeepSeek request body: {}", serde_json::to_string_pretty(&body)?);
+    info!("[DeepSeek] 请求URL: {}", url);
+    info!("[DeepSeek] 模型: {}, enable_thinking: {}, enable_web_search: {}", model_to_use, params.enable_thinking, params.enable_web_search);
+    debug!("[DeepSeek] 请求体: {}", serde_json::to_string_pretty(&body)?);
 
     let response = self
       .http_client
@@ -190,13 +191,14 @@ impl ChatClient {
       "stream": true,
     });
     
-    // 通义千问：enable_search 直接在顶层
+    // 通义千问：enable_search 直接在顶层（dashscope API 格式）
     if params.enable_web_search {
       body["enable_search"] = json!(true);
     }
-    
-    // 深度思考可以通过提示词实现，或者作为参数传递
-    if params.enable_thinking {
+
+    // qwen3-vl-plus 是多模态视觉模型，不支持 enable_thinking 参数
+    // 深度思考只在纯文本 Qwen3 模型上支持
+    if params.enable_thinking && !has_images && !model_name.contains("vl") {
       body["enable_thinking"] = json!(true);
     }
 
@@ -279,14 +281,10 @@ impl ChatClient {
       "stream": true,
     });
     
-    // 如果启用深度思考，添加 enable_thinking 参数
-    if params.enable_thinking {
-      body["enable_thinking"] = json!(true);
-    }
-    
-    // 如果启用全网搜索，添加 web_search 参数
+    // 豆包不支持 enable_thinking 参数（需要使用特定的思考模型端点）
+    // 如果启用全网搜索，使用火山方舟 ARK 标准格式
     if params.enable_web_search {
-      body["web_search"] = json!(true);
+      body["web_search"] = json!({"enable": true});
     }
 
     debug!("Doubao chat request URL: {}", url);
