@@ -123,9 +123,9 @@ impl ChatClient {
       body["thinking"] = json!({"type": "enabled"});
     }
 
-    // 如果启用全网搜索，添加 web_search 参数
+    // 如果启用全网搜索，添加 web_search 参数（Ark API 格式：{"enable": true}）
     if params.enable_web_search {
-      body["web_search"] = json!(true);
+      body["web_search"] = json!({"enable": true});
     }
 
     info!("[DeepSeek] 请求URL: {}", url);
@@ -327,11 +327,16 @@ impl ChatClient {
     let url = format!("{}/responses", self.doubao_api_base);
     let input = self.build_input_for_doubao_multimodal(params);
 
-    let body = json!({
+    let mut body = json!({
       "model": self.doubao_model,
       "input": input,
       "stream": true,  // 【关键修复】必须添加stream参数启用流式响应
     });
+
+    // 多模态接口同样支持联网搜索
+    if params.enable_web_search {
+      body["web_search"] = json!({"enable": true});
+    }
 
     info!("🎨 [豆包多模态] 请求URL: {}", url);
     info!("🎨 [豆包多模态] 模型: {}", self.doubao_model);
