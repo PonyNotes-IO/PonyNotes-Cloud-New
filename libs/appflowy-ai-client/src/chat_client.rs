@@ -18,6 +18,8 @@ pub struct ChatClient {
   deepseek_model: String,
   /// 深度思考专用模型（DeepSeek-R1），为空则 fallback 到 deepseek_model
   deepseek_reasoner_model: String,
+  /// 联网搜索专用 Bot 模型 ID（ARK Bot 应用），为空则 fallback 到普通 web_search 参数
+  deepseek_web_search_bot_model: String,
   // 通义千问配置
   qwen_api_key: String,
   qwen_api_base: String,
@@ -58,6 +60,8 @@ impl ChatClient {
       deepseek_model: std::env::var("AI_CHAT_DEEPSEEK_MODEL")
         .unwrap_or_else(|_| "deepseek-v3-250324".to_string()),
       deepseek_reasoner_model: std::env::var("AI_CHAT_DEEPSEEK_REASONER_MODEL")
+        .unwrap_or_else(|_| String::new()),
+      deepseek_web_search_bot_model: std::env::var("AI_CHAT_DEEPSEEK_WEB_SEARCH_MODEL")
         .unwrap_or_else(|_| String::new()),
       qwen_api_key,
       qwen_api_base: std::env::var("AI_CHAT_QWEN_API_BASE").unwrap_or_else(|_| {
@@ -101,16 +105,28 @@ impl ChatClient {
       return Err(anyhow!("DeepSeek API key not configured"));
     }
 
-    let url = format!("{}/chat/completions", self.deepseek_api_base);
-    let messages = self.build_messages_for_openai_compatible(params);
+    // 联网搜索：优先使用 ARK Bot 应用专用接口（/bots/chat/completions + bot 模型 ID）
+    // ARK 的联网搜索能力封装在 Bot 插件里，普通 /chat/completions + web_search 参数无效。
+    // 若未配置 Bot 模型 ID，则 fallback 到普通接口（无联网搜索效果）。
+    let use_bot = params.enable_web_search && !self.deepseek_web_search_bot_model.is_empty();
 
-    // 如果配置了单独的深度思考模型则切换，否则直接用默认模型（如 V3.2 本身支持 thinking）
-    let model_to_use = if params.enable_thinking && !self.deepseek_reasoner_model.is_empty() {
-      info!("[DeepSeek] 深度思考模式：切换到推理模型 {}", self.deepseek_reasoner_model);
-      self.deepseek_reasoner_model.as_str()
+    let (url, model_to_use) = if use_bot {
+      let bot_url = format!("{}/bots/chat/completions", self.deepseek_api_base);
+      info!("[DeepSeek] 联网搜索模式：使用 Bot 接口 {} 模型 {}", bot_url, self.deepseek_web_search_bot_model);
+      (bot_url, self.deepseek_web_search_bot_model.as_str())
     } else {
-      self.deepseek_model.as_str()
+      // 如果配置了单独的深度思考模型则切换，否则直接用默认模型（如 V3.2 本身支持 thinking）
+      let regular_url = format!("{}/chat/completions", self.deepseek_api_base);
+      let model = if params.enable_thinking && !self.deepseek_reasoner_model.is_empty() {
+        info!("[DeepSeek] 深度思考模式：切换到推理模型 {}", self.deepseek_reasoner_model);
+        self.deepseek_reasoner_model.as_str()
+      } else {
+        self.deepseek_model.as_str()
+      };
+      (regular_url, model)
     };
+
+    let messages = self.build_messages_for_openai_compatible(params);
 
     let mut body = json!({
       "model": model_to_use,
@@ -119,17 +135,18 @@ impl ChatClient {
     });
 
     // 深度思考：使用 "thinking": {"type": "enabled"} 格式（DeepSeek-V3.2 火山引擎格式）
-    if params.enable_thinking {
+    // Bot 模式下不叠加 thinking 参数，由 Bot 自身配置决定
+    if params.enable_thinking && !use_bot {
       body["thinking"] = json!({"type": "enabled"});
     }
 
-    // 如果启用全网搜索，添加 web_search 参数（Ark API 格式：{"enable": true}）
-    if params.enable_web_search {
+    // 普通模式下若仍需 web_search 参数（无 bot 配置时的 fallback），保留该参数
+    if params.enable_web_search && !use_bot {
       body["web_search"] = json!({"enable": true});
     }
 
     info!("[DeepSeek] 请求URL: {}", url);
-    info!("[DeepSeek] 模型: {}, enable_thinking: {}, enable_web_search: {}", model_to_use, params.enable_thinking, params.enable_web_search);
+    info!("[DeepSeek] 模型: {}, use_bot: {}, enable_thinking: {}, enable_web_search: {}", model_to_use, use_bot, params.enable_thinking, params.enable_web_search);
     debug!("[DeepSeek] 请求体: {}", serde_json::to_string_pretty(&body)?);
 
     let response = self
