@@ -20,10 +20,14 @@ pub struct ChatClient {
   deepseek_model: String,
   /// 深度思考专用模型（DeepSeek-R1），为空则 fallback 到 deepseek_model
   deepseek_reasoner_model: String,
+  /// 联网搜索 Bot ID（ARK Bot 应用 ID，格式 bot-xxx），需在火山方舟控制台创建
+  deepseek_web_search_bot_model: String,
   // 通义千问配置
   qwen_api_key: String,
   qwen_api_base: String,
   qwen3_vl_plus_model: String,
+  /// 联网搜索专用文本模型（支持 enable_search 的模型，如 qwen-plus/qwen-turbo）
+  qwen_search_model: String,
   // 豆包配置
   doubao_api_key: String,
   doubao_api_base: String,
@@ -39,17 +43,24 @@ impl ChatClient {
       .unwrap_or_else(|_| String::new());
     let doubao_api_key = std::env::var("AI_CHAT_DOUBAO_API_KEY")
       .unwrap_or_else(|_| String::new());
-    
+
+    let deepseek_web_search_bot = std::env::var("AI_CHAT_DEEPSEEK_WEB_SEARCH_MODEL")
+      .unwrap_or_else(|_| String::new());
+    let qwen_search_model = std::env::var("AI_CHAT_QWEN_SEARCH_MODEL")
+      .unwrap_or_else(|_| "qwen-plus".to_string());
+
     // 详细日志：环境变量加载情况
     info!("ChatClient initialization:");
     info!("  - DeepSeek API Key: {} bytes", if deepseek_api_key.is_empty() { 0 } else { deepseek_api_key.len() });
+    info!("  - DeepSeek Web Search Bot: {}", if deepseek_web_search_bot.is_empty() { "未配置" } else { &deepseek_web_search_bot });
     info!("  - Qwen API Key: {} bytes", if qwen_api_key.is_empty() { 0 } else { qwen_api_key.len() });
+    info!("  - Qwen Search Model: {}", qwen_search_model);
     info!("  - Doubao API Key: {} bytes", if doubao_api_key.is_empty() { 0 } else { doubao_api_key.len() });
-    
+
     if deepseek_api_key.is_empty() && qwen_api_key.is_empty() && doubao_api_key.is_empty() {
       error!("WARNING: All AI provider API keys are empty! Chat functionality will not work.");
     }
-    
+
     Ok(Self {
       http_client: Client::builder()
         .timeout(std::time::Duration::from_secs(120))
@@ -61,12 +72,14 @@ impl ChatClient {
         .unwrap_or_else(|_| "deepseek-v3-250324".to_string()),
       deepseek_reasoner_model: std::env::var("AI_CHAT_DEEPSEEK_REASONER_MODEL")
         .unwrap_or_else(|_| String::new()),
+      deepseek_web_search_bot_model: deepseek_web_search_bot,
       qwen_api_key,
       qwen_api_base: std::env::var("AI_CHAT_QWEN_API_BASE").unwrap_or_else(|_| {
         "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()
       }),
       qwen3_vl_plus_model: std::env::var("AI_CHAT_QWEN3_VL_PLUS_MODEL")
         .unwrap_or_else(|_| "qwen3-vl-plus".to_string()),
+      qwen_search_model,
       doubao_api_key,
       doubao_api_base: std::env::var("AI_CHAT_DOUBAO_API_BASE")
         .unwrap_or_else(|_| "https://ark.cn-beijing.volces.com/api/v3".to_string()),
@@ -103,6 +116,23 @@ impl ChatClient {
       return Err(anyhow!("DeepSeek API key not configured"));
     }
 
+    // 联网搜索模式：使用 ARK Bot 专用接口（/bots/chat/completions）
+    // Bot 在控制台创建时需要开通「联网搜索」插件，普通 /chat/completions 接口不支持真实联网
+    if params.enable_web_search && !self.deepseek_web_search_bot_model.is_empty() {
+      info!(
+        "[DeepSeek] 联网搜索模式：使用 Bot 接口，Bot ID: {}",
+        self.deepseek_web_search_bot_model
+      );
+      return self.stream_deepseek_bot(params).await;
+    }
+    if params.enable_web_search && self.deepseek_web_search_bot_model.is_empty() {
+      warn!(
+        "[DeepSeek] 联网搜索被请求，但 AI_CHAT_DEEPSEEK_WEB_SEARCH_MODEL 未配置。\
+        请在火山方舟控制台创建 Bot 应用并开通联网搜索插件，然后将 Bot ID 填入环境变量。\
+        当前将使用普通模式（无法联网）。"
+      );
+    }
+
     let url = format!("{}/chat/completions", self.deepseek_api_base);
 
     // 深度思考模式：切换到推理模型（如 DeepSeek-R1），否则使用默认模型
@@ -124,11 +154,6 @@ impl ChatClient {
     // 深度思考：使用 "thinking": {"type": "enabled"} 格式（DeepSeek-V3.2 火山引擎格式）
     if params.enable_thinking {
       body["thinking"] = json!({"type": "enabled"});
-    }
-
-    // 联网搜索：ARK API 格式 {"enable": true}，直接在普通接口上生效
-    if params.enable_web_search {
-      body["web_search"] = json!({"enable": true});
     }
 
     info!("[DeepSeek] 请求URL: {}", url);
@@ -187,6 +212,70 @@ impl ChatClient {
     Err(anyhow!("{}", last_error))
   }
 
+  /// 调用 DeepSeek ARK Bot 接口进行联网搜索
+  /// Bot 需要在火山方舟控制台创建，并开通「联网搜索」插件
+  /// 环境变量：AI_CHAT_DEEPSEEK_WEB_SEARCH_MODEL=bot-xxxxxxxxxxxx
+  async fn stream_deepseek_bot(
+    &self,
+    params: &ChatRequestParams,
+  ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>> {
+    let url = format!("{}/bots/chat/completions", self.deepseek_api_base);
+    let messages = self.build_messages_for_openai_compatible(params);
+
+    let body = json!({
+      "model": self.deepseek_web_search_bot_model,
+      "messages": messages,
+      "stream": true,
+    });
+
+    info!("[DeepSeek Bot] 联网搜索请求URL: {}", url);
+    info!("[DeepSeek Bot] Bot ID: {}", self.deepseek_web_search_bot_model);
+    debug!("[DeepSeek Bot] 请求体: {}", serde_json::to_string_pretty(&body)?);
+
+    // Bot 接口也做 429 重试
+    let max_retries = 3;
+    let mut last_error = String::new();
+    for attempt in 0..max_retries {
+      if attempt > 0 {
+        let wait_secs = 1u64 << attempt;
+        warn!("[DeepSeek Bot] 第 {} 次重试，等待 {}s...", attempt, wait_secs);
+        sleep(Duration::from_secs(wait_secs)).await;
+      }
+
+      let response = self
+        .http_client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", self.deepseek_api_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await?;
+
+      let status = response.status();
+      if status.as_u16() == 429 {
+        let error_text = response.text().await.unwrap_or_default();
+        warn!("[DeepSeek Bot] 429 服务过载 attempt={}/{}: {}", attempt + 1, max_retries, error_text);
+        last_error = format!("DeepSeek 联网搜索服务繁忙，请稍后重试。{}", error_text);
+        continue;
+      }
+      if !status.is_success() {
+        let error_text = response.text().await?;
+        error!("[DeepSeek Bot] API error: {} - {}", status, error_text);
+        return Err(anyhow!("DeepSeek Bot API error: {} - {}", status, error_text));
+      }
+
+      info!("[DeepSeek Bot] 联网搜索响应状态: {}", status);
+      return Ok(Box::pin(
+        response
+          .bytes_stream()
+          .map(|result| result.map_err(|e| anyhow!("Stream error: {}", e))),
+      ));
+    }
+
+    error!("[DeepSeek Bot] 重试 {} 次后仍失败：{}", max_retries, last_error);
+    Err(anyhow!("{}", last_error))
+  }
+
   /// 调用通义千问 API（支持多模态，qwen3-vl-plus 支持图片和文件分析）
   async fn stream_qwen(
     &self,
@@ -199,41 +288,58 @@ impl ChatClient {
 
     // 检查是否有图片（多模态支持）
     let has_images = params.has_images && params.images.is_some() && !params.images.as_ref().unwrap().is_empty();
-    
-    info!("🤖 [通义千问] 模型: {}, has_images: {}, images_count: {}", 
-      model_name,
-      params.has_images, 
-      params.images.as_ref().map(|v| v.len()).unwrap_or(0)
+
+    // 联网搜索 + 无图片：切换到文本搜索模型（qwen3-vl-plus 不支持联网搜索）
+    // 原因：qwen3-vl-plus 是多模态视觉模型，enable_search 对其无效
+    // 使用 AI_CHAT_QWEN_SEARCH_MODEL（默认 qwen-plus）处理纯文本联网查询
+    let actual_model = if params.enable_web_search && !has_images {
+      info!(
+        "🔍 [通义千问] 联网搜索模式：切换到文本搜索模型 {} (原模型: {})",
+        self.qwen_search_model, model_name
+      );
+      self.qwen_search_model.as_str()
+    } else {
+      model_name
+    };
+
+    info!("🤖 [通义千问] 模型: {}, has_images: {}, images_count: {}, web_search: {}",
+      actual_model,
+      params.has_images,
+      params.images.as_ref().map(|v| v.len()).unwrap_or(0),
+      params.enable_web_search
     );
-    
+
     if has_images {
       info!("🎨 [通义千问] 检测到图片，使用多模态格式");
-    } else {
-      info!("💬 [通义千问] 纯文本消息");
     }
 
     let url = format!("{}/chat/completions", self.qwen_api_base);
     let messages = self.build_messages_for_openai_compatible(params);
 
     let mut body = json!({
-      "model": model_name,
+      "model": actual_model,
       "messages": messages,
       "stream": true,
     });
-    
-    // 通义千问：enable_search 直接在顶层（dashscope API 格式）
-    if params.enable_web_search {
+
+    // 通义千问：enable_search + search_options（dashscope API 格式）
+    // 注意：qwen3-vl-plus 不支持 enable_search，需使用文本模型（已在上面切换）
+    if params.enable_web_search && !has_images {
       body["enable_search"] = json!(true);
+      body["search_options"] = json!({
+        "forced_search": true,
+        "enable_source": true,
+      });
     }
 
     // qwen3-vl-plus 是多模态视觉模型，不支持 enable_thinking 参数
     // 深度思考只在纯文本 Qwen3 模型上支持
-    if params.enable_thinking && !has_images && !model_name.contains("vl") {
+    if params.enable_thinking && !has_images && !actual_model.contains("vl") {
       body["enable_thinking"] = json!(true);
     }
 
     info!("🎨 [通义千问] 请求URL: {}", url);
-    info!("🎨 [通义千问] 模型: {}", model_name);
+    info!("🎨 [通义千问] 模型: {}", actual_model);
     if has_images {
       info!("🎨 [通义千问] 请求体（多模态）: {}", serde_json::to_string_pretty(&body)?);
     } else {
@@ -278,26 +384,29 @@ impl ChatClient {
       return Err(anyhow!("Doubao API key not configured"));
     }
 
-    // 检查是否有图片，如果有图片则使用 responses 接口（多模态），否则使用 chat/completions 接口
     let has_images = params.has_images && params.images.is_some() && !params.images.as_ref().unwrap().is_empty();
-    
-    info!("🤖 [豆包] has_images: {}, images_count: {}", 
-      params.has_images, 
-      params.images.as_ref().map(|v| v.len()).unwrap_or(0)
+
+    info!("🤖 [豆包] has_images: {}, images_count: {}, web_search: {}",
+      params.has_images,
+      params.images.as_ref().map(|v| v.len()).unwrap_or(0),
+      params.enable_web_search
     );
-    
+
     if has_images {
       info!("🎨 [豆包] 检测到图片，使用多模态接口 /responses");
-      // 使用多模态接口 /responses
       self.stream_doubao_multimodal(params).await
+    } else if params.enable_web_search {
+      // 豆包 Seed 系列联网搜索：必须使用 /responses 接口 + tools
+      // /chat/completions + web_search 参数对 Seed 系列无效（模型不会真正联网）
+      info!("🔍 [豆包] 联网搜索模式：使用 /responses 接口 + tools");
+      self.stream_doubao_text_with_search(params).await
     } else {
       info!("💬 [豆包] 纯文本消息，使用普通接口 /chat/completions");
-      // 使用普通聊天接口 /chat/completions
       self.stream_doubao_chat(params).await
     }
   }
 
-  /// 调用豆包普通聊天 API
+  /// 调用豆包普通聊天 API（无联网搜索）
   async fn stream_doubao_chat(
     &self,
     params: &ChatRequestParams,
@@ -305,17 +414,11 @@ impl ChatClient {
     let url = format!("{}/chat/completions", self.doubao_api_base);
     let messages = self.build_messages_for_openai_compatible(params);
 
-    let mut body = json!({
+    let body = json!({
       "model": self.doubao_model,
       "messages": messages,
       "stream": true,
     });
-    
-    // 豆包不支持 enable_thinking 参数（需要使用特定的思考模型端点）
-    // 如果启用全网搜索，使用火山方舟 ARK 标准格式
-    if params.enable_web_search {
-      body["web_search"] = json!({"enable": true});
-    }
 
     debug!("Doubao chat request URL: {}", url);
     debug!("Doubao chat request body: {}", serde_json::to_string_pretty(&body)?);
@@ -342,6 +445,62 @@ impl ChatClient {
       response
         .bytes_stream()
         .map(|result| result.map_err(|e| anyhow!("Stream error: {}", e))),
+    ))
+  }
+
+  /// 调用豆包 Responses API 进行文本联网搜索
+  /// 豆包 Seed 系列必须通过 /responses 接口 + tools: [{type: "web_search"}] 才能真正联网
+  async fn stream_doubao_text_with_search(
+    &self,
+    params: &ChatRequestParams,
+  ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>> {
+    let url = format!("{}/responses", self.doubao_api_base);
+
+    // 构建 input：支持对话历史
+    let mut input_messages: Vec<serde_json::Value> = Vec::new();
+    for msg in &params.history {
+      input_messages.push(json!({"role": msg.role, "content": msg.content}));
+    }
+    input_messages.push(json!({"role": "user", "content": params.message}));
+
+    let body = json!({
+      "model": self.doubao_model,
+      "input": input_messages,
+      "tools": [{"type": "web_search"}],
+      "stream": true,
+    });
+
+    info!("🔍 [豆包联网] 请求URL: {}", url);
+    info!("🔍 [豆包联网] 模型: {}, 消息数: {}", self.doubao_model, input_messages.len());
+    debug!("🔍 [豆包联网] 请求体: {}", serde_json::to_string_pretty(&body)?);
+
+    let response = self
+      .http_client
+      .post(&url)
+      .header("Authorization", format!("Bearer {}", self.doubao_api_key))
+      .header("Content-Type", "application/json")
+      .json(&body)
+      .send()
+      .await?;
+
+    let status = response.status();
+    if !status.is_success() {
+      let error_text = response.text().await?;
+      error!("❌ [豆包联网] API错误: {} - {}", status, error_text);
+      return Err(anyhow!("Doubao web search API error: {} - {}", status, error_text));
+    }
+
+    info!("✅ [豆包联网] 响应状态: {}", status);
+
+    // Responses API 返回 SSE 格式需要转换为 OpenAI 标准格式
+    Ok(Box::pin(
+      response
+        .bytes_stream()
+        .map(|result| {
+          result
+            .map(|bytes| Self::convert_doubao_responses_to_openai(&bytes))
+            .map_err(|e| anyhow!("Stream error: {}", e))
+        }),
     ))
   }
 
