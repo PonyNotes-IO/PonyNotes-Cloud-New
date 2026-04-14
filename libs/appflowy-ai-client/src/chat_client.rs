@@ -4,7 +4,9 @@ use futures::{Stream, StreamExt};
 use reqwest::Client;
 use serde_json::json;
 use std::pin::Pin;
-use tracing::{debug, error, info};
+use std::time::Duration;
+use tokio::time::sleep;
+use tracing::{debug, error, info, warn};
 
 use crate::dto::{AIModel, ChatRequestParams};
 
@@ -133,29 +135,56 @@ impl ChatClient {
     info!("[DeepSeek] 模型: {}, enable_thinking: {}, enable_web_search: {}", model_to_use, params.enable_thinking, params.enable_web_search);
     debug!("[DeepSeek] 请求体: {}", serde_json::to_string_pretty(&body)?);
 
-    let response = self
-      .http_client
-      .post(&url)
-      .header("Authorization", format!("Bearer {}", self.deepseek_api_key))
-      .header("Content-Type", "application/json")
-      .json(&body)
-      .send()
-      .await?;
+    // 最多重试3次（应对 429 Too Many Requests / ServerOverloaded）
+    let max_retries = 3;
+    let mut last_error = String::new();
+    for attempt in 0..max_retries {
+      if attempt > 0 {
+        let wait_secs = 1u64 << attempt; // 指数退避：2s, 4s
+        warn!(
+          "[DeepSeek] 第 {} 次重试（共 {} 次），等待 {}s 后重试...",
+          attempt, max_retries, wait_secs
+        );
+        sleep(Duration::from_secs(wait_secs)).await;
+      }
 
-    let status = response.status();
-    if !status.is_success() {
-      let error_text = response.text().await?;
-      error!("DeepSeek API error: {} - {}", status, error_text);
-      return Err(anyhow!("DeepSeek API error: {} - {}", status, error_text));
+      let response = self
+        .http_client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", self.deepseek_api_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await?;
+
+      let status = response.status();
+      if status.as_u16() == 429 {
+        let error_text = response.text().await.unwrap_or_default();
+        warn!(
+          "[DeepSeek] 429 Too Many Requests（服务过载），attempt={}/{}: {}",
+          attempt + 1, max_retries, error_text
+        );
+        last_error = format!("DeepSeek 服务繁忙（429），请稍后重试。{}", error_text);
+        continue; // 重试
+      }
+
+      if !status.is_success() {
+        let error_text = response.text().await?;
+        error!("DeepSeek API error: {} - {}", status, error_text);
+        return Err(anyhow!("DeepSeek API error: {} - {}", status, error_text));
+      }
+
+      info!("DeepSeek API response status: {}", status);
+      return Ok(Box::pin(
+        response
+          .bytes_stream()
+          .map(|result| result.map_err(|e| anyhow!("Stream error: {}", e))),
+      ));
     }
 
-    info!("DeepSeek API response status: {}", status);
-
-    Ok(Box::pin(
-      response
-        .bytes_stream()
-        .map(|result| result.map_err(|e| anyhow!("Stream error: {}", e))),
-    ))
+    // 所有重试均失败
+    error!("[DeepSeek] 重试 {} 次后仍失败：{}", max_retries, last_error);
+    Err(anyhow!("{}", last_error))
   }
 
   /// 调用通义千问 API（支持多模态，qwen3-vl-plus 支持图片和文件分析）
