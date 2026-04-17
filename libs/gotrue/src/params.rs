@@ -140,6 +140,8 @@ pub enum VerifyType {
   Sms,
   #[serde(rename = "phone_change")]
   PhoneChange,
+  #[serde(rename = "email_change")]
+  EmailChange,
 }
 
 #[derive(Default, Deserialize, Serialize)]

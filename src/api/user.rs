@@ -5,8 +5,8 @@ use crate::biz::user::user_delete::delete_user;
 use crate::biz::user::user_info::{get_profile, get_user_workspace_info, update_user};
 use crate::biz::user::user_search::{get_uid_by_email_or_phone, search_users_by_email};
 use crate::biz::user::user_verify::{
-  check_email_registered, send_phone_otp, verify_and_bind_email, verify_and_bind_phone,
-  verify_phone_reauthentication, verify_token,
+  check_email_registered, send_email_change_otp, send_phone_otp, send_phone_reauth_otp,
+  verify_and_bind_email, verify_and_bind_phone, verify_phone_reauthentication, verify_token,
 };
 use crate::biz::subscription::ops::check_user_storage_limit;
 use crate::state::AppState;
@@ -21,8 +21,9 @@ use database_entity::dto::{AFUserProfile, AFUserWorkspaceInfo, UserImageAssetSou
 use semver::Version;
 use shared_entity::dto::auth_dto::{
   BindPhoneResponse, CheckEmailParams, DeleteUserQuery, GetUidByEmailOrPhoneQuery,
-  GetUidByEmailOrPhoneResponse, SearchUserQuery, SearchUserResponse, SendPhoneOtpParams,
-  SignInTokenResponse, UpdateUserParams, VerifyAndBindEmailParams, VerifyAndBindPhoneParams,
+  GetUidByEmailOrPhoneResponse, SearchUserQuery, SearchUserResponse, SendEmailChangeOtpParams,
+  SendPhoneOtpParams, SignInTokenResponse, UpdateUserParams, VerifyAndBindEmailParams,
+  VerifyAndBindPhoneParams,
 };
 use shared_entity::response::AppResponseError;
 use shared_entity::response::{AppResponse, JsonAppResponse};
@@ -35,6 +36,8 @@ pub fn user_scope() -> Scope {
     .service(web::resource("/verify/{access_token}").route(web::get().to(verify_user_handler)))
     .service(web::resource("/update").route(web::post().to(update_user_handler)))
     .service(web::resource("/send-phone-otp").route(web::post().to(send_phone_otp_handler)))
+    .service(web::resource("/send-phone-reauth-otp").route(web::post().to(send_phone_reauth_otp_handler)))
+    .service(web::resource("/send-email-change-otp").route(web::post().to(send_email_change_otp_handler)))
     .service(web::resource("/verify-phone").route(web::post().to(verify_and_bind_phone_handler)))
     .service(web::resource("/verify-phone-reauthentication").route(web::post().to(verify_phone_reauthentication_handler)))
     .service(web::resource("/verify-email").route(web::post().to(verify_and_bind_email_handler)))
@@ -249,6 +252,49 @@ async fn send_phone_otp_handler(
     params.phone
   );
   send_phone_otp(&auth.token, &user_uuid, &params.phone, state.as_ref()).await?;
+
+  Ok(AppResponse::Ok().into())
+}
+
+#[tracing::instrument(skip(state, auth, payload), err)]
+async fn send_phone_reauth_otp_handler(
+  auth: Authorization,
+  payload: Json<SendPhoneOtpParams>,
+  state: Data<AppState>,
+) -> Result<JsonAppResponse<()>> {
+  let params = payload.into_inner();
+  let _user_uuid = auth.uuid()?;
+
+  event!(
+    tracing::Level::INFO,
+    "User {} requesting phone reauth OTP for: {}",
+    _user_uuid,
+    params.phone
+  );
+  send_phone_reauth_otp(&auth.token, &params.phone, state.as_ref()).await?;
+
+  Ok(AppResponse::Ok().into())
+}
+
+/// 发送邮箱变更 OTP（用于绑定新邮箱）
+/// 调用 GoTrue PUT /user 接口，GoTrue 将 email_change 存入当前用户行，
+/// 并向新邮箱发送 OTP，验证时使用 type=email_change（而非 magiclink）
+#[tracing::instrument(skip(state, auth, payload), err)]
+async fn send_email_change_otp_handler(
+  auth: Authorization,
+  payload: Json<SendEmailChangeOtpParams>,
+  state: Data<AppState>,
+) -> Result<JsonAppResponse<()>> {
+  let params = payload.into_inner();
+  let _user_uuid = auth.uuid()?;
+
+  event!(
+    tracing::Level::INFO,
+    "User {} requesting email change OTP for: {}",
+    _user_uuid,
+    params.email
+  );
+  send_email_change_otp(&auth.token, &params.email, state.as_ref()).await?;
 
   Ok(AppResponse::Ok().into())
 }

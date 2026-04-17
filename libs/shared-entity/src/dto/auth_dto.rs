@@ -118,6 +118,11 @@ pub struct SendPhoneOtpParams {
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct SendEmailChangeOtpParams {
+  pub email: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct CheckEmailParams {
   pub email: String,
 }

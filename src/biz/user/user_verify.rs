@@ -204,6 +204,7 @@ pub async fn verify_and_bind_phone(
     gotrue::params::VerifyType::PhoneChange => "phone_change",
     gotrue::params::VerifyType::MagicLink => "magiclink",
     gotrue::params::VerifyType::Recovery => "recovery",
+    gotrue::params::VerifyType::EmailChange => "email_change",
   };
   event!(
     tracing::Level::INFO,
@@ -433,6 +434,58 @@ pub async fn send_phone_otp(
   }
 }
 
+/// Send phone OTP for reauthentication (identity verification).
+///
+/// This is used by the identity verification dialog when verifying a phone number
+/// before a sensitive operation (e.g., changing phone, changing email).
+///
+/// Unlike `send_phone_otp` which uses GoTrue's `PUT /user` (creates `phone_change` type OTP),
+/// this function uses GoTrue's `POST /otp` endpoint (creates `sms` type OTP), which matches
+/// `verify_phone_reauthentication` that verifies with `type=sms`.
+///
+/// OTP type must match between send and verify:
+/// - `PUT /user` → `phone_change` type → verify with `type=phone_change`
+/// - `POST /otp` → `sms` type → verify with `type=sms` ← this function
+#[instrument(skip(state), err)]
+pub async fn send_phone_reauth_otp(
+  _access_token: &str,
+  phone: &str,
+  state: &AppState,
+) -> Result<(), AppError> {
+  use gotrue::params::MagicLinkParams;
+
+  event!(
+    tracing::Level::INFO,
+    "Sending phone reauth OTP via /otp endpoint to: {}",
+    phone
+  );
+
+  let mut otp_params = MagicLinkParams::default();
+  otp_params.phone = phone.to_string();
+
+  state
+    .gotrue_client
+    .magic_link(&otp_params, None)
+    .await
+    .map_err(|e| {
+      let msg = e.to_string();
+      event!(
+        tracing::Level::WARN,
+        "Failed to send phone reauth OTP to: {}, error: {}",
+        phone,
+        msg
+      );
+      AppError::InvalidRequest(format!("发送验证码失败: {}", msg))
+    })?;
+
+  event!(
+    tracing::Level::INFO,
+    "Phone reauth OTP sent successfully to: {}",
+    phone
+  );
+  Ok(())
+}
+
 /// Send phone OTP for SSO users (e.g., WeChat login) who need to bind phone for the first time
 /// 
 /// This function is specifically designed for SSO users who don't have a phone number yet.
@@ -612,15 +665,82 @@ pub struct CheckEmailRegisteredResult {
   pub message: Option<String>,
 }
 
+/// Send email change OTP for binding a new email address to an existing account.
+///
+/// This initiates GoTrue's email change flow via PUT /user, which:
+/// 1. Stores email_change = new_email in auth.users for the current user
+/// 2. Sends a 6-digit OTP to the new email address
+/// 3. Verification must use type=email_change (not magiclink)
+///
+/// IMPORTANT: This replaces the old approach of using GoTrue /otp endpoint (MagicLink),
+/// which incorrectly created a NEW user row in auth.users for the email.
+/// Using PUT /user ensures the OTP is linked to the EXISTING user (the phone user).
+#[instrument(skip(state), err)]
+pub async fn send_email_change_otp(
+  access_token: &str,
+  email: &str,
+  state: &AppState,
+) -> Result<(), AppError> {
+  use gotrue_entity::dto::UpdateGotrueUserParams;
+
+  event!(
+    tracing::Level::INFO,
+    "Initiating email change OTP via GoTrue PUT /user for email: {}",
+    email
+  );
+
+  let mut update_params = UpdateGotrueUserParams::new();
+  update_params.email = email.to_string();
+
+  let result = state
+    .gotrue_client
+    .update_user(access_token, &update_params)
+    .await;
+
+  match result {
+    Ok(_user) => {
+      event!(
+        tracing::Level::INFO,
+        "Email change OTP sent successfully to: {}",
+        email
+      );
+      Ok(())
+    }
+    Err(e) => {
+      let error_msg = e.to_string();
+      event!(
+        tracing::Level::WARN,
+        "Failed to send email change OTP to: {}, error: {}",
+        email,
+        error_msg
+      );
+      let friendly_msg = if error_msg.contains("already been registered")
+        || error_msg.contains("already registered")
+        || error_msg.contains("email exists")
+      {
+        format!("该邮箱 {} 已被其他用户注册，请使用其他邮箱", email)
+      } else {
+        format!("发送邮箱验证码失败: {}", error_msg)
+      };
+      Err(AppError::InvalidRequest(friendly_msg))
+    }
+  }
+}
+
 /// Verify email OTP and bind email address
 ///
-/// This function handles the email binding flow:
-/// 1. User receives OTP sent by sendEmailVerificationCode (GoTrue /otp endpoint)
+/// This function handles the email binding flow using GoTrue's email_change flow:
+/// 1. User receives OTP sent by send_email_change_otp (GoTrue PUT /user endpoint)
+///    - GoTrue stores email_change = new_email in the current user's auth.users row
+///    - GoTrue sends OTP to the new email with type=email_change
 /// 2. User calls this function with the email and OTP
-/// 3. We verify with Gotrue using MagicLink type (email OTP)
-/// 4. Gotrue validates the OTP and confirms email ownership
-/// 5. We update the email in af_user table (CRITICAL: the original Flutter code
-///    only updated Gotrue but NOT af_user, causing email to appear unbound after relogin)
+/// 3. We verify with Gotrue using EmailChange type
+/// 4. Gotrue updates auth.users.email for the EXISTING user (not a new user)
+/// 5. We update the email in af_user table
+///
+/// CRITICAL FIX: Previous implementation used MagicLink type with /otp endpoint,
+/// which created a NEW user row in auth.users for the email instead of updating
+/// the existing phone user's email field.
 #[instrument(skip(state), err)]
 pub async fn verify_and_bind_email(
   user_uuid: &uuid::Uuid,
@@ -633,14 +753,16 @@ pub async fn verify_and_bind_email(
 
   event!(
     tracing::Level::INFO,
-    "User {} verifying email {} with OTP",
+    "User {} verifying email {} with OTP (email_change flow)",
     user_uuid,
     email
   );
 
-  // Verify OTP via Gotrue using MagicLink type (email OTP verification)
+  // Verify OTP via Gotrue using EmailChange type
+  // This ensures the email is updated on the EXISTING user's auth.users row
+  // (not confirming a new email user created by /otp endpoint)
   let verify_params = VerifyParams {
-    type_: gotrue::params::VerifyType::MagicLink,
+    type_: gotrue::params::VerifyType::EmailChange,
     email: email.to_string(),
     phone: String::new(),
     token: otp.to_string(),
