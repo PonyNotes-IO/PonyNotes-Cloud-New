@@ -265,15 +265,80 @@ impl ChatClient {
       }
 
       info!("[DeepSeek Bot] 联网搜索响应状态: {}", status);
+      // Bot API 第一个 SSE chunk 包含巨大的 references 数组（搜索引用），
+      // 会导致 Flutter SSE 客户端因 chunk 过大而无法解析，从而卡死。
+      // 通过转换函数剥离 references/metadata，只保留标准 OpenAI 格式内容。
       return Ok(Box::pin(
         response
           .bytes_stream()
-          .map(|result| result.map_err(|e| anyhow!("Stream error: {}", e))),
+          .map(|result| {
+            result
+              .map(|bytes| {
+                let converted = Self::convert_deepseek_bot_to_openai(&bytes);
+                if !converted.is_empty() {
+                  debug!("[DeepSeek Bot] 转换后chunk: {} bytes", converted.len());
+                }
+                converted
+              })
+              .map_err(|e| anyhow!("Stream error: {}", e))
+          }),
       ));
     }
 
     error!("[DeepSeek Bot] 重试 {} 次后仍失败：{}", max_retries, last_error);
     Err(anyhow!("{}", last_error))
+  }
+
+  /// 将 DeepSeek ARK Bot API 的 SSE 流格式转换为标准 OpenAI 格式
+  ///
+  /// Bot API 第一个 chunk 包含巨大的 references（搜索引用）字段，例如：
+  /// ```
+  /// data: {"choices":[{"delta":{"content":"今天是"}}],"references":[{...10个引用...}]}
+  /// ```
+  /// Flutter SSE 客户端无法处理如此巨大的单行 JSON，导致卡死。
+  /// 此函数剥离 references/metadata 字段，输出标准 OpenAI chunk 格式：
+  /// ```
+  /// data: {"choices":[{"delta":{"content":"今天是"}}]}
+  /// ```
+  fn convert_deepseek_bot_to_openai(bytes: &Bytes) -> Bytes {
+    let text = String::from_utf8_lossy(bytes);
+    let mut output = String::new();
+
+    for line in text.lines() {
+      let line = line.trim();
+
+      if line.is_empty() {
+        continue;
+      }
+
+      // 透传 [DONE] 信号
+      if line == "data: [DONE]" || line == "data:[DONE]" {
+        output.push_str("data: [DONE]\n\n");
+        continue;
+      }
+
+      if let Some(data_str) = line.strip_prefix("data:") {
+        let data_str = data_str.trim();
+
+        if let Ok(mut json_value) = serde_json::from_str::<serde_json::Value>(data_str) {
+          if let Some(obj) = json_value.as_object_mut() {
+            // 剥离 references（搜索引用，可能有数千字节）和 metadata
+            obj.remove("references");
+            obj.remove("metadata");
+          }
+          output.push_str(&format!("data: {}\n\n", json_value));
+        } else {
+          // 无法解析的行直接透传
+          output.push_str(&format!("{}\n", line));
+        }
+      }
+    }
+
+    if output.is_empty() {
+      Bytes::new()
+    } else {
+      Bytes::from(output)
+    }
   }
 
   /// 调用通义千问 API（支持多模态，qwen3-vl-plus 支持图片和文件分析）
