@@ -53,16 +53,40 @@ pub async fn join_workspace_invite_by_code(
   let invited_workspace_id = select_invited_workspace_id(pg_pool, invitation_code).await?;
   upsert_workspace_member_uid(pg_pool, &invited_workspace_id, uid, AFRole::Member).await?;
 
-  // 创建通知：工作空间所有者收到"新成员加入"的通知
-  let payload = serde_json::json!({
+  // 获取工作区名称和新成员名称
+  let workspace_name = database::workspace::select_workspace_name_from_workspace_id(pg_pool, &invited_workspace_id)
+    .await
+    .unwrap_or(None)
+    .unwrap_or_else(|| "工作区".to_string());
+  let joiner_name = database::user::select_name_from_uid(pg_pool, uid)
+    .await
+    .unwrap_or_else(|_| "新成员".to_string());
+
+  // 通知工作区所有者（A）：某人通过邀请链接加入
+  let payload_owner = serde_json::json!({
     "invite_code": invitation_code,
     "joined_uid": uid,
+    "joined_name": joiner_name,
     "joined_at": chrono::Utc::now().timestamp(),
-    "role": "Member",
-    "message": "新成员通过邀请链接加入了工作空间"
+    "workspace_name": workspace_name,
+    "role": "成员",
+    "title": "新成员加入工作区",
+    "message": format!("【{}】通过邀请链接加入了你的工作区「{}」", joiner_name, workspace_name),
   });
-  if let Err(err) = create_workspace_notification(pg_pool, &invited_workspace_id, "workspace_member_joined", &payload, None).await {
+  if let Err(err) = create_workspace_notification(pg_pool, &invited_workspace_id, "workspace_member_joined", &payload_owner, None).await {
     tracing::warn!("Failed to create workspace member joined notification: {:?}", err);
+  }
+
+  // 通知新成员（B）：加入成功确认
+  let payload_joiner = serde_json::json!({
+    "workspace_id": invited_workspace_id.to_string(),
+    "workspace_name": workspace_name,
+    "role": "成员",
+    "title": "成功加入工作区",
+    "message": format!("你已通过邀请链接成功加入工作区「{}」，角色：成员", workspace_name),
+  });
+  if let Err(err) = create_workspace_notification(pg_pool, &invited_workspace_id, "workspace_joined_via_code", &payload_joiner, Some(uid)).await {
+    tracing::warn!("Failed to create workspace joined via code notification to uid={}: {:?}", uid, err);
   }
 
   Ok(invited_workspace_id)

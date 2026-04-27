@@ -374,13 +374,28 @@ pub async fn accept_workspace_invite(
     .await?;
   txn.commit().await?;
 
-  // 创建系统通知：新成员接受邀请加入工作空间
+  // 获取新成员名称和工作区名称，用于构建更友好的通知消息
+  let invitee_name = database::user::select_name_from_uid(pg_pool, invited_uid)
+    .await
+    .unwrap_or_else(|_| "新成员".to_string());
+  let workspace_name =
+    database::workspace::select_workspace_name_from_workspace_id(pg_pool, &inv.workspace_id)
+      .await
+      .unwrap_or(None)
+      .unwrap_or_else(|| "工作区".to_string());
+
+  // 通知邀请者（A）：被邀请人已接受邀请
   let notification_payload = json!({
-    "title": "新成员加入",
-    "message": format!("用户已接受邀请并加入工作空间"),
+    "title": "邀请已被接受",
+    "message": format!(
+      "【{}】已接受你的邀请，以「{}」身份加入了工作区「{}」",
+      invitee_name, role_str, workspace_name
+    ),
     "invitee_uid": invited_uid,
+    "invitee_name": invitee_name,
     "inviter_uid": inv.inviter_uid,
     "role": role_str,
+    "workspace_name": workspace_name,
     "accepted_at": chrono::Utc::now().timestamp(),
   });
   if let Err(err) = create_workspace_notification(
@@ -388,7 +403,7 @@ pub async fn accept_workspace_invite(
     &inv.workspace_id,
     "workspace_invitation_accepted",
     &notification_payload,
-    None, // 广播给所有工作空间成员
+    Some(inv.inviter_uid), // 只通知邀请者（A）
   )
   .await
   {
@@ -651,24 +666,57 @@ pub async fn invite_workspace_members(
     .await
     .context("Commit transaction to invite workspace members")?;
 
-  // 事务提交后发送邀请通知，此时成员记录已入库，不会有竞态问题
-  for (invitee_uid, role_name) in pending_invite_notifications {
-    let payload = json!({
+  // 事务提交后发送通知，此时成员记录已入库，不会有竞态问题
+  let invited_count = pending_invite_notifications.len();
+  for (invitee_uid, role_name) in &pending_invite_notifications {
+    // 通知被邀请者（B）：收到邀请
+    let payload_b = json!({
       "workspace_id": workspace_id.to_string(),
       "inviter_name": inviter_name,
       "workspace_name": workspace_name,
       "role": role_name,
-      "title": "您收到了工作区邀请",
-      "message": format!("用户{}邀请您加入{}的工作区：{}，您的角色是：{}", inviter_name, inviter_name, workspace_name, role_name),
+      "title": "你收到了工作区邀请",
+      "message": format!("【{}】邀请你加入工作区「{}」，你的角色是：{}", inviter_name, workspace_name, role_name),
     });
     if let Err(err) = create_workspace_notification(
       pg_pool,
       workspace_id,
       "workspace_member_invite",
-      &payload,
-      Some(invitee_uid),
+      &payload_b,
+      Some(*invitee_uid),
     ).await {
       tracing::warn!("Failed to send invite notification to uid={}: {:?}", invitee_uid, err);
+    }
+  }
+
+  // 通知邀请者（A）：邀请发送成功确认
+  if invited_count > 0 {
+    let invited_names: Vec<String> = {
+      let mut names = Vec::new();
+      for (invitee_uid, _) in &pending_invite_notifications {
+        let name = database::user::select_name_from_uid(pg_pool, *invitee_uid)
+          .await
+          .unwrap_or_else(|_| format!("用户{}", invitee_uid));
+        names.push(format!("【{}】", name));
+      }
+      names
+    };
+    let names_str = invited_names.join("、");
+    let payload_a = json!({
+      "workspace_id": workspace_id.to_string(),
+      "workspace_name": workspace_name,
+      "invited_count": invited_count,
+      "title": "工作区邀请已发送",
+      "message": format!("你已成功邀请 {} 加入工作区「{}」", names_str, workspace_name),
+    });
+    if let Err(err) = create_workspace_notification(
+      pg_pool,
+      workspace_id,
+      "workspace_invite_sent",
+      &payload_a,
+      Some(inviter_uid),
+    ).await {
+      tracing::warn!("Failed to send invite sent confirmation to inviter uid={}: {:?}", inviter_uid, err);
     }
   }
 

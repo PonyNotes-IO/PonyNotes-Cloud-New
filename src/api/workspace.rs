@@ -2468,14 +2468,22 @@ async fn receive_published_collab_handler(
   .await
   .map_err(|e| AppResponseError::new(ErrorCode::Internal, e.to_string()))?;
 
-  // 直接从 af_published_collab 表查询发布者 uid（兼容手机号和邮箱注册用户）
-  let published_by_uid = sqlx::query_scalar!(
-    r#"SELECT published_by FROM af_published_collab WHERE view_id = $1"#,
-    params.published_view_id,
+  // 直接从 af_published_collab 表查询发布者 uid 和工作区 id
+  #[derive(sqlx::FromRow)]
+  struct PublisherInfo {
+    published_by: i64,
+    workspace_id: Uuid,
+    publish_name: String,
+  }
+  let publisher_info = sqlx::query_as::<_, PublisherInfo>(
+    r#"SELECT published_by, workspace_id, publish_name FROM af_published_collab WHERE view_id = $1"#,
   )
+  .bind(params.published_view_id)
   .fetch_one(&state.pg_pool)
   .await
-  .map_err(|e| AppResponseError::new(ErrorCode::Internal, format!("Failed to get publisher uid: {}", e)))?;
+  .map_err(|e| AppResponseError::new(ErrorCode::Internal, format!("Failed to get publisher info: {}", e)))?;
+
+  let published_by_uid = publisher_info.published_by;
 
   // 记录接收关系
   insert_received_published_collab(
@@ -2490,6 +2498,39 @@ async fn receive_published_collab_handler(
   )
   .await
   .map_err(|e| AppResponseError::new(ErrorCode::Internal, e.to_string()))?;
+
+  // 通知发布者（A）：有人接收了你发布的笔记
+  if uid != published_by_uid {
+    let receiver_name = database::user::select_name_from_uid(&state.pg_pool, uid)
+      .await
+      .unwrap_or_else(|_| "某用户".to_string());
+    // 尝试从工作区 Folder 获取视图真实名称，失败则降级使用 publish_name
+    let note_name = state.ws_server
+      .get_folder(publisher_info.workspace_id)
+      .await
+      .ok()
+      .and_then(|folder| folder.get_view(&params.published_view_id.to_string(), published_by_uid))
+      .map(|v| v.name.clone())
+      .unwrap_or_else(|| publisher_info.publish_name.clone());
+
+    let payload = serde_json::json!({
+      "view_id": params.published_view_id.to_string(),
+      "view_name": note_name,
+      "received_by": uid,
+      "received_by_name": receiver_name,
+      "title": "有人接收了你发布的笔记",
+      "message": format!("【{}】接收了你发布的笔记「{}」", receiver_name, note_name),
+    });
+    if let Err(err) = crate::biz::notification::ops::create_workspace_notification(
+      &state.pg_pool,
+      &publisher_info.workspace_id,
+      "published_collab_received",
+      &payload,
+      Some(published_by_uid),
+    ).await {
+      tracing::warn!("Failed to send published collab received notification to uid={}: {:?}", published_by_uid, err);
+    }
+  }
 
   Ok(Json(AppResponse::Ok().with_data(ReceivePublishedCollabResponse {
     view_id: root_view_id,
@@ -3796,13 +3837,20 @@ async fn add_collab_member_handler(
       let opener_name = database::user::select_name_from_uid(&state.pg_pool, uid)
         .await
         .unwrap_or_else(|_| "用户".to_string());
-      let note_name = &invite.name;
+      let note_name = invite.name.clone();
+      let perm_name_str = match invite.permission_id {
+        2 => "评论",
+        3 => "编辑",
+        4 => "完全访问",
+        _ => "查看",
+      };
       let link_open_payload = serde_json::json!({
         "view_id": view_id.to_string(),
         "view_name": note_name,
         "opened_by": uid,
+        "opened_by_name": opener_name,
         "title": "有人打开了你的分享笔记",
-        "message": format!("{}用户刚刚打开了您分享给他的笔记「{}」", opener_name, note_name),
+        "message": format!("【{}】通过链接打开了你分享的笔记「{}」", opener_name, note_name),
       });
       if let Err(err) = crate::biz::notification::ops::create_workspace_notification(
         &state.pg_pool,
@@ -3812,6 +3860,29 @@ async fn add_collab_member_handler(
         Some(invite.send_uid),
       ).await {
         tracing::warn!("Failed to send share link opened notification: {:?}", err);
+      }
+
+      // 通知接收者（B）：成功获取分享笔记的访问权限
+      let sender_name = database::user::select_name_from_uid(&state.pg_pool, invite.send_uid)
+        .await
+        .unwrap_or_else(|_| "用户".to_string());
+      let link_recv_payload = serde_json::json!({
+        "view_id": view_id.to_string(),
+        "view_name": note_name,
+        "shared_by": invite.send_uid,
+        "shared_by_name": sender_name,
+        "permission": perm_name_str,
+        "title": "已获取分享笔记",
+        "message": format!("你已获取【{}】分享的笔记「{}」访问权限，赋予「{}」权限", sender_name, note_name, perm_name_str),
+      });
+      if let Err(err) = crate::biz::notification::ops::create_workspace_notification(
+        &state.pg_pool,
+        &workspace_id,
+        "collab_share_link_self_received",
+        &link_recv_payload,
+        Some(uid),
+      ).await {
+        tracing::warn!("Failed to send share link self received notification to uid={}: {:?}", uid, err);
       }
 
       return Ok(Json(AppResponse::Ok()));

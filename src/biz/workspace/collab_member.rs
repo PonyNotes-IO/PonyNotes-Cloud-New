@@ -49,19 +49,44 @@ pub async fn add_collab_member(
     .await?;
   tx.commit().await?;
 
-  // 通知被分享的用户
+  // 权限名称
+  let perm_name = match permission_id {
+    2 => "评论",
+    3 => "编辑",
+    4 => "完全访问",
+    _ => "查看",
+  };
+
+  // 通知被分享的用户（B）
   let sender_name = database::user::select_name_from_uid(pg_pool, send_uid)
     .await
     .unwrap_or_else(|_| "用户".to_string());
-  let payload = serde_json::json!({
+  let payload_b = serde_json::json!({
     "view_id": view_id.to_string(),
     "view_name": view_name,
     "shared_by": send_uid,
-    "title": "有文档被共享给你",
-    "message": format!("【{}】将文档「{}」共享给了你，请及时查看", sender_name, view_name),
+    "permission": perm_name,
+    "title": "收到一篇分享笔记",
+    "message": format!("【{}】将笔记「{}」分享给了你，赋予「{}」权限，请及时查看", sender_name, view_name, perm_name),
   });
-  if let Err(err) = create_workspace_notification(pg_pool, workspace_id, "collab_shared", &payload, Some(received_uid)).await {
+  if let Err(err) = create_workspace_notification(pg_pool, workspace_id, "collab_shared", &payload_b, Some(received_uid)).await {
     tracing::warn!("Failed to send collab share notification to uid={}: {:?}", received_uid, err);
+  }
+
+  // 通知分享者（A）：分享成功确认
+  let receiver_name = database::user::select_name_from_uid(pg_pool, received_uid)
+    .await
+    .unwrap_or_else(|_| "对方用户".to_string());
+  let payload_a = serde_json::json!({
+    "view_id": view_id.to_string(),
+    "view_name": view_name,
+    "shared_to": received_uid,
+    "permission": perm_name,
+    "title": "笔记分享成功",
+    "message": format!("你已将笔记「{}」分享给【{}】，已赋予「{}」权限", view_name, receiver_name, perm_name),
+  });
+  if let Err(err) = create_workspace_notification(pg_pool, workspace_id, "collab_share_sent", &payload_a, Some(send_uid)).await {
+    tracing::warn!("Failed to send collab share sent notification to uid={}: {:?}", send_uid, err);
   }
 
   Ok(())
