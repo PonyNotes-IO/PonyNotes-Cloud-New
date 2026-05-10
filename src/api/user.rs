@@ -1,6 +1,7 @@
 use crate::api::util::client_version_from_headers;
 use crate::biz::authentication::jwt::{Authorization, UserUuid};
 use crate::biz::user::image_asset::{get_user_image_asset, upload_user_image_asset};
+use crate::biz::user::otp_rate_limit::{check_email_otp_rate_limit, check_phone_otp_rate_limit};
 use crate::biz::user::user_delete::delete_user;
 use crate::biz::user::user_info::{get_profile, get_user_workspace_info, update_user};
 use crate::biz::user::user_search::{get_uid_by_email_or_phone, search_users_by_email};
@@ -245,6 +246,8 @@ async fn send_phone_otp_handler(
   let params = payload.into_inner();
   let user_uuid = auth.uuid()?;
 
+  check_phone_otp_rate_limit(&params.phone, &mut state.redis_connection_manager.clone()).await?;
+
   event!(
     tracing::Level::INFO,
     "Logged-in user {} binding/changing to phone {}",
@@ -264,6 +267,8 @@ async fn send_phone_reauth_otp_handler(
 ) -> Result<JsonAppResponse<()>> {
   let params = payload.into_inner();
   let _user_uuid = auth.uuid()?;
+
+  check_phone_otp_rate_limit(&params.phone, &mut state.redis_connection_manager.clone()).await?;
 
   event!(
     tracing::Level::INFO,
@@ -287,6 +292,8 @@ async fn send_email_change_otp_handler(
 ) -> Result<JsonAppResponse<()>> {
   let params = payload.into_inner();
   let _user_uuid = auth.uuid()?;
+
+  check_email_otp_rate_limit(&params.email, &mut state.redis_connection_manager.clone()).await?;
 
   event!(
     tracing::Level::INFO,

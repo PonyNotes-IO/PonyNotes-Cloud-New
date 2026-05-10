@@ -217,6 +217,9 @@ pub enum AppError {
 
   #[error("{0}")]
   RetryLater(anyhow::Error),
+
+  #[error("{0}")]
+  TooManyRequests(String),
 }
 
 impl AppError {
@@ -308,6 +311,7 @@ impl AppError {
       AppError::PlanLimitExceeded(_) => ErrorCode::PlanLimitExceeded,
       AppError::RecordDeleted(_) => ErrorCode::RecordDeleted,
       AppError::RetryLater(_) => ErrorCode::RetryLater,
+      AppError::TooManyRequests(_) => ErrorCode::TooManyRequests,
     }
   }
 }
@@ -492,6 +496,7 @@ pub enum ErrorCode {
   FreePlanGuestLimitExceeded = 1070,
   PaidPlanGuestLimitExceeded = 1071,
   PlanLimitExceeded = 1072,
+  TooManyRequests = 1073,
 }
 
 impl ErrorCode {

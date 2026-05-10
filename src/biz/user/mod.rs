@@ -1,4 +1,5 @@
 pub mod image_asset;
+pub mod otp_rate_limit;
 pub mod user_delete;
 pub mod user_info;
 pub mod user_init;
