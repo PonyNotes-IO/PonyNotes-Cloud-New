@@ -120,12 +120,12 @@ pub async fn create_user<'a, E: Executor<'a, Database = Postgres>>(
   phone: Option<&str>,
   name: &str,
 ) -> Result<Uuid, AppError> {
-  let name = {
-    if name.is_empty() {
-      email.unwrap_or(phone.unwrap_or(""))
-    } else {
-      name
-    }
+  let name_owned;
+  let name: &str = if name.is_empty() {
+    name_owned = generate_random_nickname(user_uuid);
+    &name_owned
+  } else {
+    name
   };
 
   let row = sqlx::query!(
@@ -155,6 +155,18 @@ pub async fn create_user<'a, E: Executor<'a, Database = Postgres>>(
   .await?;
 
   Ok(row.workspace_id)
+}
+
+/// 用户注册时没有提供名称，生成随机昵称，格式：小马用户XXXXXX（6位数字）
+fn generate_random_nickname(user_uuid: &Uuid) -> String {
+  let digits: String = user_uuid
+    .to_string()
+    .replace('-', "")
+    .chars()
+    .filter(|c| c.is_ascii_digit())
+    .take(6)
+    .collect();
+  format!("小马用户{}", digits)
 }
 
 #[inline]
