@@ -20,6 +20,7 @@ pub struct SharedUser {
   pub role: AFRole,
   pub avatar_url: Option<String>,
   pub pending_invitation: bool,
+  pub user_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
