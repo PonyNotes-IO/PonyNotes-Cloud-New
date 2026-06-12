@@ -245,11 +245,11 @@ fn acquire_mut_txn<'a>(
 #[cfg(feature = "modern_collab_api")]
 fn acquire_mut_txn<'a>(
   collab: &'a mut Collab,
-  _origin: &CollabOrigin,
+  origin: &CollabOrigin,
 ) -> Result<TransactionMut<'a>, RTProtocolError> {
   collab
     .get_awareness()
     .doc()
-    .try_transact_mut()
+    .try_transact_mut_with(origin.clone())
     .map_err(|err| RTProtocolError::YrsTransaction(format!("sync step2 transaction acquire: {}", err)))
 }

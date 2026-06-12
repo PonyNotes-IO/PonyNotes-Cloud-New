@@ -209,6 +209,7 @@ async fn shared_view_access_details_handler(
         role: AFRole::Member,
         avatar_url: m.avatar_url,
         pending_invitation: false,
+        user_id: m.uuid.map(|u| u.to_string()),
       }
     })
     .collect();
