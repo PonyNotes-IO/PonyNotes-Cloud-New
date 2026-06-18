@@ -1,7 +1,8 @@
 use super::db::{Db, DbHolder};
 use super::{ChangedCollab, ObjectId, WorkspaceId};
 use crate::entity::CollabType;
-use crate::sync_trace;
+use crate::{sync_info, sync_trace, sync_warn};
+use std::time::Duration;
 use crate::v2::actor::{WorkspaceAction, WorkspaceControllerActor, WsConn};
 use crate::v2::conn_retry::{ReconnectTarget, ReconnectionManager};
 use app_error::ErrorCode;
@@ -113,6 +114,74 @@ impl WorkspaceController {
 
   pub async fn close(&mut self) -> anyhow::Result<()> {
     self.disconnect().await
+  }
+
+  /// Prepares the controller for workspace switch.
+  /// This method should be called before switching to a different workspace.
+  /// It ensures proper cleanup of resources and disconnects from the current workspace.
+  pub async fn prepare_for_workspace_switch(&mut self) -> anyhow::Result<()> {
+    sync_info!(workspace_id = %self.workspace_id(), "preparing for workspace switch");
+    
+    if self.is_connected() {
+      match self.disconnect().await {
+        Ok(_) => sync_info!(workspace_id = %self.workspace_id(), "disconnected successfully before workspace switch"),
+        Err(e) => sync_warn!(workspace_id = %self.workspace_id(), "error disconnecting before workspace switch: {}", e),
+      }
+    }
+    
+    Ok(())
+  }
+
+  /// Called when the app enters the foreground.
+  /// This method triggers a connection refresh to ensure the network connection
+  /// is still valid after the app was in the background for an extended period.
+  /// 
+  /// When an app is in the background for a long time, the operating system may
+  /// terminate idle TCP connections to save power. This method checks the current
+  /// connection status and triggers reconnection if necessary.
+  pub fn on_app_foreground(&self) {
+    self.connection_manager.check_and_refresh_connection();
+  }
+
+  /// Waits for the connection to be established.
+  /// Returns Ok(()) when connected, Err if timeout or non-retriable disconnect.
+  pub async fn wait_for_connection(&self, timeout_duration: Duration) -> anyhow::Result<()> {
+    let mut status_rx = self.actor.status_channel().clone();
+    
+    if self.is_connected() {
+      return Ok(());
+    }
+
+    tokio::select! {
+      _ = tokio::time::sleep(timeout_duration) => {
+        Err(anyhow::anyhow!("wait_for_connection timeout after {:?}", timeout_duration))
+      },
+      result = status_rx.changed() => {
+        match result {
+          Ok(_) => {
+            if self.is_connected() {
+              Ok(())
+            } else {
+              match &*status_rx.borrow() {
+                ConnectionStatus::Disconnected { reason } => {
+                  if let Some(reason) = reason {
+                    if !reason.retriable() {
+                      Err(anyhow::anyhow!("connection failed with non-retriable reason: {}", reason))
+                    } else {
+                      Err(anyhow::anyhow!("still disconnected: {}", reason))
+                    }
+                  } else {
+                    Err(anyhow::anyhow!("connection disconnected without reason"))
+                  }
+                },
+                _ => Err(anyhow::anyhow!("unexpected connection status"))
+              }
+            }
+          },
+          Err(e) => Err(anyhow::anyhow!("failed to wait for connection: {}", e))
+        }
+      }
+    }
   }
 
   pub fn client_id(&self) -> ClientID {

@@ -60,6 +60,46 @@ impl ReconnectionManager {
     }
   }
 
+  /// Checks and refreshes the connection when the app comes to foreground.
+  /// This method is called when the app transitions from background to foreground.
+  /// It verifies if the current connection is still valid and triggers reconnection if needed.
+  pub fn check_and_refresh_connection(&self) {
+    sync_info!("app entering foreground, checking connection status");
+
+    let token = self.access_token.load().as_ref().clone();
+    if token.is_empty() {
+      sync_info!("no access token → skip connection refresh");
+      return;
+    }
+
+    let manager = self.clone();
+    let weak_target = self.target.clone();
+    tokio::spawn(async move {
+      if let Some(target) = weak_target.upgrade() {
+        match &*target.status_channel().borrow() {
+          ConnectionStatus::Connected { .. } => {
+            sync_info!("connection is connected, triggering refresh check");
+            manager.trigger_reconnect("app foreground");
+          },
+          ConnectionStatus::Connecting { .. } => {
+            sync_trace!("already connecting, waiting for connection to complete");
+          },
+          ConnectionStatus::Disconnected { reason } => {
+            if reason.as_ref().map(|r| r.retriable()).unwrap_or(true) {
+              sync_info!(?reason, "disconnected and retriable, triggering reconnect");
+              manager.trigger_reconnect("app foreground - disconnected");
+            } else {
+              sync_info!(?reason, "disconnected but non-retriable, skip reconnect");
+            }
+          },
+          ConnectionStatus::StartReconnect => {
+            sync_trace!("already in start reconnect state");
+          },
+        }
+      }
+    });
+  }
+
   /// Construct using the default retry config.
   pub fn new_for_target(target: Arc<dyn ReconnectTarget + Send + Sync>) -> Self {
     Self::with_config_for_target(target, RetryConfig::default())
@@ -1324,7 +1364,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_retriable_vs_non_retriable_disconnect_reasons() {
+async fn test_retriable_vs_non_retriable_disconnect_reasons() {
     let test_cases = vec![
       (DisconnectedReason::Unexpected("network error".into()), true),
       (DisconnectedReason::ResetWithoutClosingHandshake, true),
@@ -1381,5 +1421,162 @@ mod tests {
         );
       }
     }
+  }
+
+  // ============= APP FOREGROUND REFRESH TESTS =============
+
+  #[tokio::test]
+  async fn test_check_and_refresh_connection_when_disconnected_retriable() {
+    let (fake_target, call_count) = FakeTarget::new(
+      ConnectionStatus::Disconnected {
+        reason: Some(DisconnectedReason::Unexpected("network error".into())),
+      },
+      vec![Ok(())],
+    );
+    let target: Arc<dyn ReconnectTarget + Send + Sync> = Arc::new(fake_target);
+    let manager = ReconnectionManager::with_config_for_target(
+      target.clone(),
+      RetryConfig {
+        initial_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(1),
+        max_attempts: 1,
+      },
+    );
+    manager.set_access_token("test_token".into());
+
+    manager.check_and_refresh_connection();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+  }
+
+  #[tokio::test]
+  async fn test_check_and_refresh_connection_when_disconnected_non_retriable() {
+    let (fake_target, call_count) = FakeTarget::new(
+      ConnectionStatus::Disconnected {
+        reason: Some(DisconnectedReason::Unauthorized("invalid token".into())),
+      },
+      vec![Ok(())],
+    );
+    let target: Arc<dyn ReconnectTarget + Send + Sync> = Arc::new(fake_target);
+    let manager = ReconnectionManager::with_config_for_target(
+      target.clone(),
+      RetryConfig {
+        initial_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(1),
+        max_attempts: 1,
+      },
+    );
+    manager.set_access_token("test_token".into());
+
+    manager.check_and_refresh_connection();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert_eq!(call_count.load(Ordering::SeqCst), 0);
+  }
+
+  #[tokio::test]
+  async fn test_check_and_refresh_connection_without_token() {
+    let (fake_target, call_count) = FakeTarget::new(
+      ConnectionStatus::Disconnected { reason: None },
+      vec![Ok(())],
+    );
+    let target: Arc<dyn ReconnectTarget + Send + Sync> = Arc::new(fake_target);
+    let manager = ReconnectionManager::with_config_for_target(
+      target.clone(),
+      RetryConfig {
+        initial_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(1),
+        max_attempts: 1,
+      },
+    );
+
+    manager.check_and_refresh_connection();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert_eq!(call_count.load(Ordering::SeqCst), 0);
+  }
+
+  #[tokio::test]
+  async fn test_check_and_refresh_connection_when_connecting() {
+    let (fake_target, call_count) = FakeTarget::new(
+      ConnectionStatus::Connecting {
+        cancel: CancellationToken::new(),
+      },
+      vec![Ok(())],
+    );
+    let target: Arc<dyn ReconnectTarget + Send + Sync> = Arc::new(fake_target);
+    let manager = ReconnectionManager::with_config_for_target(
+      target.clone(),
+      RetryConfig {
+        initial_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(1),
+        max_attempts: 1,
+      },
+    );
+    manager.set_access_token("test_token".into());
+
+    manager.check_and_refresh_connection();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert_eq!(call_count.load(Ordering::SeqCst), 0);
+  }
+
+  #[tokio::test]
+  async fn test_check_and_refresh_connection_when_start_reconnect() {
+    let (fake_target, call_count) = FakeTarget::new(
+      ConnectionStatus::StartReconnect,
+      vec![Ok(())],
+    );
+    let target: Arc<dyn ReconnectTarget + Send + Sync> = Arc::new(fake_target);
+    let manager = ReconnectionManager::with_config_for_target(
+      target.clone(),
+      RetryConfig {
+        initial_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(1),
+        max_attempts: 1,
+      },
+    );
+    manager.set_access_token("test_token".into());
+
+    manager.check_and_refresh_connection();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert_eq!(call_count.load(Ordering::SeqCst), 0);
+  }
+
+  #[tokio::test]
+  async fn test_check_and_refresh_connection_when_reconnect_in_progress() {
+    let (fake_target, call_count) = FakeTarget::new(
+      ConnectionStatus::Disconnected { reason: None },
+      vec![Err(AppResponseError {
+        code: ErrorCode::NetworkError,
+        message: "delay".into(),
+      })],
+    );
+    let target: Arc<dyn ReconnectTarget + Send + Sync> = Arc::new(fake_target);
+    let manager = Arc::new(ReconnectionManager::with_config_for_target(
+      target.clone(),
+      RetryConfig {
+        initial_delay: Duration::from_millis(50),
+        max_delay: Duration::from_millis(50),
+        max_attempts: 2,
+      },
+    ));
+    manager.set_access_token("test_token".into());
+
+    manager.trigger_reconnect("first");
+    assert!(manager.in_progress.load(Ordering::SeqCst));
+
+    manager.check_and_refresh_connection();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
   }
 }

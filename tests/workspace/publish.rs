@@ -488,6 +488,7 @@ async fn test_publish_comments() {
       email: None,
       phone: None,
       metadata: None,
+      email_otp: None,
     })
     .await
     .unwrap();
@@ -544,6 +545,7 @@ async fn test_publish_comments() {
       email: None,
       phone: None,
       metadata: None,
+      email_otp: None,
     })
     .await
     .unwrap();
@@ -614,6 +616,7 @@ async fn test_publish_comments() {
       email: None,
       phone: None,
       metadata: None,
+      email_otp: None,
     })
     .await
     .unwrap();
