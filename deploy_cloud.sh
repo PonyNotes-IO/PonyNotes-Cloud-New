@@ -14,7 +14,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 PROJECT_DIR="/Users/caokun/Projects/github.com/PonyNotes-IO/PonyNotes-Cloud-New"
-SERVER_IP="8.152.101.166"
+SERVER_IP="101.201.244.231"
 SERVER_USER="root"
 SERVER_DOCKER_DIR="/root/docker-compose"
 IMAGE_NAME="appflowyinc/appflowy_cloud:latest"
