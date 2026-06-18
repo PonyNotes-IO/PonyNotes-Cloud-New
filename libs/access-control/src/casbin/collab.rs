@@ -122,7 +122,13 @@ impl CollabAccessControl for CollabAccessControlImpl {
     oid: &Uuid,
     level: AFAccessLevel,
   ) -> Result<(), AppError> {
-    // TODO: allow non workspace member to read a collab.
+    // 先删除该用户对该文档的旧策略，防止权限降级时旧的高级别策略残留
+    self.access_control.remove_policy(
+      crate::entity::SubjectType::User(*uid),
+      ObjectType::Collab(oid.to_string()),
+    ).await?;
+
+    // 再添加新策略
     for act in level.policy_acts(){
       let policy = vec![uid.to_string(), ObjectType::Collab(oid.to_string()).policy_object(), act.clone()];
       self.access_control.add_policy(policy).await?;
