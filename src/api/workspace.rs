@@ -814,11 +814,19 @@ async fn get_collab_members_handler(
 ) -> Result<JsonAppResponse<Vec<database::pg_row::AFExplicitCollabMemberRow>>> {
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
   let (workspace_id, object_id) = path.into_inner();
-  // Require requester to be at least a workspace member
-  state
+  let has_workspace_access = state
     .workspace_access_control
     .enforce_role_weak(&uid, &workspace_id, AFRole::Guest)
-    .await?;
+    .await
+    .is_ok();
+  let has_collab_access = state
+    .collab_access_control
+    .enforce_action(&workspace_id, &uid, &object_id, Action::Read)
+    .await
+    .is_ok();
+  if !has_workspace_access && !has_collab_access {
+    return Err(AppError::NotEnoughPermissions.into());
+  }
 
   let members = workspace::ops::get_collab_members(&state.pg_pool, &object_id).await?;
   Ok(AppResponse::Ok().with_data(members).into())

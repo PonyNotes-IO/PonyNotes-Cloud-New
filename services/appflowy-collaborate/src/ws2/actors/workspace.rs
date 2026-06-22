@@ -176,12 +176,12 @@ impl Workspace {
           return;
         }
 
-        // Check if the user has permission to write to the collab
-        if sender
+        // Check if the user has permission to write to the collab.
+        let can_write = sender
           .can_write_collab(&store, &msg.object_id)
           .await
-          .is_err()
-        {
+          .unwrap_or(false);
+        if !can_write {
           tracing::trace!(
             "user {} lack of permission to write to collab {}",
             sender.uid,
@@ -246,11 +246,11 @@ impl Workspace {
         since
       );
       for collab in new_collabs {
-        if session_handle
+        let can_read = session_handle
           .can_read_collab(&store, &collab.object_id)
           .await
-          .is_err()
-        {
+          .unwrap_or(false);
+        if !can_read {
           tracing::trace!(
             "user {} lack of permission. skip publish new collab {}",
             session_handle.uid,
@@ -296,11 +296,11 @@ impl Workspace {
         update.update.len()
       );
 
-      if session_handle
+      let can_read = session_handle
         .can_read_collab(&store, &update.object_id)
         .await
-        .is_err()
-      {
+        .unwrap_or(false);
+      if !can_read {
         tracing::trace!(
           "user {} lack of permission. skip publish collab {}, client_id: {}",
           session_handle.uid,
@@ -434,7 +434,11 @@ impl StreamHandler<anyhow::Result<UpdateStreamMessage>> for Workspace {
           let store = Arc::clone(&store);
           let update = update.clone();
           async move {
-            if session.can_read_collab(&store, &object_id).await.is_ok() {
+            if session
+              .can_read_collab(&store, &object_id)
+              .await
+              .unwrap_or(false)
+            {
               session.conn.do_send(WsOutput {
                 message: ServerMessage::Update {
                   object_id,
@@ -747,25 +751,6 @@ pub enum PermissionType {
   Write,
 }
 
-impl PermissionType {
-  pub fn can_read(&self) -> bool {
-    matches!(self, PermissionType::Read | PermissionType::Write)
-  }
-  pub fn can_write(&self) -> bool {
-    matches!(self, PermissionType::Write)
-  }
-
-  /// Check if this permission is higher than another permission
-  pub fn is_higher_than(&self, other: &PermissionType) -> bool {
-    self > other
-  }
-
-  /// Check if this permission is at least as high as another permission
-  pub fn is_at_least(&self, other: &PermissionType) -> bool {
-    self >= other
-  }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BulkPermissionUpdate {
   pub updates: Vec<PermissionUpdate>,
@@ -822,13 +807,9 @@ impl WorkspaceSessionHandle {
     object_id: &ObjectId,
   ) -> Result<bool, AppError> {
     let now = Instant::now();
-    if let Some((permission, cached_at)) = self.permission_cache.read().await.get(object_id) {
-      if now.duration_since(*cached_at) < self.cache_ttl {
-        return Ok(permission.can_write());
-      }
-    }
 
-    // Cache miss or expired, check permission and update cache
+    // Write permission is security-sensitive and can be downgraded while a
+    // document is open, so always re-check the current access-control policy.
     let has_permission = store
       .enforce_write_collab(&self.workspace_id, &self.uid, object_id)
       .await
@@ -856,29 +837,24 @@ impl WorkspaceSessionHandle {
     object_id: &ObjectId,
   ) -> Result<bool, AppError> {
     let now = Instant::now();
-    if let Some((permission, cached_at)) = self.permission_cache.read().await.get(object_id) {
-      if now.duration_since(*cached_at) < self.cache_ttl {
-        return Ok(permission.can_read());
-      }
-    }
 
+    // Read permission can also be revoked while a document is open, so keep the
+    // cache informational and re-check the current policy before publishing.
     let has_permission = store
       .enforce_read_collab(&self.workspace_id, &self.uid, object_id)
       .await
       .is_ok();
 
-    let mut cache = self.permission_cache.write().await;
-    if has_permission {
-      // Check if there's already a higher permission cached
-      if let Some((existing_permission, _)) = cache.get(object_id) {
-        if existing_permission.is_higher_than(&PermissionType::Read) {
-          return Ok(true);
-        }
-      }
-      cache.insert(*object_id, (PermissionType::Read, now));
+    let permission_type = if has_permission {
+      PermissionType::Read
     } else {
-      cache.insert(*object_id, (PermissionType::NoAccess, now));
-    }
+      PermissionType::NoAccess
+    };
+    self
+      .permission_cache
+      .write()
+      .await
+      .insert(*object_id, (permission_type, now));
 
     Ok(has_permission)
   }
@@ -888,20 +864,7 @@ impl WorkspaceSessionHandle {
     let mut cache = self.permission_cache.write().await;
     let now = Instant::now();
     for update in updates {
-      // Always allow updates from NoAccess, but prevent downgrades from higher permissions
-      if let Some((existing_permission, _)) = cache.get(&update.object_id) {
-        // Allow update if:
-        // 1. Current permission is NoAccess (always allow upgrade from no access)
-        // 2. New permission is at least as high as existing permission
-        if *existing_permission == PermissionType::NoAccess
-          || update.permission_type.is_at_least(existing_permission)
-        {
-          cache.insert(update.object_id, (update.permission_type, now));
-        }
-      } else {
-        // No existing permission, insert the new one
-        cache.insert(update.object_id, (update.permission_type, now));
-      }
+      cache.insert(update.object_id, (update.permission_type, now));
     }
   }
 
