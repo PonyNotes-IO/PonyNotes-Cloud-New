@@ -873,7 +873,8 @@ async fn get_current_collab_permission_handler(
   .bind(&oid)
   .bind(uid)
   .fetch_optional(&state.pg_pool)
-  .await?
+  .await
+  .map_err(AppError::from)?
   {
     let access_level = AFAccessLevel::from(permission.access_level);
     return Ok(
@@ -899,7 +900,8 @@ async fn get_current_collab_permission_handler(
   .bind(&oid)
   .bind(workspace_id)
   .fetch_one(&state.pg_pool)
-  .await?;
+  .await
+  .map_err(AppError::from)?;
 
   if collab_in_workspace {
     if let Some(member) =
