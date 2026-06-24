@@ -683,7 +683,6 @@ impl Handler<UpdateUserPermissions> for Workspace {
   type Result = ();
 
   fn handle(&mut self, msg: UpdateUserPermissions, _: &mut Self::Context) -> Self::Result {
-    // TODO(nathan): send message when documents permission changed
     // Find sessions for the specific user
     let user_sessions: Vec<WorkspaceSessionHandle> = self
       .sessions_by_client_id
@@ -692,14 +691,41 @@ impl Handler<UpdateUserPermissions> for Workspace {
       .cloned()
       .collect();
 
-    // Apply permission updates to user's sessions
-    if !user_sessions.is_empty() {
-      tokio::spawn(async move {
-        for session in user_sessions {
-          session.apply_permission_updates(msg.updates.clone()).await;
-        }
-      });
+    if user_sessions.is_empty() {
+      return;
     }
+
+    // Collect objects whose access was fully revoked so we can immediately tell
+    // the affected client over the document WS to drop the now-inaccessible
+    // collab. AccessChanges makes the client delete the local collab, which is
+    // only correct for a full revocation. Permission *downgrades* (e.g.
+    // write -> read) are intentionally NOT pushed here; those are reflected on
+    // the client via the system-notification refresh path instead.
+    let revoked_object_ids: Vec<ObjectId> = msg
+      .updates
+      .iter()
+      .filter(|update| update.permission_type == PermissionType::NoAccess)
+      .map(|update| update.object_id)
+      .collect();
+
+    // Apply permission updates to user's sessions and push real-time revocation.
+    tokio::spawn(async move {
+      for session in user_sessions {
+        session.apply_permission_updates(msg.updates.clone()).await;
+
+        for object_id in &revoked_object_ids {
+          session.conn.do_send(WsOutput {
+            message: ServerMessage::AccessChanges {
+              object_id: *object_id,
+              collab_type: CollabType::Document,
+              can_read: false,
+              can_write: false,
+              reason: AccessChangedReason::PermissionDenied,
+            },
+          });
+        }
+      }
+    });
   }
 }
 
@@ -859,7 +885,7 @@ impl WorkspaceSessionHandle {
     Ok(has_permission)
   }
 
-  /// Apply permission updates and send WebSocket notification
+  /// Apply permission updates to the session cache.
   async fn apply_permission_updates(&self, updates: Vec<PermissionUpdate>) {
     let mut cache = self.permission_cache.write().await;
     let now = Instant::now();

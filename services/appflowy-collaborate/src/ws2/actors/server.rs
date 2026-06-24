@@ -128,6 +128,29 @@ impl Handler<PublishUpdate> for WsServer {
   }
 }
 
+impl Handler<UpdateUserPermissions> for WsServer {
+  type Result = ();
+
+  fn handle(&mut self, msg: UpdateUserPermissions, _ctx: &mut Self::Context) -> Self::Result {
+    if let Some(workspace) = self.workspaces.get(&msg.workspace_id) {
+      workspace.do_send(msg);
+    }
+  }
+}
+
+impl Handler<BroadcastPermissionChanges> for WsServer {
+  type Result = ();
+
+  fn handle(&mut self, msg: BroadcastPermissionChanges, _ctx: &mut Self::Context) -> Self::Result {
+    for workspace in self.workspaces.values() {
+      workspace.do_send(BroadcastPermissionChanges {
+        changes: msg.changes.clone(),
+        exclude_uid: msg.exclude_uid,
+      });
+    }
+  }
+}
+
 impl Handler<WorkspaceFolder> for WsServer {
   type Result = ();
 
@@ -188,6 +211,7 @@ pub struct WsOutput {
 #[derive(actix::Message)]
 #[rtype(result = "()")]
 pub struct UpdateUserPermissions {
+  pub workspace_id: WorkspaceId,
   pub uid: i64,
   pub updates: Vec<PermissionUpdate>,
 }

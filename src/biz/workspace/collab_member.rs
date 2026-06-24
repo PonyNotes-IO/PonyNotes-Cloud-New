@@ -238,6 +238,21 @@ pub async fn remove_collab_member(
     .remove_access_level(&uid, view_id)
     .await?;
 
+  let payload = serde_json::json!({
+    "view_id": view_id.to_string(),
+    "title": "Document permission changed",
+    "message": "Your document permission has changed",
+  });
+  if let Err(err) =
+    create_workspace_notification(pg_pool, workspace_id, "collab_permission_changed", &payload, Some(uid)).await
+  {
+    tracing::warn!(
+      "Failed to send permission removal notification to uid={}: {:?}",
+      uid,
+      err
+    );
+  }
+
   Ok(())
 }
 

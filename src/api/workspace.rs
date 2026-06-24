@@ -53,7 +53,9 @@ use app_error::{AppError, ErrorCode};
 use appflowy_collaborate::actix_ws::entities::{
   ClientGenerateEmbeddingMessage, ClientHttpStreamMessage, ClientHttpUpdateMessage,
 };
-use appflowy_collaborate::ws2::WorkspaceCollabInstanceCache;
+use appflowy_collaborate::ws2::{
+  PermissionType, PermissionUpdate, UpdateUserPermissions, WorkspaceCollabInstanceCache,
+};
 use database::publish::select_all_published_collab_info_global;
 
 use bytes::BytesMut;
@@ -196,6 +198,10 @@ pub fn workspace_scope() -> Scope {
         .service(
             web::resource("/{workspace_id}/collab/{object_id}/members")
                 .route(web::get().to(get_collab_members_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/collab/{object_id}/permission")
+                .route(web::get().to(get_current_collab_permission_handler)),
         )
         .service(
             // 创建邀请链接（生成链接时调用）
@@ -830,6 +836,123 @@ async fn get_collab_members_handler(
 
   let members = workspace::ops::get_collab_members(&state.pg_pool, &object_id).await?;
   Ok(AppResponse::Ok().with_data(members).into())
+}
+
+#[derive(Serialize)]
+struct CurrentCollabPermissionResponse {
+  permission_id: i32,
+  access_level: i32,
+  can_write: bool,
+}
+
+#[derive(sqlx::FromRow)]
+struct ExplicitCollabPermissionRow {
+  permission_id: i32,
+  access_level: i32,
+}
+
+#[instrument(skip_all, err)]
+async fn get_current_collab_permission_handler(
+  user_uuid: UserUuid,
+  state: Data<AppState>,
+  path: web::Path<(Uuid, Uuid)>,
+) -> Result<JsonAppResponse<CurrentCollabPermissionResponse>> {
+  let uid = state.user_cache.get_user_uid(&user_uuid).await?;
+  let (workspace_id, object_id) = path.into_inner();
+  let oid = object_id.to_string();
+
+  if let Some(permission) = sqlx::query_as::<_, ExplicitCollabPermissionRow>(
+    r#"
+      SELECT acm.permission_id, p.access_level
+      FROM af_collab_member acm
+      JOIN af_permissions p ON p.id = acm.permission_id
+      WHERE acm.oid = $1 AND acm.uid = $2
+      LIMIT 1
+    "#,
+  )
+  .bind(&oid)
+  .bind(uid)
+  .fetch_optional(&state.pg_pool)
+  .await?
+  {
+    let access_level = AFAccessLevel::from(permission.access_level);
+    return Ok(
+      AppResponse::Ok()
+        .with_data(CurrentCollabPermissionResponse {
+          permission_id: permission.permission_id,
+          access_level: i32::from(access_level),
+          can_write: access_level.can_write(),
+        })
+        .into(),
+    );
+  }
+
+  let collab_in_workspace = sqlx::query_scalar::<_, bool>(
+    r#"
+      SELECT EXISTS(
+        SELECT 1
+        FROM af_collab
+        WHERE oid = $1 AND workspace_id = $2 AND deleted_at IS NULL
+      )
+    "#,
+  )
+  .bind(&oid)
+  .bind(workspace_id)
+  .fetch_one(&state.pg_pool)
+  .await?;
+
+  if collab_in_workspace {
+    if let Some(member) =
+      workspace::ops::get_workspace_member_optional(uid, &state.pg_pool, &workspace_id).await?
+    {
+      let access_level = AFAccessLevel::from(&member.role);
+      return Ok(
+        AppResponse::Ok()
+          .with_data(CurrentCollabPermissionResponse {
+            permission_id: permission_id_from_access_level(access_level),
+            access_level: i32::from(access_level),
+            can_write: access_level.can_write(),
+          })
+          .into(),
+      );
+    }
+  }
+
+  if state
+    .collab_access_control
+    .enforce_action(&workspace_id, &uid, &object_id, Action::Read)
+    .await
+    .is_ok()
+  {
+    return Ok(
+      AppResponse::Ok()
+        .with_data(CurrentCollabPermissionResponse {
+          permission_id: 1,
+          access_level: i32::from(AFAccessLevel::ReadOnly),
+          can_write: false,
+        })
+        .into(),
+    );
+  }
+
+  Err(AppError::NotEnoughPermissions.into())
+}
+
+fn permission_id_from_access_level(access_level: AFAccessLevel) -> i32 {
+  match access_level {
+    AFAccessLevel::ReadOnly => 1,
+    AFAccessLevel::ReadAndComment => 2,
+    AFAccessLevel::ReadAndWrite => 3,
+    AFAccessLevel::FullAccess => 4,
+  }
+}
+
+fn permission_type_from_permission_id(permission_id: i32) -> PermissionType {
+  match permission_id {
+    3 | 4 => PermissionType::Write,
+    1 | 2 => PermissionType::Read,
+    _ => PermissionType::NoAccess,
+  }
 }
 
 #[instrument(skip_all, err)]
@@ -3893,6 +4016,15 @@ async fn add_collab_member_handler(
         tracing::warn!("Failed to send share link self received notification to uid={}: {:?}", uid, err);
       }
 
+      state.ws_server.do_send(UpdateUserPermissions {
+        workspace_id,
+        uid: received_uid,
+        updates: vec![PermissionUpdate {
+          object_id: view_id,
+          permission_type: permission_type_from_permission_id(invite.permission_id),
+        }],
+      });
+
       return Ok(Json(AppResponse::Ok()));
     }
 
@@ -3939,6 +4071,15 @@ async fn add_collab_member_handler(
   )
   .await?;
   tracing::info!("add_collab_member success!");
+
+  state.ws_server.do_send(UpdateUserPermissions {
+    workspace_id,
+    uid: received_uid,
+    updates: vec![PermissionUpdate {
+      object_id: view_id,
+      permission_type: permission_type_from_permission_id(params.permission_id),
+    }],
+  });
 
   // Step 2: 【关键修复】如果是数据库类视图(Grid/Board/Calendar)，还需要授予 database_id 的访问权限
   // 因为数据库视图的 collab 对象 ID 是 database_id，不同于 view_id
@@ -4003,6 +4144,7 @@ async fn update_collab_member_permission_handler(
   // 用户必须存在
   // 不能是变更自己的权限
   let data = data.into_inner();
+  let permission_id = data.permission_id;
   let (workspace_id, view_id, opt_uid) = path_param.into_inner();
   let edit_uid = state.user_cache.get_user_uid(&opt_uid).await?;
   let user_uid = state.user_cache.get_user_uid(&user_uuid).await?;
@@ -4013,9 +4155,17 @@ async fn update_collab_member_permission_handler(
     &view_id,
     user_uid,
     edit_uid,
-    data.permission_id,
+    permission_id,
   )
   .await?;
+  state.ws_server.do_send(UpdateUserPermissions {
+    workspace_id,
+    uid: edit_uid,
+    updates: vec![PermissionUpdate {
+      object_id: view_id,
+      permission_type: permission_type_from_permission_id(permission_id),
+    }],
+  });
   // 变更权限
   Ok(Json(AppResponse::Ok()))
 }
@@ -4075,6 +4225,15 @@ async fn remove_collab_member_handler(
   .await?;
 
   // 7. 同时删除邀请记录
+  state.ws_server.do_send(UpdateUserPermissions {
+    workspace_id,
+    uid: remove_uid,
+    updates: vec![PermissionUpdate {
+      object_id: view_id,
+      permission_type: PermissionType::NoAccess,
+    }],
+  });
+
   let _ = workspace::collab_member::remove_collab_member_invite(
     &state.pg_pool,
     send_uid,
