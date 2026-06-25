@@ -4,6 +4,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+use crate::yrs::encoding::read::Cursor;
+use crate::yrs::updates::decoder::DecoderV1;
+use crate::yrs::updates::encoder::Encode;
+use crate::yrs::ReadTxn;
 use arc_swap::ArcSwap;
 use collab::core::origin::CollabOrigin;
 use collab::lock::RwLock;
@@ -13,10 +17,6 @@ use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, instrument, trace, warn};
 use uuid::Uuid;
-use crate::yrs::encoding::read::Cursor;
-use crate::yrs::updates::decoder::DecoderV1;
-use crate::yrs::updates::encoder::Encode;
-use crate::yrs::ReadTxn;
 
 use client_api_entity::{validate_data_for_folder, CollabType};
 use collab_rt_entity::{AckCode, ClientCollabMessage, ServerCollabMessage, ServerInit, UpdateSync};
@@ -264,6 +264,17 @@ where
           state_vector_v1: Some(ack.payload.to_vec()),
           reason: MissUpdateReason::ServerMissUpdates,
         });
+      }
+
+      if ack_code == AckCode::PermissionDenied {
+        let Some(msg_id) = msg.msg_id() else {
+          return Ok(());
+        };
+        let _ = sink
+          .validate_response(msg_id, &msg, seq_num_counter)
+          .await?;
+        sink.notify_next();
+        return Ok(());
       }
     }
 

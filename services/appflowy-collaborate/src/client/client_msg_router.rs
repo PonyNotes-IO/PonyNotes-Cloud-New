@@ -3,8 +3,9 @@ use std::time::Duration;
 
 use access_control::collab::RealtimeAccessControl;
 use async_trait::async_trait;
+use collab::core::origin::CollabOrigin;
 use collab_rt_entity::user::RealtimeUser;
-use collab_rt_entity::ClientCollabMessage;
+use collab_rt_entity::{AckCode, ClientCollabMessage, CollabAck, ServerCollabMessage, SinkMessage};
 use collab_rt_entity::{MessageByObjectId, RealtimeMessage};
 use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 use tokio_stream::StreamExt;
@@ -109,10 +110,10 @@ impl ClientMessageRouter {
             continue;
           }
 
-          // before applying user messages, we need to check if the user has the permission
-          // valid_messages contains the messages that the user is allowed to apply
-          // invalid_message contains the messages that the user is not allowed to apply
-          let (valid_messages, _) = Self::access_control(
+          // Before applying user messages, split out updates the user is not
+          // allowed to write. Read-only users still need init/state-check
+          // messages to keep receiving remote document changes.
+          let (valid_messages, invalid_messages) = Self::access_control(
             &workspace_id,
             &user.uid,
             &object_id,
@@ -120,6 +121,13 @@ impl ClientMessageRouter {
             original_messages,
           )
           .await;
+
+          Self::ack_permission_denied(
+            client_ws_sink.as_ref(),
+            message_object_id.as_str(),
+            invalid_messages,
+          );
+
           if valid_messages.is_empty() {
             continue;
           }
@@ -158,6 +166,10 @@ impl ClientMessageRouter {
     access_control: Arc<dyn RealtimeAccessControl>,
     messages: Vec<ClientCollabMessage>,
   ) -> (Vec<ClientCollabMessage>, Vec<ClientCollabMessage>) {
+    let can_read = access_control
+      .can_read_collab(workspace_id, uid, object_id)
+      .await
+      .unwrap_or(false);
     let can_write = access_control
       .can_write_collab(workspace_id, uid, object_id)
       .await
@@ -167,12 +179,37 @@ impl ClientMessageRouter {
     let mut invalid_messages = Vec::with_capacity(messages.len());
 
     for message in messages {
-      if can_write {
+      if can_write || (can_read && !message.is_update_sync() && !message.is_server_init_sync()) {
         valid_messages.push(message);
       } else {
         invalid_messages.push(message);
       }
     }
     (valid_messages, invalid_messages)
+  }
+
+  fn ack_permission_denied(
+    sink: &dyn RealtimeClientWebsocketSink,
+    object_id: &str,
+    messages: Vec<ClientCollabMessage>,
+  ) {
+    for message in messages {
+      trace!(
+        "user:{:?} is not allowed to write {}, dropping client message {}",
+        message.origin().client_user_id(),
+        object_id,
+        message.msg_id()
+      );
+
+      let ack = CollabAck::new(
+        CollabOrigin::Server,
+        object_id.to_string(),
+        message.msg_id(),
+        0,
+      )
+      .with_code(AckCode::PermissionDenied);
+
+      sink.do_send(ServerCollabMessage::ClientAck(ack).into());
+    }
   }
 }

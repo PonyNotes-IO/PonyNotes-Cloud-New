@@ -851,6 +851,16 @@ struct ExplicitCollabPermissionRow {
   access_level: i32,
 }
 
+impl CurrentCollabPermissionResponse {
+  fn from_access_level(permission_id: i32, access_level: AFAccessLevel) -> Self {
+    Self {
+      permission_id,
+      access_level: i32::from(access_level),
+      can_write: access_level.can_write(),
+    }
+  }
+}
+
 #[instrument(skip_all, err)]
 async fn get_current_collab_permission_handler(
   user_uuid: UserUuid,
@@ -879,11 +889,37 @@ async fn get_current_collab_permission_handler(
     let access_level = AFAccessLevel::from(permission.access_level);
     return Ok(
       AppResponse::Ok()
-        .with_data(CurrentCollabPermissionResponse {
-          permission_id: permission.permission_id,
-          access_level: i32::from(access_level),
-          can_write: access_level.can_write(),
-        })
+        .with_data(CurrentCollabPermissionResponse::from_access_level(
+          permission.permission_id,
+          access_level,
+        ))
+        .into(),
+    );
+  }
+
+  if let Some(permission) = sqlx::query_as::<_, ExplicitCollabPermissionRow>(
+    r#"
+      SELECT acmi.permission_id, p.access_level
+      FROM af_collab_member_invite acmi
+      JOIN af_permissions p ON p.id = acmi.permission_id
+      WHERE acmi.oid = $1 AND acmi.received_uid = $2
+      ORDER BY acmi.created_at DESC
+      LIMIT 1
+    "#,
+  )
+  .bind(&oid)
+  .bind(uid)
+  .fetch_optional(&state.pg_pool)
+  .await
+  .map_err(AppError::from)?
+  {
+    let access_level = AFAccessLevel::from(permission.access_level);
+    return Ok(
+      AppResponse::Ok()
+        .with_data(CurrentCollabPermissionResponse::from_access_level(
+          permission.permission_id,
+          access_level,
+        ))
         .into(),
     );
   }
@@ -910,11 +946,10 @@ async fn get_current_collab_permission_handler(
       let access_level = AFAccessLevel::from(&member.role);
       return Ok(
         AppResponse::Ok()
-          .with_data(CurrentCollabPermissionResponse {
-            permission_id: permission_id_from_access_level(access_level),
-            access_level: i32::from(access_level),
-            can_write: access_level.can_write(),
-          })
+          .with_data(CurrentCollabPermissionResponse::from_access_level(
+            permission_id_from_access_level(access_level),
+            access_level,
+          ))
           .into(),
       );
     }
@@ -928,11 +963,10 @@ async fn get_current_collab_permission_handler(
   {
     return Ok(
       AppResponse::Ok()
-        .with_data(CurrentCollabPermissionResponse {
-          permission_id: 1,
-          access_level: i32::from(AFAccessLevel::ReadOnly),
-          can_write: false,
-        })
+        .with_data(CurrentCollabPermissionResponse::from_access_level(
+          1,
+          AFAccessLevel::ReadOnly,
+        ))
         .into(),
     );
   }

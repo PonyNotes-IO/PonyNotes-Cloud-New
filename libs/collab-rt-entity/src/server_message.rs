@@ -211,6 +211,7 @@ pub enum AckCode {
   Internal = 3,
   EncodeStateAsUpdateFail = 4,
   MissUpdate = 5,
+  PermissionDenied = 6,
 }
 
 impl From<u8> for AckCode {
@@ -222,6 +223,7 @@ impl From<u8> for AckCode {
       3 => AckCode::Internal,
       4 => AckCode::EncodeStateAsUpdateFail,
       5 => AckCode::MissUpdate,
+      6 => AckCode::PermissionDenied,
       _ => AckCode::Internal,
     }
   }

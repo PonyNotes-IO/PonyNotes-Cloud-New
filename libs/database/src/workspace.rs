@@ -12,10 +12,10 @@ use tracing::{event, instrument};
 use uuid::Uuid;
 
 use crate::pg_row::{
-  AFCollabMemberPermRow, AFGlobalCommentRow, AFImportTask, AFPermissionRow, AFReactionRow,
-  AFUserProfileRow, AFWebUserWithEmailColumn, AFWorkspaceInvitationMinimal,
-  AFWorkspaceMemberPermRow, AFWorkspaceMemberRow, AFWorkspaceRow,
-  AFWorkspaceRowWithMemberCountAndRole, AFExplicitCollabMemberRow,
+  AFCollabMemberPermRow, AFExplicitCollabMemberRow, AFGlobalCommentRow, AFImportTask,
+  AFPermissionRow, AFReactionRow, AFUserProfileRow, AFWebUserWithEmailColumn,
+  AFWorkspaceInvitationMinimal, AFWorkspaceMemberPermRow, AFWorkspaceMemberRow, AFWorkspaceRow,
+  AFWorkspaceRowWithMemberCountAndRole,
 };
 use crate::user::select_uid_from_email;
 use app_error::AppError;
@@ -225,7 +225,7 @@ pub async fn upsert_workspace_member_with_txn(
   role: AFRole,
 ) -> Result<(), AppError> {
   let role_id: i32 = role.into();
-  
+
   // 判断是邮箱还是手机号
   if identifier.contains('@') {
     // 邮箱用户
@@ -249,7 +249,7 @@ pub async fn upsert_workspace_member_with_txn(
     // 手机号用户 - 支持多种格式
     let cleaned = identifier.trim().trim_start_matches('+');
     let with_country_code = format!("+86{}", cleaned);
-    
+
     sqlx::query!(
       r#"
         INSERT INTO public.af_workspace_member (workspace_id, uid, role_id)
@@ -2359,16 +2359,17 @@ pub async fn update_collab_member_permission(
   new_permission_id: i32,
 ) -> Result<(), AppError> {
   let view_id = view_id.to_string();
-  sqlx::query!(
+  sqlx::query(
     r#"
-      UPDATE af_collab_member
-      SET permission_id = $1
-      WHERE uid = $2 AND oid = $3
+      INSERT INTO af_collab_member (uid, oid, permission_id)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (uid, oid) DO UPDATE
+      SET permission_id = EXCLUDED.permission_id
     "#,
-    new_permission_id,
-    uid,
-    &view_id,
   )
+  .bind(uid)
+  .bind(&view_id)
+  .bind(new_permission_id)
   .execute(executor)
   .await?;
 
