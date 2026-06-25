@@ -939,19 +939,34 @@ async fn get_current_collab_permission_handler(
   .await
   .map_err(AppError::from)?;
 
+  // #2 workspace role 单独处理：共享文档(存在 invite 记录)的协作权限以
+  // af_collab_member / af_collab_member_invite 为准。工作区角色只对
+  // “非共享文档”或“文档拥有者(工作区 Owner)”生效，避免被移除协作权限的
+  // 普通工作区成员仅凭工作区角色重新获得编辑权。
+  let doc_is_shared = sqlx::query_scalar::<_, bool>(
+    r#"SELECT EXISTS(SELECT 1 FROM af_collab_member_invite WHERE oid = $1)"#,
+  )
+  .bind(&oid)
+  .fetch_one(&state.pg_pool)
+  .await
+  .map_err(AppError::from)?;
+
   if collab_in_workspace {
     if let Some(member) =
       workspace::ops::get_workspace_member_optional(uid, &state.pg_pool, &workspace_id).await?
     {
-      let access_level = AFAccessLevel::from(&member.role);
-      return Ok(
-        AppResponse::Ok()
-          .with_data(CurrentCollabPermissionResponse::from_access_level(
-            permission_id_from_access_level(access_level),
-            access_level,
-          ))
-          .into(),
-      );
+      let is_workspace_owner = member.role == AFRole::Owner;
+      if !doc_is_shared || is_workspace_owner {
+        let access_level = AFAccessLevel::from(&member.role);
+        return Ok(
+          AppResponse::Ok()
+            .with_data(CurrentCollabPermissionResponse::from_access_level(
+              permission_id_from_access_level(access_level),
+              access_level,
+            ))
+            .into(),
+        );
+      }
     }
   }
 
