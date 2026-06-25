@@ -73,6 +73,10 @@ impl ClientMessageRouter {
     let sink_access_control = access_control.clone();
     let uid = user.uid;
     let client_sink = UnboundedSenderSink::<T>::new(client_sink_tx);
+    // Clone the Arc sink for this read-forwarding task; the original is moved
+    // into the stream-forwarding task below (which also needs the sink to send
+    // PermissionDenied acks). Arc isn't Copy, so we must clone explicitly.
+    let recv_ws_sink = client_ws_sink.clone();
     tokio::spawn(async move {
       while let Some(msg) = client_sink_rx.recv().await {
         let result = sink_access_control
@@ -82,7 +86,7 @@ impl ClientMessageRouter {
           Ok(is_allowed) => {
             if is_allowed {
               let rt_msg = msg.into();
-              client_ws_sink.do_send(rt_msg);
+              recv_ws_sink.do_send(rt_msg);
             } else {
               trace!("user:{} is not allowed to read {}", uid, object_id);
               tokio::time::sleep(Duration::from_secs(2)).await;
