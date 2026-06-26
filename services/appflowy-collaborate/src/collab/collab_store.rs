@@ -70,6 +70,10 @@ impl CollabStoreImpl {
     workspace_id: &WorkspaceId,
     object_id: &ObjectId,
   ) -> AppResult<()> {
+    self
+      .check_write_workspace_permission(workspace_id, uid)
+      .await?;
+
     let is_exist = self.cache.is_exist(workspace_id, object_id).await?;
     // If the collab already exists, check if the user has enough permissions to update collab
     // Otherwise, check if the user has enough permissions to create collab.
@@ -79,9 +83,6 @@ impl CollabStoreImpl {
         .enforce_action(workspace_id, uid, object_id, Action::Write)
         .await?;
     } else {
-      self
-        .check_write_workspace_permission(workspace_id, uid)
-        .await?;
       trace!(
         "Update policy for user:{} to create collab:{}",
         uid,

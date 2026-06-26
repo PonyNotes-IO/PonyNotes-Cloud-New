@@ -2,6 +2,7 @@ use crate::collab::cache::mem_cache::MillisSeconds;
 use crate::collab::cache::CollabCache;
 use access_control::act::Action;
 use access_control::collab::CollabAccessControl;
+use access_control::workspace::WorkspaceAccessControl;
 use anyhow::anyhow;
 use app_error::AppError;
 use appflowy_proto::{ObjectId, Rid, TimestampedEncodedCollab, UpdateFlags, WorkspaceId};
@@ -43,6 +44,7 @@ use yrs::{ReadTxn, StateVector, Update};
 pub struct CollabManager {
   collab_cache: Arc<CollabCache>,
   access_control: Arc<dyn CollabAccessControl>,
+  workspace_access_control: Arc<dyn WorkspaceAccessControl>,
   update_streams: Arc<StreamRouter>,
   awareness_broadcast: Arc<AwarenessGossip>,
   connection_manager: ConnectionManager,
@@ -55,6 +57,7 @@ impl CollabManager {
   pub fn new(
     thread_pool: Arc<ThreadPoolNoAbort>,
     access_control: Arc<dyn CollabAccessControl>,
+    workspace_access_control: Arc<dyn WorkspaceAccessControl>,
     collab_cache: Arc<CollabCache>,
     connection_manager: ConnectionManager,
     update_streams: Arc<StreamRouter>,
@@ -63,6 +66,7 @@ impl CollabManager {
   ) -> Arc<Self> {
     Arc::new(Self {
       access_control,
+      workspace_access_control,
       collab_cache,
       update_streams,
       awareness_broadcast,
@@ -157,6 +161,11 @@ impl CollabManager {
     uid: &i64,
     object_id: &ObjectId,
   ) -> AppResult<()> {
+    self
+      .workspace_access_control
+      .enforce_action(uid, workspace_id, Action::Write)
+      .await?;
+
     let collab_exists = self.collab_cache.is_exist(workspace_id, object_id).await?;
     if !collab_exists {
       // If the collab does not exist, we should not enforce the access control. we consider the user

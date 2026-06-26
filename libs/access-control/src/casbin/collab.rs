@@ -183,6 +183,20 @@ impl RealtimeCollabAccessControlImpl {
       Action::Delete => Action::Write,
     };
 
+    if !matches!(workspace_action, Action::Read) {
+      let can_write_workspace = self
+        .access_control
+        .enforce_immediately(
+          uid,
+          ObjectType::Workspace(workspace_id.to_string()),
+          Action::Write,
+        )
+        .await?;
+      if !can_write_workspace {
+        return Ok(false);
+      }
+    }
+
     let collab_result = self
       .access_control
       .enforce_immediately(
@@ -309,23 +323,53 @@ mod tests {
       .enforce_action(&workspace_id, &uid, &oid, Action::Read)
       .await
       .unwrap();
-    assert!(
-      collab_access_control
-        .enforce_action(&workspace_id, &uid, &oid, Action::Write)
-        .await
-        .is_err()
-    );
-    assert!(
-      realtime_access_control
-        .can_read_collab(&workspace_id, &uid, &oid)
-        .await
-        .unwrap()
-    );
-    assert!(
-      !realtime_access_control
-        .can_write_collab(&workspace_id, &uid, &oid)
-        .await
-        .unwrap()
-    );
+    assert!(collab_access_control
+      .enforce_action(&workspace_id, &uid, &oid, Action::Write)
+      .await
+      .is_err());
+    assert!(realtime_access_control
+      .can_read_collab(&workspace_id, &uid, &oid)
+      .await
+      .unwrap());
+    assert!(!realtime_access_control
+      .can_write_collab(&workspace_id, &uid, &oid)
+      .await
+      .unwrap());
+  }
+
+  #[tokio::test]
+  pub async fn test_realtime_workspace_guest_cannot_write_even_with_collab_write() {
+    let enforcer = test_enforcer_v2().await;
+    let uid = 1;
+    let workspace_id = Uuid::new_v4();
+    let oid = Uuid::new_v4();
+    enforcer
+      .update_policy(
+        SubjectType::User(uid),
+        ObjectType::Workspace(workspace_id.to_string()),
+        AFRole::Guest,
+      )
+      .await
+      .unwrap();
+    enforcer
+      .update_policy(
+        SubjectType::User(uid),
+        ObjectType::Collab(oid.to_string()),
+        AFAccessLevel::ReadAndWrite,
+      )
+      .await
+      .unwrap();
+
+    let access_control = AccessControl::with_enforcer(enforcer);
+    let realtime_access_control = super::RealtimeCollabAccessControlImpl::new(access_control);
+
+    assert!(realtime_access_control
+      .can_read_collab(&workspace_id, &uid, &oid)
+      .await
+      .unwrap());
+    assert!(!realtime_access_control
+      .can_write_collab(&workspace_id, &uid, &oid)
+      .await
+      .unwrap());
   }
 }
