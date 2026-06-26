@@ -702,13 +702,33 @@ impl WorkspaceControllerActor {
         self.save_awareness_update(object_id, update).await?;
       },
       ServerMessage::AccessChanges {
-        object_id, reason, ..
+        object_id,
+        can_read,
+        can_write,
+        reason,
+        ..
       } => {
-        tracing::warn!(
-          "received permission denied for {} - reason: {}",
-          object_id,
-          reason
-        );
+        // Both full revocation (can_read == false) and a write -> read downgrade
+        // (can_read == true, can_write == false) require dropping the local collab
+        // state. Dropping it discards any locally-buffered, un-synced updates and
+        // forces a reload from the server's authoritative state. For a downgrade
+        // this is what prevents edits made during a stale-permission window from
+        // being replayed to other collaborators once write access is restored.
+        if can_read {
+          tracing::warn!(
+            "access downgraded to read-only for {} (can_write={}) - reason: {}; \
+             resetting local collab state to discard un-synced edits",
+            object_id,
+            can_write,
+            reason
+          );
+        } else {
+          tracing::warn!(
+            "received permission denied for {} - reason: {}",
+            object_id,
+            reason
+          );
+        }
         self.delete_collab(&object_id)?;
       },
       ServerMessage::Notification { notification } => {

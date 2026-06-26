@@ -697,10 +697,8 @@ impl Handler<UpdateUserPermissions> for Workspace {
 
     // Collect objects whose access was fully revoked so we can immediately tell
     // the affected client over the document WS to drop the now-inaccessible
-    // collab. AccessChanges makes the client delete the local collab, which is
-    // only correct for a full revocation. Permission *downgrades* (e.g.
-    // write -> read) are intentionally NOT pushed here; those are reflected on
-    // the client via the system-notification refresh path instead.
+    // collab. AccessChanges with can_read == false makes the client delete the
+    // local collab entirely, which is correct for a full revocation.
     let revoked_object_ids: Vec<ObjectId> = msg
       .updates
       .iter()
@@ -708,7 +706,25 @@ impl Handler<UpdateUserPermissions> for Workspace {
       .map(|update| update.object_id)
       .collect();
 
-    // Apply permission updates to user's sessions and push real-time revocation.
+    // Collect objects that were *downgraded* to read-only (write -> read). These
+    // MUST also be pushed in real time. Previously downgrades were only reflected
+    // via the slow/lossy system-notification refresh path, which left a window
+    // where the client kept an editable editor open after losing write access.
+    // Any edits made in that window are written into the local CRDT, silently
+    // rejected by the server (can_write == false), and then replayed to everyone
+    // the moment write access is restored — surfacing as a burst of edits the
+    // owner never saw being typed. Pushing AccessChanges with
+    // can_read == true / can_write == false forces the client to reset its local
+    // collab to the server's authoritative state, discarding those divergent
+    // un-synced updates immediately so they can never be replayed.
+    let downgraded_object_ids: Vec<ObjectId> = msg
+      .updates
+      .iter()
+      .filter(|update| update.permission_type == PermissionType::Read)
+      .map(|update| update.object_id)
+      .collect();
+
+    // Apply permission updates to user's sessions and push real-time access changes.
     tokio::spawn(async move {
       for session in user_sessions {
         session.apply_permission_updates(msg.updates.clone()).await;
@@ -719,6 +735,18 @@ impl Handler<UpdateUserPermissions> for Workspace {
               object_id: *object_id,
               collab_type: CollabType::Document,
               can_read: false,
+              can_write: false,
+              reason: AccessChangedReason::PermissionDenied,
+            },
+          });
+        }
+
+        for object_id in &downgraded_object_ids {
+          session.conn.do_send(WsOutput {
+            message: ServerMessage::AccessChanges {
+              object_id: *object_id,
+              collab_type: CollabType::Document,
+              can_read: true,
               can_write: false,
               reason: AccessChangedReason::PermissionDenied,
             },
