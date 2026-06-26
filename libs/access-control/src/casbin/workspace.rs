@@ -136,6 +136,7 @@ mod tests {
     let enforcer = test_enforcer_v2().await;
     let member_uid = 1;
     let owner_uid = 2;
+    let guest_uid = 3;
     let workspace_id = Uuid::new_v4();
     enforcer
       .update_policy(
@@ -150,6 +151,14 @@ mod tests {
         SubjectType::User(owner_uid),
         ObjectType::Workspace(workspace_id.to_string()),
         AFRole::Owner,
+      )
+      .await
+      .unwrap();
+    enforcer
+      .update_policy(
+        SubjectType::User(guest_uid),
+        ObjectType::Workspace(workspace_id.to_string()),
+        AFRole::Guest,
       )
       .await
       .unwrap();
@@ -174,5 +183,14 @@ mod tests {
       .enforce_action(&owner_uid, &workspace_id, crate::act::Action::Delete)
       .await
       .unwrap();
+    workspace_access_control
+      .enforce_action(&guest_uid, &workspace_id, crate::act::Action::Read)
+      .await
+      .unwrap();
+    let result = workspace_access_control
+      .enforce_action(&guest_uid, &workspace_id, crate::act::Action::Write)
+      .await;
+    let error_code = result.unwrap_err().code();
+    assert_eq!(error_code, ErrorCode::NotEnoughPermissions);
   }
 }

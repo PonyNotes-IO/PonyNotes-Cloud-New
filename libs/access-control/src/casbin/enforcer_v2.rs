@@ -1269,7 +1269,7 @@ mod tests {
     // Based on load_group_policies in access.rs:
     // - Owner: can Delete, Write, Read
     // - Member: can Write, Read
-    // - Guest: can Write, Read
+    // - Guest: can Read
     let test_cases = vec![
       (
         AFRole::Owner,
@@ -1284,8 +1284,8 @@ mod tests {
       (
         AFRole::Guest,
         vec![Action::Read, Action::Write, Action::Delete],
-        vec![true, true, false],
-      ), // Guest CAN write!
+        vec![true, false, false],
+      ),
     ];
 
     for (role, actions, expected_results) in test_cases {
