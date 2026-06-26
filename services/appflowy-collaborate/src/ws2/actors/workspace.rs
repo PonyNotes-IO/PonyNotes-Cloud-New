@@ -3,12 +3,13 @@ use super::session::{InputMessage, WsInput, WsSession};
 use crate::collab::collab_manager::CollabManager;
 use crate::collab::snapshot_scheduler::SnapshotScheduler;
 use crate::ws2::{
-  BroadcastPermissionChanges, PublishUpdate, UpdateUserPermissions, WorkspaceFolder,
+  BroadcastPermissionChanges, PublishUpdate, RefreshWorkspaceUserPermissions,
+  UpdateUserPermissions, WorkspaceFolder,
 };
 use actix::ActorFutureExt;
 use actix::{
-  fut, Actor, ActorContext, Addr, AsyncContext, AtomicResponse, Handler, Recipient,
-  ResponseActFuture, Running, SpawnHandle, StreamHandler, WrapFuture,
+  Actor, ActorContext, Addr, AsyncContext, AtomicResponse, Handler, Recipient, ResponseActFuture,
+  Running, SpawnHandle, StreamHandler, WrapFuture, fut,
 };
 use anyhow::anyhow;
 use app_error::AppError;
@@ -94,6 +95,8 @@ impl Workspace {
   async fn hande_ws_input(store: Arc<CollabManager>, sender: WorkspaceSessionHandle, msg: WsInput) {
     match msg.message {
       InputMessage::Manifest(collab_type, rid, state_vector) => {
+        sender.track_object(msg.object_id, collab_type).await;
+
         match store
           .get_latest_state(
             msg.workspace_id,
@@ -171,6 +174,8 @@ impl Workspace {
         };
       },
       InputMessage::Update(collab_type, flags, update) => {
+        sender.track_object(msg.object_id, collab_type).await;
+
         if is_empty_update(&update, &flags) {
           tracing::trace!("skipping empty update {}", msg.object_id);
           return;
@@ -757,6 +762,62 @@ impl Handler<UpdateUserPermissions> for Workspace {
   }
 }
 
+impl Handler<RefreshWorkspaceUserPermissions> for Workspace {
+  type Result = ();
+
+  fn handle(
+    &mut self,
+    msg: RefreshWorkspaceUserPermissions,
+    _: &mut Self::Context,
+  ) -> Self::Result {
+    let user_sessions: Vec<WorkspaceSessionHandle> = self
+      .sessions_by_client_id
+      .values()
+      .filter(|session| session.uid == msg.uid)
+      .cloned()
+      .collect();
+
+    if user_sessions.is_empty() {
+      return;
+    }
+
+    let store = self.manager.clone();
+    tokio::spawn(async move {
+      for session in user_sessions {
+        let object_ids = session.tracked_object_ids().await;
+        session.clear_permission_cache().await;
+
+        for (object_id, collab_type) in object_ids {
+          let can_read = session
+            .can_read_collab(&store, &object_id)
+            .await
+            .unwrap_or(false);
+          let can_write = if can_read {
+            session
+              .can_write_collab(&store, &object_id)
+              .await
+              .unwrap_or(false)
+          } else {
+            false
+          };
+
+          if !can_read || !can_write {
+            session.conn.do_send(WsOutput {
+              message: ServerMessage::AccessChanges {
+                object_id,
+                collab_type,
+                can_read,
+                can_write,
+                reason: AccessChangedReason::PermissionDenied,
+              },
+            });
+          }
+        }
+      }
+    });
+  }
+}
+
 impl Handler<BroadcastPermissionChanges> for Workspace {
   type Result = ();
 
@@ -819,6 +880,7 @@ struct WorkspaceSessionHandle {
   conn: Addr<WsSession>,
   // Permission cache with expiration
   permission_cache: Arc<RwLock<HashMap<ObjectId, (PermissionType, Instant)>>>,
+  tracked_object_ids: Arc<RwLock<HashMap<ObjectId, CollabType>>>,
   cache_ttl: Duration,
 }
 
@@ -851,6 +913,7 @@ impl WorkspaceSessionHandle {
       collab_origin,
       conn,
       permission_cache: Arc::new(RwLock::new(HashMap::new())),
+      tracked_object_ids: Arc::new(RwLock::new(HashMap::new())),
       cache_ttl,
     }
   }
@@ -920,6 +983,23 @@ impl WorkspaceSessionHandle {
     for update in updates {
       cache.insert(update.object_id, (update.permission_type, now));
     }
+  }
+
+  async fn track_object(&self, object_id: ObjectId, collab_type: CollabType) {
+    self
+      .tracked_object_ids
+      .write()
+      .await
+      .insert(object_id, collab_type);
+  }
+
+  async fn tracked_object_ids(&self) -> Vec<(ObjectId, CollabType)> {
+    let mut object_ids: HashMap<ObjectId, CollabType> =
+      self.tracked_object_ids.read().await.clone();
+    for object_id in self.permission_cache.read().await.keys().copied() {
+      object_ids.entry(object_id).or_insert(CollabType::Unknown);
+    }
+    object_ids.into_iter().collect()
   }
 
   /// Clear all cached permissions (useful when user's workspace role changes)

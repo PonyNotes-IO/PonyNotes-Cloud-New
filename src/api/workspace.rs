@@ -54,7 +54,8 @@ use appflowy_collaborate::actix_ws::entities::{
   ClientGenerateEmbeddingMessage, ClientHttpStreamMessage, ClientHttpUpdateMessage,
 };
 use appflowy_collaborate::ws2::{
-  PermissionType, PermissionUpdate, UpdateUserPermissions, WorkspaceCollabInstanceCache,
+  PermissionType, PermissionUpdate, RefreshWorkspaceUserPermissions, UpdateUserPermissions,
+  WorkspaceCollabInstanceCache,
 };
 use database::publish::select_all_published_collab_info_global;
 
@@ -1270,6 +1271,11 @@ async fn update_workspace_member_handler(
     uid,
   )
   .await?;
+
+  state.ws_server.do_send(RefreshWorkspaceUserPermissions {
+    workspace_id,
+    uid: changeset.uid,
+  });
 
   Ok(AppResponse::Ok().into())
 }

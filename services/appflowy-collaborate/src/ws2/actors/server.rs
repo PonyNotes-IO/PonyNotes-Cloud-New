@@ -12,8 +12,8 @@ use collab_folder::Folder;
 use database::collab::AppResult;
 use std::collections::HashMap;
 use std::fmt::Display;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use tracing::info;
 use yrs::block::ClientID;
 
@@ -138,6 +138,20 @@ impl Handler<UpdateUserPermissions> for WsServer {
   }
 }
 
+impl Handler<RefreshWorkspaceUserPermissions> for WsServer {
+  type Result = ();
+
+  fn handle(
+    &mut self,
+    msg: RefreshWorkspaceUserPermissions,
+    _ctx: &mut Self::Context,
+  ) -> Self::Result {
+    if let Some(workspace) = self.workspaces.get(&msg.workspace_id) {
+      workspace.do_send(msg);
+    }
+  }
+}
+
 impl Handler<BroadcastPermissionChanges> for WsServer {
   type Result = ();
 
@@ -214,6 +228,13 @@ pub struct UpdateUserPermissions {
   pub workspace_id: WorkspaceId,
   pub uid: i64,
   pub updates: Vec<PermissionUpdate>,
+}
+
+#[derive(actix::Message)]
+#[rtype(result = "()")]
+pub struct RefreshWorkspaceUserPermissions {
+  pub workspace_id: WorkspaceId,
+  pub uid: i64,
 }
 
 #[derive(actix::Message)]
