@@ -242,6 +242,10 @@ pub async fn remove_collab_member(
     "view_id": view_id.to_string(),
     "title": "Document permission changed",
     "message": "Your document permission has changed",
+    // Marks a full access revocation (vs. a mere permission downgrade). The
+    // client uses this to drop the view from the recipient's shared list and
+    // close its open tab, while leaving other users' lists untouched.
+    "event": "access_removed",
   });
   if let Err(err) =
     create_workspace_notification(pg_pool, workspace_id, "collab_permission_changed", &payload, Some(uid)).await
