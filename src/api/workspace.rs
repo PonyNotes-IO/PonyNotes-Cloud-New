@@ -87,7 +87,7 @@ use serde::{Deserialize, Serialize};
 use crate::biz::collab::me::{get_received_collab_list, get_send_collab_list};
 use crate::biz::subscription::ops::{check_user_storage_limit, get_user_resource_limit_status};
 use crate::biz::workspace::collab_member::{
-  add_collab_member, edit_collab_member_permission, remove_collab_member, remove_collab_member_invite,
+  add_collab_member, edit_collab_member_permission, remove_collab_member,
 };
 use crate::biz::workspace::ops::get_collab_owner;
 use database::pg_row::AFCollabMemberInvite;
@@ -4266,10 +4266,7 @@ async fn remove_collab_member_handler(
     ).into());
   }
 
-  // 5. 获取发送者的 uid（文档拥有者）
-  let send_uid = collab_owner.uid;
-
-  // 6. 删除协作成员和邀请记录
+  // 6. 删除协作成员权限
   workspace::collab_member::remove_collab_member(
     &state.pg_pool,
     state.collab_access_control.clone(),
@@ -4281,7 +4278,7 @@ async fn remove_collab_member_handler(
   )
   .await?;
 
-  // 7. 同时删除邀请记录
+  // 7. 通知被移除用户实时丢弃本地协作状态
   state.ws_server.do_send(UpdateUserPermissions {
     workspace_id,
     uid: remove_uid,
@@ -4290,14 +4287,6 @@ async fn remove_collab_member_handler(
       permission_type: PermissionType::NoAccess,
     }],
   });
-
-  let _ = workspace::collab_member::remove_collab_member_invite(
-    &state.pg_pool,
-    send_uid,
-    remove_uid,
-    &view_id.to_string(),
-  )
-  .await;
 
   Ok(Json(AppResponse::Ok()))
 }

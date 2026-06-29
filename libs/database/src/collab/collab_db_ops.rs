@@ -733,9 +733,10 @@ where
 {
   // 使用运行时查询（非宏）避免 sqlx 离线缓存列不匹配问题（view_layout, owner_workspace_id 为后添加字段）
   let list = sqlx::query_as::<_, AFCollabMemberInvite>(
-    r#"SELECT oid, send_uid, received_uid, created_at, name, permission_id, view_layout, owner_workspace_id
-       FROM af_collab_member_invite
-       WHERE received_uid = $1 AND received_uid IS NOT NULL"#,
+    r#"SELECT acmi.oid, acmi.send_uid, acmi.received_uid, acmi.created_at, acmi.name, acmi.permission_id, acmi.view_layout, acmi.owner_workspace_id
+       FROM af_collab_member_invite acmi
+       JOIN af_collab_member acm ON acm.oid = acmi.oid AND acm.uid = acmi.received_uid
+       WHERE acmi.received_uid = $1 AND acmi.received_uid IS NOT NULL"#,
   )
   .bind(uid)
   .fetch_all(executor)

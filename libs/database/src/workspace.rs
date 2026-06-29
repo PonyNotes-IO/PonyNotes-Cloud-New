@@ -2310,6 +2310,12 @@ pub async fn insert_collab_member(
     r#"
       INSERT INTO af_collab_member_invite (oid, send_uid, received_uid, name, permission_id, owner_workspace_id)
       VALUES ($1, $2, $3, $4, $5, $6)
+      ON CONFLICT (oid, send_uid, received_uid) WHERE received_uid IS NOT NULL
+      DO UPDATE SET
+        name = EXCLUDED.name,
+        permission_id = EXCLUDED.permission_id,
+        owner_workspace_id = EXCLUDED.owner_workspace_id,
+        created_at = CURRENT_TIMESTAMP
     "#,
   )
   .bind(&view_id)
