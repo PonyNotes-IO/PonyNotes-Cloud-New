@@ -319,24 +319,14 @@ where
   PersistenceError: From<<Self as KVStore<'a>>::Error>,
 {
   fn client_id(&self, workspace_id: &Uuid) -> Result<ClientID, PersistenceError> {
-    let key = keys::make_client_id_key(workspace_id);
-    if let Some(existing) = self.get(&key)? {
-      let slice = existing.as_ref();
-      if slice.len() == 8 {
-        let client_id = ClientID::from_le_bytes(slice.try_into().unwrap());
-        return Ok(client_id);
-      }
-    }
-
     // Keep client IDs 32bit, at least until client ID decoding
     // bug is fixed (see: https://github.com/y-crdt/y-crdt/blob/826d15908105a349eb4a52e327e33cbc4720eda3/yrs/src/updates/decoder.rs#L144)
     let client_id = random::<u32>() as u64;
     sync_trace!(
-      "generated new client id {} for workspace {}",
+      "generated session client id {} for workspace {}",
       client_id,
       workspace_id
     );
-    self.insert(key, client_id.to_le_bytes())?;
     Ok(client_id)
   }
 
@@ -408,21 +398,10 @@ mod keys {
   /// Prefix byte used for all metadata related keys.
   pub const META_SPACE: u8 = 3;
 
-  /// Prefix byte used for client_id metadata for a given workspace.
-  pub const CLIENT_ID: u8 = 1;
-
   /// Prefix byte used for last_message_id metadata for a given workspace.
-  pub const LAST_MESSAGE_ID: u8 = 2;
+  pub const LAST_MESSAGE_ID: u8 = 1;
 
   pub const TERMINATOR: u8 = 0;
-
-  pub fn make_client_id_key(workspace_id: &Uuid) -> SmallVec<[u8; 19]> {
-    // key: META_SPACE (1B) + CLIENT_ID (1B) + workspace_id (16B) + TERMINATOR (1B)
-    let mut key = smallvec![META_SPACE, CLIENT_ID];
-    key.extend_from_slice(workspace_id.as_bytes());
-    key.push(TERMINATOR);
-    key
-  }
 
   pub fn make_last_message_id_key(workspace_id: &Uuid) -> SmallVec<[u8; 19]> {
     // key: META_SPACE (1B) + LAST_MESSAGE_ID (1B) + workspace_id (16B) + TERMINATOR (1B)
