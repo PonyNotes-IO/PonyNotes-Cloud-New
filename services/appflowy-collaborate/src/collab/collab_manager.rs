@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use collab::core::collab::{default_client_id, CollabOptions};
 use collab::core::origin::CollabOrigin;
 use collab::entity::{EncodedCollab, EncoderVersion};
-use collab::preclude::Collab;
+use collab::preclude::{Any, Collab, Map, MapRef, Out};
 use collab_document::document::DocumentBody;
 use collab_entity::CollabType;
 use collab_folder::Folder;
@@ -684,16 +684,29 @@ fn apply_updates_to_snapshot(
   let mut collab = Collab::new_with_options(CollabOrigin::Server, options)
     .map_err(|err| anyhow!("failed to create collab: {}", err))?;
 
-  // Apply all updates to build the full state
   let mut rid = rid_snapshot;
+
+  // First apply the previous snapshot on its own, so we can measure the pre-update state.
   {
     let mut tx = collab.transact_mut();
-    // First apply the snapshot
     if !update_snapshot.is_empty() {
       tx.apply_update(decode_update(&update_snapshot)?)?;
     }
+  }
 
-    // Then apply updates from redis stream
+  // 【数据丢失安全网】记录“应用本轮 update 之前”白板的存活元素数量。
+  // 白板的 elements 以 id→element 的 YMap 存储，正常客户端只做 union/upsert（删除也是写入
+  // isDeleted 墓碑，键从不移除），因此存活元素数不会因正常编辑而归零。仅当该 collab 具备
+  // 白板结构（root→"data"→"elements" 均为 YMap）时才有值；普通文档/数据库返回 None，
+  // 完全不进入本安全网逻辑。这里只做 O(1) 的 len 读取，正常路径零额外编码开销。
+  let prev_element_count = {
+    let tx = collab.transact();
+    count_live_whiteboard_elements(&collab.data, &tx)
+  };
+
+  // Then apply updates from redis stream.
+  {
+    let mut tx = collab.transact_mut();
     trace!(
       "processing {} updates for {}:{}",
       updates.len(),
@@ -713,6 +726,41 @@ fn apply_updates_to_snapshot(
     }
     drop(tx); // commit the transaction
   }
+
+  // 【数据丢失安全网】破坏性清空检测与回滚。
+  // “之前有元素、应用本轮 update 后存活元素数变为 0”只可能来自异常端（旧版本整表覆盖、
+  // 迁移边缘、或缺陷/恶意客户端）对元素表的整表删除——正常客户端永不产生。此时若把“清空态”
+  // 固化为快照并 prune 掉这批 update，就会造成所有协作端该白板永久清空。因此拒绝固化清空态，
+  // 回滚到应用本轮 update 之前的前序快照，并保留已推进的 rid（使随后 workspace 级 prune 丢弃
+  // 这批破坏性 update，客户端重连即恢复），同时打 error 日志便于监控告警。
+  if let Some(prev_count) = prev_element_count {
+    if prev_count > 0 {
+      // new_count 为 None 表示“无法判定”（非白板/无法解析），保守跳过不回滚；
+      // 仅当明确判定为 0 元素（YMap 空、旧格式 "[]"、或 elements 缺失）时才视为破坏性清空。
+      let new_count = {
+        let tx = collab.transact();
+        count_live_whiteboard_elements(&collab.data, &tx)
+      };
+      if new_count == Some(0) {
+        tracing::error!(
+          "[数据丢失安全网] blocked whiteboard wipe for collab {} ({}): live elements {} -> 0; \
+           rolling back to previous snapshot and discarding this update window (rid={})",
+          object_id,
+          collab_type,
+          prev_count,
+          rid,
+        );
+        // 回滚路径较罕见，此处才从前序快照重建并编码，正常路径无此开销。
+        let prev_collab = build_collab_from_snapshot(client_id, object_id, &update_snapshot)?;
+        let tx = prev_collab.transact();
+        let prev_full_state = tx.encode_diff_v1(&StateVector::default());
+        let prev_state_vector = tx.state_vector();
+        // paragraphs 仅用于 Document 正文索引，回滚场景直接返回空，跳过本轮索引即可。
+        return Ok((rid, prev_full_state.into(), prev_state_vector, vec![]));
+      }
+    }
+  }
+
   let tx = collab.transact();
   let full_state = tx.encode_diff_v1(&StateVector::default());
   let state_vector = tx.state_vector();
@@ -725,6 +773,55 @@ fn apply_updates_to_snapshot(
   };
 
   Ok((rid, full_state.into(), state_vector, paragraphs))
+}
+
+/// 【数据丢失安全网】统计一个 collab 的“白板存活元素”数量。
+///
+/// 白板 schema（与客户端 flowy-whiteboard 一致）：根 map → "data"(YMap) → "elements"(YMap)，
+/// 每个元素按其 id 存储为一个键。`Map::len` 只计存活键、自动忽略 yrs 墓碑，因此该计数不会被
+/// isDeleted 墓碑元素干扰。
+///
+/// 当 collab 不具备白板结构（缺少对应 YMap，如普通文档/数据库）时返回 `None`，从而让上层的
+/// 破坏性清空守卫只作用于白板 collab，绝不影响其它类型。
+fn count_live_whiteboard_elements<T: yrs::ReadTxn>(root: &MapRef, txn: &T) -> Option<usize> {
+  // 键名与客户端 flowy-whiteboard 的 DATA_KEY / ELEMENTS_KEY 保持一致。
+  const DATA_KEY: &str = "data";
+  const ELEMENTS_KEY: &str = "elements";
+
+  let data = match root.get(txn, DATA_KEY) {
+    Some(Out::YMap(map)) => map,
+    _ => return None, // 非白板结构（无 data 子 map）
+  };
+  match data.get(txn, ELEMENTS_KEY) {
+    // 当前格式：elements 为 id→element 的 YMap，len 只计存活键（忽略 yrs 墓碑）。
+    Some(Out::YMap(map)) => Some(map.len(txn) as usize),
+    // 兼容旧格式：elements 曾以 JSON 数组字符串整块存储（旧客户端的整表覆盖正是清空来源），
+    // "[]" 记为 0，从而也能拦截这种历史清空模式。
+    Some(Out::Any(Any::String(s))) => serde_json::from_str::<Vec<serde_json::Value>>(s.as_ref())
+      .ok()
+      .map(|arr| arr.len()),
+    // data 是白板结构但 elements 缺失 = 空白板（0 元素）。
+    None => Some(0),
+    // 其它非预期类型：无法判定，保守返回 None（跳过守卫，绝不误回滚）。
+    _ => None,
+  }
+}
+
+/// 【数据丢失安全网】仅从前序快照字节重建一个只读用途的 collab（不应用任何增量 update）。
+/// 用于破坏性清空被拦截时回滚到清空前的状态。
+fn build_collab_from_snapshot(
+  client_id: ClientID,
+  object_id: ObjectId,
+  update_snapshot: &Bytes,
+) -> anyhow::Result<Collab> {
+  let options = CollabOptions::new(object_id.to_string(), client_id);
+  let mut collab = Collab::new_with_options(CollabOrigin::Server, options)
+    .map_err(|err| anyhow!("failed to create collab: {}", err))?;
+  if !update_snapshot.is_empty() {
+    let mut tx = collab.transact_mut();
+    tx.apply_update(decode_update(update_snapshot)?)?;
+  }
+  Ok(collab)
 }
 
 pub fn decode_update(update: &[u8]) -> AppResult<Update> {
