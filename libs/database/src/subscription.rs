@@ -653,18 +653,23 @@ pub async fn aggregate_user_usage(
   uid: i64,
   start_date: NaiveDate,
   end_date: NaiveDate,
+  subscription_id: Option<i64>,
 ) -> Result<Vec<UsageAggregateRow>, AppError> {
+  // subscription_id 为 Some 时，只统计当前订阅套餐的用量（"只减去当前套餐的使用次数"）；
+  // 为 None 时退化为按日期区间统计全部，作为兜底。
   let rows = sqlx::query(
     r#"
     SELECT usage_type, SUM(usage_count)::BIGINT as total
     FROM af_user_subscription_usage
     WHERE uid = $1 AND usage_date >= $2 AND usage_date <= $3
+      AND ($4::BIGINT IS NULL OR subscription_id = $4)
     GROUP BY usage_type
     "#,
   )
   .bind(uid)
   .bind(start_date)
   .bind(end_date)
+  .bind(subscription_id)
   .fetch_all(pg_pool)
   .await?;
 
@@ -722,19 +727,23 @@ pub async fn list_daily_usage(
 pub async fn upsert_usage_record(
   pg_pool: &PgPool,
   uid: i64,
+  subscription_id: Option<i64>,
   usage_type: &str,
   usage_date: NaiveDate,
   usage_count: i64,
 ) -> Result<(), AppError> {
+  // 唯一键为 (uid, subscription_id, usage_date, usage_type)，
+  // 因此每个订阅各自独立累计当天用量，套餐切换/续费后用量自然从 0 重新计。
   sqlx::query(
     r#"
-    INSERT INTO af_user_subscription_usage (uid, usage_date, usage_type, usage_count)
-    VALUES ($1, $2, $3, $4)
-    ON CONFLICT (uid, usage_date, usage_type)
-    DO UPDATE SET usage_count = af_user_subscription_usage.usage_count + $4
+    INSERT INTO af_user_subscription_usage (uid, subscription_id, usage_date, usage_type, usage_count)
+    VALUES ($1, $2, $3, $4, $5)
+    ON CONFLICT (uid, subscription_id, usage_date, usage_type)
+    DO UPDATE SET usage_count = af_user_subscription_usage.usage_count + $5
     "#,
   )
   .bind(uid)
+  .bind(subscription_id)
   .bind(usage_date)
   .bind(usage_type)
   .bind(usage_count)

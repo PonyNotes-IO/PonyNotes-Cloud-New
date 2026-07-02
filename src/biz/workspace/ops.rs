@@ -23,7 +23,9 @@ use database::pg_row::AFWorkspaceMemberRow;
 use database::pg_row::AFExplicitCollabMemberRow;
 use database::user::{select_uid_from_email, select_uid_from_email_or_phone};
 use database::workspace::*;
-use database::subscription::{aggregate_user_usage, get_user_owned_workspace_count};
+use database::subscription::{
+  aggregate_user_usage, get_user_active_subscription, get_user_owned_workspace_count,
+};
 use database_entity::dto::{
   AFRole, AFWorkspace, AFWorkspaceInvitation, AFWorkspaceInvitationStatus, AFWorkspaceSettings,
   GlobalComment, Reaction, WorkspaceMemberProfile, WorkspaceUsage,
@@ -1078,7 +1080,12 @@ pub async fn get_workspace_usage_and_limit(
       .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Invalid date")))?
   };
   
-  let usage_aggregate = aggregate_user_usage(pg_pool, owner_uid, first_day, last_day).await?;
+  // 取 owner 当前订阅，只统计当前套餐的用量（套餐切换/续费后用量归零）
+  let current_sub_id = get_user_active_subscription(pg_pool, owner_uid)
+    .await?
+    .map(|s| s.id);
+  let usage_aggregate =
+    aggregate_user_usage(pg_pool, owner_uid, first_day, last_day, current_sub_id).await?;
   
   let ai_responses_count = usage_aggregate
     .iter()

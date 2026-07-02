@@ -168,7 +168,21 @@ pub async fn record_usage(
     .usage_date
     .unwrap_or_else(|| Utc::now().date_naive());
   let usage_type = usage_type_to_str(payload.usage_type);
-  upsert_usage_record(pg_pool, uid, usage_type, usage_date, payload.usage_count).await?;
+  // 解析用户当前订阅（不存在则自动创建免费订阅），把 subscription_id 一并记入用量。
+  // 解析失败时不阻断用量记录，退化为 None（仅极端情况，正常用户必有 active 订阅）。
+  let subscription_id = get_or_create_free_subscription(pg_pool, uid)
+    .await
+    .ok()
+    .map(|s| s.id);
+  upsert_usage_record(
+    pg_pool,
+    uid,
+    subscription_id,
+    usage_type,
+    usage_date,
+    payload.usage_count,
+  )
+  .await?;
   Ok(())
 }
 
@@ -195,8 +209,10 @@ async fn build_current_subscription_with_plan(
     subscription.end_date.date_naive(),
   );
   
-  // Real AI Usage
-  let usage = aggregate_user_usage(pg_pool, uid, usage_start_date, usage_end_date).await?;
+  // Real AI Usage（只统计当前订阅套餐的用量）
+  let usage =
+    aggregate_user_usage(pg_pool, uid, usage_start_date, usage_end_date, Some(subscription.id))
+      .await?;
   let ai_chat_used = usage.iter().find(|u| u.usage_type == "ai_chat").map(|u| u.total).unwrap_or(0);
   let ai_image_used = usage.iter().find(|u| u.usage_type == "ai_image").map(|u| u.total).unwrap_or(0);
   
