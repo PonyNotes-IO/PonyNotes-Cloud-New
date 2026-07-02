@@ -161,16 +161,19 @@ impl CollabManager {
     uid: &i64,
     object_id: &ObjectId,
   ) -> AppResult<()> {
-    self
-      .workspace_access_control
-      .enforce_action(uid, workspace_id, Action::Write)
-      .await?;
-
+    // 【共享协作修复 2026-07-02】不再用 workspace 级写权限做前置短路。
+    // 文档级分享(af_collab_member/casbin Collab 策略)授予的编辑权必须独立生效——
+    // 被分享者通常不是文档所属 workspace 的成员,旧逻辑在第一关就把他们拒掉并静默丢弃
+    // 其协作更新(ws2/actors/workspace.rs 仅 trace 日志),表现为"被分享者的编辑
+    // 拥有者永远看不到"。行业标准(Google Docs/Notion)是文档级显式授权优先、
+    // workspace 角色作为默认回退,该回退逻辑由 collab 级 enforce_action 内部实现。
     let collab_exists = self.collab_cache.is_exist(workspace_id, object_id).await?;
     if !collab_exists {
-      // If the collab does not exist, we should not enforce the access control. we consider the user
-      // has the permission to write the collab
-      return Ok(());
+      // 新建 collab:没有文档级授权可言,维持原语义,要求 workspace 写权限。
+      return self
+        .workspace_access_control
+        .enforce_action(uid, workspace_id, Action::Write)
+        .await;
     }
     self
       .access_control

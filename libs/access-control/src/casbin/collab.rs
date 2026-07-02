@@ -183,20 +183,13 @@ impl RealtimeCollabAccessControlImpl {
       Action::Delete => Action::Write,
     };
 
-    if !matches!(workspace_action, Action::Read) {
-      let can_write_workspace = self
-        .access_control
-        .enforce_immediately(
-          uid,
-          ObjectType::Workspace(workspace_id.to_string()),
-          Action::Write,
-        )
-        .await?;
-      if !can_write_workspace {
-        return Ok(false);
-      }
-    }
-
+    // 【共享协作修复 2026-07-02】文档级显式授权优先(Google Docs/Notion 模型)。
+    // 旧逻辑对写操作先做 workspace 写权限短路(!can_write_workspace → return false),
+    // 被分享者(非文档所属 workspace 成员)即使持有 collab 级编辑授权也永远过不了,
+    // 其协作更新在 WS 层被静默丢弃——表现为"被分享者的编辑拥有者永远看不到"。
+    // 改为:① collab 级显式策略命中即放行;② 持有 collab 级策略但不足以执行写
+    // (被显式降权为只读)则拒绝,不得凭 workspace 角色重新升权(下方原有防御保留);
+    // ③ 无 collab 级策略者回退 workspace 角色判定(对普通成员与旧行为完全等价)。
     let collab_result = self
       .access_control
       .enforce_immediately(

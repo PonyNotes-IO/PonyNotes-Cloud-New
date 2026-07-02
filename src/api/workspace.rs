@@ -925,6 +925,10 @@ async fn get_current_collab_permission_handler(
     );
   }
 
+  // 【权限查询修复 2026-07-02】af_collab.oid 是 uuid 列，必须绑定 Uuid 而非 String，
+  // 否则报 "operator does not exist: uuid = text"(code 1020)。此前凡是走到这一步的用户
+  // (不在 af_collab_member/invite 表，典型即文档拥有者本人)查询当前权限必然 500，
+  // 导致客户端权限标识无法刷新。
   let collab_in_workspace = sqlx::query_scalar::<_, bool>(
     r#"
       SELECT EXISTS(
@@ -934,7 +938,7 @@ async fn get_current_collab_permission_handler(
       )
     "#,
   )
-  .bind(&oid)
+  .bind(object_id)
   .bind(workspace_id)
   .fetch_one(&state.pg_pool)
   .await
