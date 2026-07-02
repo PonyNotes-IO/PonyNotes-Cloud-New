@@ -401,7 +401,7 @@ pub async fn init_state(config: &Config) -> Result<AppState, Error> {
     awareness_gossip.clone(),
     indexer_scheduler.clone(),
   );
-  let ws_server = WsServer::new(manager).start();
+  let ws_server = WsServer::new(manager, pg_pool.clone()).start();
 
   // Initialize ChatClient for third-party AI providers
   let chat_client = Arc::new(

@@ -122,6 +122,9 @@ impl WsSession {
           object_id,
           client_id: self.id(),
           sender: self.info.collab_origin(),
+          // 【共享协作路由 2026-07-02】携带会话地址,便于 WsServer 在对象级路由时
+          // 把本会话以 guest 身份注册进文档真实归属的 workspace actor(接收其广播)。
+          addr: ctx.address(),
         });
       },
       Err(err) => {
@@ -277,6 +280,9 @@ pub struct WsInput {
   pub object_id: ObjectId,
   pub sender: CollabOrigin,
   pub client_id: ClientID,
+  /// 发送方会话 actor 地址。【共享协作路由 2026-07-02】对象级路由需要它把会话
+  /// 以 guest 身份注册进文档真实归属的 workspace actor,从而接收该房间的广播。
+  pub addr: Addr<WsSession>,
 }
 
 #[derive(actix::Message)]

@@ -590,6 +590,22 @@ pub async fn is_collab_exists<'a, E: Executor<'a, Database = Postgres>>(
   transform_record_not_found_error(result)
 }
 
+/// 查询 collab 对象真实所属的 workspace(不存在或已删除返回 None)。
+/// 【共享协作路由 2026-07-02】用于 WS 层对象级路由:被分享者的协作消息按文档真实归属
+/// workspace 桥接,而非其连接所在的 workspace。注意 af_collab.oid 为 uuid 列,必须绑 Uuid;
+/// 此处用非宏版本 query_scalar 以避免 SQLX_OFFLINE 缓存缺失导致编译失败。
+pub async fn select_collab_workspace_id<'a, E: Executor<'a, Database = Postgres>>(
+  executor: E,
+  oid: &Uuid,
+) -> Result<Option<Uuid>, sqlx::Error> {
+  sqlx::query_scalar::<_, Uuid>(
+    r#"SELECT workspace_id FROM af_collab WHERE oid = $1 AND deleted_at IS NULL LIMIT 1"#,
+  )
+  .bind(oid)
+  .fetch_optional(executor)
+  .await
+}
+
 pub async fn select_workspace_database_oid<'a, E: Executor<'a, Database = Postgres>>(
   executor: E,
   workspace_id: &Uuid,
