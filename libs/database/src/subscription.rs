@@ -261,6 +261,27 @@ pub async fn get_or_create_free_subscription(
     return Ok(existing_sub);
   }
 
+  // 无有效 active。先把"自然到期(status=active 且 end_date<=NOW)"的订阅标记为 expired；
+  // 若确有自然到期发生，则尝试恢复升级前暂存的、等级最高的 pending 低级套餐，避免错误地降级到免费版。
+  // 注意：用户主动取消的订阅 status 已是 'canceled'，不会命中下面的 UPDATE，因此不会触发恢复
+  //（符合"只有自然到期才恢复"的约定，竞态下也不会补免费版后再有两条 active）。
+  let expired = sqlx::query(
+    r#"
+    UPDATE af_user_subscriptions
+    SET status = 'expired'
+    WHERE uid = $1 AND status = 'active' AND end_date <= NOW()
+    "#,
+  )
+  .bind(uid)
+  .execute(pg_pool)
+  .await?
+  .rows_affected();
+  if expired > 0 {
+    if let Some(resumed) = resume_highest_pending_subscription(pg_pool, uid).await? {
+      return Ok(resumed);
+    }
+  }
+
   // 获取免费版计划ID
   let free_plan_id = get_free_plan_id(pg_pool).await?;
 
@@ -376,6 +397,39 @@ pub async fn get_user_active_subscription(
   }
 }
 
+/// 插入一条新的 active 订阅（不处理旧订阅，调用方需先 cancel/pause 旧的）。
+#[instrument(skip_all, err)]
+pub async fn insert_active_subscription(
+  pg_pool: &PgPool,
+  uid: i64,
+  plan_id: i64,
+  billing_type: &str,
+  start_date: DateTime<Utc>,
+  end_date: DateTime<Utc>,
+  grace_period_end: Option<DateTime<Utc>>,
+  downgraded_from_plan_id: Option<i64>,
+) -> Result<UserSubscriptionRow, AppError> {
+  let row = sqlx::query(
+    r#"
+    INSERT INTO af_user_subscriptions (uid, plan_id, billing_type, status, start_date, end_date, grace_period_end, downgraded_from_plan_id)
+    VALUES ($1, $2, $3, 'active', $4, $5, $6, $7)
+    RETURNING id, uid, plan_id, billing_type, status, start_date, end_date, canceled_at, cancel_reason, grace_period_end, downgraded_from_plan_id
+    "#,
+  )
+  .bind(uid)
+  .bind(plan_id)
+  .bind(billing_type)
+  .bind(start_date)
+  .bind(end_date)
+  .bind(grace_period_end)
+  .bind(downgraded_from_plan_id.map(|v| v as i32))
+  .fetch_one(pg_pool)
+  .await?;
+
+  Ok(map_subscription_row(&row))
+}
+
+/// 变更套餐（降级/同级/从免费版升级等）：作废现有 active，插入新 active。
 #[instrument(skip_all, err)]
 pub async fn upsert_user_subscription(
   pg_pool: &PgPool,
@@ -398,24 +452,104 @@ pub async fn upsert_user_subscription(
   .execute(pg_pool)
   .await?;
 
-  let row = sqlx::query(
+  insert_active_subscription(
+    pg_pool, uid, plan_id, billing_type, start_date, end_date, grace_period_end, downgraded_from_plan_id,
+  )
+  .await
+}
+
+/// 升级到更高付费套餐：把当前 active 套餐暂停(转 pending 并记录剩余时长)，插入新的高级 active 套餐。
+/// 与 upsert 的区别是旧套餐不作废、而是暂存，待高级套餐自然到期后可逐级恢复。
+#[instrument(skip_all, err)]
+pub async fn upgrade_user_subscription_with_pause(
+  pg_pool: &PgPool,
+  uid: i64,
+  plan_id: i64,
+  billing_type: &str,
+  start_date: DateTime<Utc>,
+  end_date: DateTime<Utc>,
+) -> Result<UserSubscriptionRow, AppError> {
+  // 暂停当前 active：转 pending，记录剩余时长（秒），暂停计时。
+  sqlx::query(
     r#"
-    INSERT INTO af_user_subscriptions (uid, plan_id, billing_type, status, start_date, end_date, grace_period_end, downgraded_from_plan_id)
-    VALUES ($1, $2, $3, 'active', $4, $5, $6, $7)
-    RETURNING id, uid, plan_id, billing_type, status, start_date, end_date, canceled_at, cancel_reason, grace_period_end, downgraded_from_plan_id
+    UPDATE af_user_subscriptions
+    SET status = 'pending',
+        remaining_seconds = GREATEST(0, EXTRACT(EPOCH FROM (end_date - NOW())))::BIGINT
+    WHERE uid = $1 AND status = 'active'
     "#,
   )
   .bind(uid)
-  .bind(plan_id)
-  .bind(billing_type)
-  .bind(start_date)
-  .bind(end_date)
-  .bind(grace_period_end)
-  .bind(downgraded_from_plan_id.map(|v| v as i32))
+  .execute(pg_pool)
+  .await?;
+
+  insert_active_subscription(pg_pool, uid, plan_id, billing_type, start_date, end_date, None, None).await
+}
+
+/// 恢复用户等级最高的 pending 套餐（升级前暂存的低级套餐）。
+/// 仅应在用户已无有效 active、且是"高级套餐自然到期"场景下调用。
+/// start_date=NOW()，end_date=NOW()+remaining_seconds，随后置空 remaining_seconds。
+/// 无可恢复的 pending（不存在或剩余<=0）时返回 None。
+#[instrument(skip_all, err)]
+pub async fn resume_highest_pending_subscription(
+  pg_pool: &PgPool,
+  uid: i64,
+) -> Result<Option<UserSubscriptionRow>, AppError> {
+  let rows = sqlx::query(
+    r#"
+    SELECT s.id, p.plan_code, s.remaining_seconds
+    FROM af_user_subscriptions s
+    JOIN af_subscription_plans p ON p.id = s.plan_id
+    WHERE s.uid = $1 AND s.status = 'pending'
+      AND s.remaining_seconds IS NOT NULL AND s.remaining_seconds > 0
+    "#,
+  )
+  .bind(uid)
+  .fetch_all(pg_pool)
+  .await?;
+
+  // 逐级恢复：选套餐等级最高的一条 pending。
+  let mut best: Option<(i64, i64, i32)> = None; // (id, remaining_seconds, level)
+  for row in &rows {
+    let id: i64 = row.get(0);
+    let plan_code: String = row.get(1);
+    let remaining: i64 = row.get(2);
+    let level = get_plan_level(&plan_code);
+    if best.map_or(true, |(_, _, best_level)| level > best_level) {
+      best = Some((id, remaining, level));
+    }
+  }
+  let (sub_id, remaining, _) = match best {
+    Some(v) => v,
+    None => return Ok(None),
+  };
+
+  let row = sqlx::query(
+    r#"
+    UPDATE af_user_subscriptions
+    SET status = 'active',
+        start_date = NOW(),
+        end_date = NOW() + make_interval(secs => $2::double precision),
+        remaining_seconds = NULL,
+        canceled_at = NULL
+    WHERE id = $1
+    RETURNING id, uid, plan_id, billing_type, status, start_date, end_date, canceled_at, cancel_reason, grace_period_end, downgraded_from_plan_id
+    "#,
+  )
+  .bind(sub_id)
+  .bind(remaining as f64)
   .fetch_one(pg_pool)
   .await?;
 
-  Ok(UserSubscriptionRow {
+  tracing::info!(
+    "[订阅恢复] uid: {}, 恢复暂存的 pending 订阅 id={}, 剩余 {} 秒",
+    uid, sub_id, remaining
+  );
+  Ok(Some(map_subscription_row(&row)))
+}
+
+/// 将一行订阅查询结果映射为 UserSubscriptionRow（列顺序须与各查询的 SELECT/RETURNING 一致）。
+fn map_subscription_row(row: &sqlx::postgres::PgRow) -> UserSubscriptionRow {
+  UserSubscriptionRow {
     id: row.get(0),
     uid: row.get(1),
     plan_id: row.get(2),
@@ -427,7 +561,7 @@ pub async fn upsert_user_subscription(
     cancel_reason: row.get(8),
     grace_period_end: row.get(9),
     downgraded_from_plan_id: row.get(10),
-  })
+  }
 }
 
 #[instrument(skip_all, err)]
@@ -828,21 +962,22 @@ pub async fn get_user_owned_workspace_count(pg_pool: &PgPool, uid: i64) -> Resul
   Ok(count.0)
 }
 
-/// 批量将已过期的活跃订阅状态更新为 expired
-/// 条件：status='active' AND end_date <= NOW()
+/// 批量将已过期(自然到期)的活跃订阅状态更新为 expired，返回受影响的 uid 列表（可能重复）。
+/// 条件：status='active' AND end_date <= NOW()。调用方据返回的 uid 去恢复其暂存的 pending 套餐。
 #[instrument(skip_all, err)]
-pub async fn expire_overdue_subscriptions(pg_pool: &PgPool) -> Result<u64, AppError> {
-  let result = sqlx::query(
+pub async fn expire_overdue_subscriptions(pg_pool: &PgPool) -> Result<Vec<i64>, AppError> {
+  let rows: Vec<(i64,)> = sqlx::query_as(
     r#"
     UPDATE af_user_subscriptions
     SET status = 'expired'
     WHERE status = 'active' AND end_date <= NOW()
+    RETURNING uid
     "#,
   )
-  .execute(pg_pool)
+  .fetch_all(pg_pool)
   .await?;
 
-  Ok(result.rows_affected())
+  Ok(rows.into_iter().map(|(uid,)| uid).collect())
 }
 
 /// 查询需要资源清理的用户列表

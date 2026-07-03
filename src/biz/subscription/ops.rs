@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use app_error::AppError;
 use chrono::{Datelike, Months, NaiveDate, Utc};
-use database::subscription::{aggregate_user_usage, calculate_addon_period_end, get_or_create_free_subscription, get_plan_level, get_subscription_addon, get_subscription_plan, get_subscription_plan_by_code, get_user_active_subscription, get_user_owned_workspace_count, get_user_total_usage_bytes, insert_user_addon, list_subscription_addons, list_subscription_plans, list_user_addons, upsert_usage_record, upsert_user_subscription, SubscriptionAddonRow, SubscriptionPlanRow, UserAddonRow, UserSubscriptionRow};
+use database::subscription::{aggregate_user_usage, calculate_addon_period_end, get_or_create_free_subscription, get_plan_level, get_subscription_addon, get_subscription_plan, get_subscription_plan_by_code, get_user_active_subscription, get_user_owned_workspace_count, get_user_total_usage_bytes, insert_user_addon, list_subscription_addons, list_subscription_plans, list_user_addons, upgrade_user_subscription_with_pause, upsert_usage_record, upsert_user_subscription, SubscriptionAddonRow, SubscriptionPlanRow, UserAddonRow, UserSubscriptionRow};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use shared_entity::dto::subscription_dto::{
@@ -63,33 +63,48 @@ pub async fn subscribe_plan(
   let end_date = add_months(start_date, request.billing_type.months())
     .ok_or_else(|| AppError::InvalidRequest("failed to calculate subscription end date".into()))?;
 
-  // 判断是否为降级操作
+  let billing_type_str = request.billing_type.as_str();
   let existing_sub = get_user_active_subscription(pg_pool, uid).await?;
-  let (grace_period_end, downgraded_from_plan_id) = if let Some(ref old_sub) = existing_sub {
+
+  let subscription = if let Some(ref old_sub) = existing_sub {
     let old_plan = get_subscription_plan(pg_pool, old_sub.plan_id).await?;
     let old_level = get_plan_level(&old_plan.plan_code);
     let new_level = get_plan_level(&plan.plan_code);
 
-    if new_level < old_level {
-      // 降级：设置15天宽限期，宽限期内多余资源保留
+    if new_level > old_level && old_level > 0 {
+      // 升级（旧套餐为付费且未到期）：暂停旧套餐（转 pending + 存剩余时长），插入新的高级 active。
+      // 待高级套餐自然到期不续费时，逐级恢复暂存的低级套餐继续执行。
+      log::info!(
+        "[订阅升级] uid: {}, 从 {} (等级{}) 升级到 {} (等级{})，旧套餐转 pending 暂存",
+        uid, old_plan.plan_code, old_level, plan.plan_code, new_level
+      );
+      upgrade_user_subscription_with_pause(
+        pg_pool, uid, plan.id, billing_type_str, start_date, end_date,
+      ).await?
+    } else if new_level < old_level {
+      // 降级：设置15天宽限期，宽限期内多余资源保留（作废旧套餐，不暂存）。
       let grace_end = start_date + chrono::Duration::days(15);
       log::info!(
         "[订阅降级] uid: {}, 从 {} (等级{}) 降级到 {} (等级{}), 宽限期至 {}",
         uid, old_plan.plan_code, old_level, plan.plan_code, new_level, grace_end
       );
-      (Some(grace_end), Some(old_sub.plan_id))
+      upsert_user_subscription(
+        pg_pool, uid, plan.id, billing_type_str, start_date, end_date,
+        Some(grace_end), Some(old_sub.plan_id),
+      ).await?
     } else {
-      (None, None)
+      // 同级续费 / 从免费版(等级0)升级：作废旧的，插入新的 active（pending 的低级套餐不受影响）。
+      upsert_user_subscription(
+        pg_pool, uid, plan.id, billing_type_str, start_date, end_date, None, None,
+      ).await?
     }
   } else {
-    (None, None)
+    // 无现有 active：直接插入新 active。
+    upsert_user_subscription(
+      pg_pool, uid, plan.id, billing_type_str, start_date, end_date, None, None,
+    ).await?
   };
 
-  let billing_type_str = request.billing_type.as_str();
-  let subscription = upsert_user_subscription(
-    pg_pool, uid, plan.id, billing_type_str, start_date, end_date,
-    grace_period_end, downgraded_from_plan_id,
-  ).await?;
   build_current_subscription_with_plan(pg_pool, uid, subscription, plan).await
 }
 
