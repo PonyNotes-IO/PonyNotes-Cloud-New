@@ -12,6 +12,8 @@ async fn completion_explain_test() {
     text: "Snowboarding".to_string(),
     completion_type: Some(CompletionType::Explain),
     metadata: Some(CompletionMetadata {
+      enable_thinking: false,
+      enable_web_search: false,
       object_id: uuid::Uuid::new_v4(),
       workspace_id: Some(uuid::Uuid::new_v4()),
       rag_ids: None,
@@ -36,6 +38,8 @@ async fn completion_image_test() {
     text: "A yellow cat".to_string(),
     completion_type: Some(CompletionType::ImproveWriting),
     metadata: Some(CompletionMetadata {
+      enable_thinking: false,
+      enable_web_search: false,
       object_id: uuid::Uuid::new_v4(),
       workspace_id: Some(uuid::Uuid::new_v4()),
       rag_ids: None,
@@ -107,6 +111,8 @@ async fn custom_prompt_test() {
     text: "A yellow cat".to_string(),
     completion_type: Some(CompletionType::CustomPrompt),
     metadata: Some(CompletionMetadata {
+      enable_thinking: false,
+      enable_web_search: false,
       object_id: uuid::Uuid::new_v4(),
       workspace_id: Some(uuid::Uuid::new_v4()),
       rag_ids: None,

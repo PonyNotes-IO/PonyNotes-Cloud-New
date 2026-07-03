@@ -541,6 +541,13 @@ pub struct CompletionMetadata {
   pub custom_prompt: Option<CustomPrompt>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub prompt_id: Option<String>,
+  /// 深度思考开关(文档内 AI 会话)。客户端 flowy-ai(dev_mobile 8e9c0ada0)以裸 bool
+  /// 构造此字段;serde(default) 保证旧客户端/历史数据反序列化兼容(缺省 false)。
+  #[serde(default)]
+  pub enable_thinking: bool,
+  /// 联网搜索开关(文档内 AI 会话),兼容性同上。
+  #[serde(default)]
+  pub enable_web_search: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

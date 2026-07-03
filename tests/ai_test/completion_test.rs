@@ -14,6 +14,8 @@ async fn generate_chat_message_answer_test() {
     text: "I seen the movie last night and it was amazing".to_string(),
     completion_type: Some(CompletionType::SpellingAndGrammar),
     metadata: Some(CompletionMetadata {
+      enable_thinking: false,
+      enable_web_search: false,
       object_id: doc_id,
       workspace_id: Some(workspace_id),
       rag_ids: None,
