@@ -37,26 +37,82 @@ pub async fn create_workspace_notification(
   Ok(())
 }
 
-/// 查询指定用户的未处理通知（在 WebSocket 重连时补发）
+/// 查询指定用户的未读通知（WebSocket 重连时补发）。
+/// 以 is_read 而非 processed 作为过滤：processed 只表示"已投递过一次"，
+/// 若客户端当时没接住(lag/断连)会被永久漏发；改按未读补发即可修复"有的收不到"。
 pub async fn get_pending_notifications(
   pg_pool: &PgPool,
   recipient_uid: i64,
 ) -> Result<Vec<AFNotificationRow>, AppError> {
-  let rows = sqlx::query_as!(
-    AFNotificationRow,
+  use sqlx::Row;
+  let rows = sqlx::query(
     r#"
     SELECT id, workspace_id, notification_type, payload, recipient_uid, created_at, processed
     FROM af_notification
-    WHERE recipient_uid = $1 AND processed = FALSE
+    WHERE recipient_uid = $1 AND is_read = FALSE
     ORDER BY created_at ASC
+    LIMIT 100
     "#,
-    recipient_uid
   )
+  .bind(recipient_uid)
   .fetch_all(pg_pool)
   .await
   .context("Query pending notifications")?;
 
-  Ok(rows)
+  Ok(
+    rows
+      .iter()
+      .map(|row| AFNotificationRow {
+        id: row.get("id"),
+        workspace_id: row.get("workspace_id"),
+        notification_type: row.get("notification_type"),
+        payload: row.get("payload"),
+        recipient_uid: row.get("recipient_uid"),
+        created_at: row.get("created_at"),
+        processed: row.get("processed"),
+      })
+      .collect(),
+  )
+}
+
+/// 标记单条通知为已读（仅限本人的通知）。返回受影响行数。
+pub async fn mark_notification_read(
+  pg_pool: &PgPool,
+  recipient_uid: i64,
+  notification_id: Uuid,
+) -> Result<u64, AppError> {
+  let result = sqlx::query(
+    r#"
+    UPDATE af_notification
+    SET is_read = TRUE, read_at = now()
+    WHERE id = $1 AND recipient_uid = $2 AND is_read = FALSE
+    "#,
+  )
+  .bind(notification_id)
+  .bind(recipient_uid)
+  .execute(pg_pool)
+  .await
+  .context("Mark notification read")?;
+  Ok(result.rows_affected())
+}
+
+/// 标记该用户全部未读通知为已读。返回受影响行数。
+pub async fn mark_all_notifications_read(
+  pg_pool: &PgPool,
+  recipient_uid: i64,
+) -> Result<u64, AppError> {
+  let result = sqlx::query(
+    r#"
+    UPDATE af_notification
+    SET is_read = TRUE, read_at = now()
+    WHERE recipient_uid = $1 AND is_read = FALSE
+    "#,
+  )
+  .bind(recipient_uid)
+  .execute(pg_pool)
+  .await
+  .context("Mark all notifications read")?;
+  Ok(result.rows_affected())
 }
 
 /// 标记通知为已处理

@@ -58,8 +58,18 @@ pub fn user_scope() -> Scope {
         .route(web::get().to(get_notification_preferences_handler))
         .route(web::post().to(post_notification_preferences_handler)),
     )
-    // 诊断接口：查询当前用户的所有通知（含已处理）
+    // 查询当前用户的所有通知（账号级，含 is_read）
     .service(web::resource("/notifications").route(web::get().to(list_user_notifications_handler)))
+    // 全部标记已读
+    .service(
+      web::resource("/notifications/read-all")
+        .route(web::post().to(mark_all_notifications_read_handler)),
+    )
+    // 单条标记已读
+    .service(
+      web::resource("/notifications/{notification_id}/read")
+        .route(web::post().to(mark_notification_read_handler)),
+    )
 }
 
 #[tracing::instrument(skip(state, path), err)]
@@ -465,7 +475,7 @@ async fn list_user_notifications_handler(
 
   let rows = sqlx::query(
     r#"
-    SELECT id, workspace_id, notification_type, payload, recipient_uid, created_at, processed
+    SELECT id, workspace_id, notification_type, payload, recipient_uid, created_at, processed, is_read, read_at
     FROM af_notification
     WHERE recipient_uid = $1
     ORDER BY created_at DESC
@@ -489,6 +499,8 @@ async fn list_user_notifications_handler(
         "recipient_uid": row.get::<Option<i64>, _>("recipient_uid"),
         "created_at": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
         "processed": row.get::<bool, _>("processed"),
+        "is_read": row.get::<bool, _>("is_read"),
+        "read_at": row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("read_at").map(|v| v.to_rfc3339()),
       })
     })
     .collect();
@@ -498,4 +510,41 @@ async fn list_user_notifications_handler(
     "count": notifications.len(),
     "notifications": notifications,
   })))
+}
+
+/// 标记单条通知为已读（账号级持久化）。
+/// POST /api/user/notifications/{notification_id}/read
+async fn mark_notification_read_handler(
+  user_uuid: UserUuid,
+  state: Data<AppState>,
+  path: web::Path<uuid::Uuid>,
+) -> Result<HttpResponse> {
+  let uid = state
+    .user_cache
+    .get_user_uid(&user_uuid)
+    .await
+    .map_err(AppResponseError::from)?;
+  let notification_id = path.into_inner();
+  let affected =
+    crate::biz::notification::ops::mark_notification_read(&state.pg_pool, uid, notification_id)
+      .await
+      .map_err(AppResponseError::from)?;
+  Ok(HttpResponse::Ok().json(json!({ "updated": affected })))
+}
+
+/// 标记当前用户全部未读通知为已读。
+/// POST /api/user/notifications/read-all
+async fn mark_all_notifications_read_handler(
+  user_uuid: UserUuid,
+  state: Data<AppState>,
+) -> Result<HttpResponse> {
+  let uid = state
+    .user_cache
+    .get_user_uid(&user_uuid)
+    .await
+    .map_err(AppResponseError::from)?;
+  let affected = crate::biz::notification::ops::mark_all_notifications_read(&state.pg_pool, uid)
+    .await
+    .map_err(AppResponseError::from)?;
+  Ok(HttpResponse::Ok().json(json!({ "updated": affected })))
 }
