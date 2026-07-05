@@ -10,10 +10,17 @@ use crate::biz::subscription::ops::get_user_resource_limit_status;
 
 const CLEANUP_INTERVAL_SECS: u64 = 86400;
 
-pub async fn start_resource_cleanup_task(pg_pool: PgPool, s3_client: AwsS3BucketClientImpl) {
+pub async fn start_resource_cleanup_task(
+    pg_pool: PgPool,
+    s3_client: AwsS3BucketClientImpl,
+    qiniu_client: Option<AwsS3BucketClientImpl>,
+) {
     info!("[资源清理] 定时任务已启动，检查间隔: {}秒", CLEANUP_INTERVAL_SECS);
 
-    let s3 = Arc::new(s3_client);
+    let s3 = Arc::new(StorageClients {
+        minio: s3_client,
+        qiniu: qiniu_client,
+    });
     let mut timer = interval(Duration::from_secs(CLEANUP_INTERVAL_SECS));
 
     loop {
@@ -24,10 +31,40 @@ pub async fn start_resource_cleanup_task(pg_pool: PgPool, s3_client: AwsS3Bucket
     }
 }
 
+/// 物理文件可能分布在七牛云（当前主存储）和 MinIO（历史数据）两处，删除时两边都要清。
+pub struct StorageClients {
+    pub minio: AwsS3BucketClientImpl,
+    pub qiniu: Option<AwsS3BucketClientImpl>,
+}
+
+impl StorageClients {
+    async fn remove_dir_all(&self, dir: &str) {
+        if let Some(qiniu) = &self.qiniu {
+            if let Err(e) = qiniu.remove_dir(dir).await {
+                warn!("[资源清理] 删除七牛云目录 {} 失败: {:?}", dir, e);
+            }
+        }
+        if let Err(e) = self.minio.remove_dir(dir).await {
+            warn!("[资源清理] 删除MinIO目录 {} 失败: {:?}", dir, e);
+        }
+    }
+
+    async fn delete_blobs_all(&self, keys: Vec<String>) {
+        if let Some(qiniu) = &self.qiniu {
+            if let Err(e) = qiniu.delete_blobs(keys.clone()).await {
+                warn!("[资源清理] 批量删除七牛云文件失败: {:?}", e);
+            }
+        }
+        if let Err(e) = self.minio.delete_blobs(keys).await {
+            warn!("[资源清理] 批量删除MinIO文件失败: {:?}", e);
+        }
+    }
+}
+
 #[instrument(skip_all)]
 pub async fn run_resource_cleanup_task(
     pg_pool: &PgPool,
-    s3: &Arc<AwsS3BucketClientImpl>,
+    s3: &Arc<StorageClients>,
 ) -> Result<(), AppError> {
     info!("[资源清理] 开始执行资源清理任务...");
 
@@ -52,7 +89,7 @@ pub async fn run_resource_cleanup_task(
 
 async fn check_and_cleanup_user(
     pg_pool: &PgPool,
-    s3: &Arc<AwsS3BucketClientImpl>,
+    s3: &Arc<StorageClients>,
     uid: i64,
 ) -> Result<(), AppError> {
     let resource_status = get_user_resource_limit_status(pg_pool, uid).await?;
@@ -81,7 +118,7 @@ async fn check_and_cleanup_user(
 
 async fn cleanup_user_workspaces(
     pg_pool: &PgPool,
-    s3: &Arc<AwsS3BucketClientImpl>,
+    s3: &Arc<StorageClients>,
     uid: i64,
     workspace_limit: i64,
 ) -> Result<(), AppError> {
@@ -112,10 +149,8 @@ async fn cleanup_user_workspaces(
         let workspace_id: Uuid = row.get("workspace_id");
         info!("[资源清理] 删除工作区 {} (用户 {})", workspace_id, uid);
 
-        // 先删除 S3 中该工作区下的所有文件
-        if let Err(e) = s3.remove_dir(&workspace_id.to_string()).await {
-            warn!("[资源清理] 删除工作区 {} 的S3文件失败: {:?}，继续清理数据库", workspace_id, e);
-        }
+        // 先删除对象存储（七牛云 + MinIO）中该工作区下的所有文件
+        s3.remove_dir_all(&workspace_id.to_string()).await;
 
         let mut tx = pg_pool.begin().await?;
 
@@ -146,7 +181,7 @@ async fn cleanup_user_workspaces(
 
 async fn cleanup_user_storage(
     pg_pool: &PgPool,
-    s3: &Arc<AwsS3BucketClientImpl>,
+    s3: &Arc<StorageClients>,
     uid: i64,
     storage_limit_bytes: i64,
 ) -> Result<(), AppError> {
@@ -175,17 +210,27 @@ async fn cleanup_user_storage(
     .fetch_all(pg_pool)
     .await?;
 
-    let mut kept_size: i64 = 0;
+    // 按 modified_at ASC 从最旧的文件开始删，直到释放足够空间使总用量降到限额以内。
+    // （注意 current_usage 还包含笔记 CRDT 数据与头像，blob 全删完仍可能超限，此时如实记录。）
+    let mut to_release: i64 = current_usage - storage_limit_bytes;
     let mut blobs_to_delete: Vec<(Uuid, String)> = Vec::new();
 
     for row in rows {
-        let file_size: i64 = row.get("file_size");
-        kept_size += file_size;
-        if kept_size > storage_limit_bytes {
-            let workspace_id: Uuid = row.get("workspace_id");
-            let file_id: String = row.get("file_id");
-            blobs_to_delete.push((workspace_id, file_id));
+        if to_release <= 0 {
+            break;
         }
+        let file_size: i64 = row.get("file_size");
+        let workspace_id: Uuid = row.get("workspace_id");
+        let file_id: String = row.get("file_id");
+        blobs_to_delete.push((workspace_id, file_id));
+        to_release -= file_size;
+    }
+
+    if to_release > 0 {
+        warn!(
+            "[资源清理] 用户 {} 删除全部 {} 个文件后仍超限 {} 字节（超限部分为笔记数据/头像，暂不清理）",
+            uid, blobs_to_delete.len(), to_release
+        );
     }
 
     if !blobs_to_delete.is_empty() {
@@ -194,15 +239,13 @@ async fn cleanup_user_storage(
             uid, blobs_to_delete.len()
         );
 
-        // 先批量删除 S3 对象
+        // 先批量删除对象存储文件（七牛云 + MinIO）
         let s3_keys: Vec<String> = blobs_to_delete
             .iter()
             .map(|(ws_id, file_id)| format!("{}/{}", ws_id, file_id))
             .collect();
 
-        if let Err(e) = s3.delete_blobs(s3_keys).await {
-            warn!("[资源清理] 用户 {} 批量删除S3文件失败: {:?}，继续清理数据库", uid, e);
-        }
+        s3.delete_blobs_all(s3_keys).await;
 
         // 再删除数据库元数据
         for (workspace_id, file_id) in blobs_to_delete {

@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use app_error::AppError;
 use chrono::{Datelike, Months, NaiveDate, Utc};
-use database::subscription::{aggregate_user_usage, calculate_addon_period_end, get_or_create_free_subscription, get_plan_level, get_subscription_addon, get_subscription_plan, get_subscription_plan_by_code, get_user_active_subscription, get_user_owned_workspace_count, get_user_total_usage_bytes, insert_user_addon, list_subscription_addons, list_subscription_plans, list_user_addons, upgrade_user_subscription_with_pause, upsert_usage_record, upsert_user_subscription, SubscriptionAddonRow, SubscriptionPlanRow, UserAddonRow, UserSubscriptionRow};
+use database::subscription::{aggregate_user_usage, calculate_addon_period_end, extend_user_subscription, get_or_create_free_subscription, get_plan_level, get_subscription_addon, get_subscription_plan, get_subscription_plan_by_code, get_user_active_subscription, get_user_owned_workspace_count, get_user_total_usage_bytes, insert_user_addon, list_subscription_addons, list_subscription_plans, list_user_addons, upgrade_user_subscription_with_pause, upsert_usage_record, upsert_user_subscription, SubscriptionAddonRow, SubscriptionPlanRow, UserAddonRow, UserSubscriptionRow};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use shared_entity::dto::subscription_dto::{
@@ -71,7 +71,17 @@ pub async fn subscribe_plan(
     let old_level = get_plan_level(&old_plan.plan_code);
     let new_level = get_plan_level(&plan.plan_code);
 
-    if new_level > old_level && old_level > 0 {
+    if old_sub.plan_id == plan.id {
+      // 同套餐续费：不作废旧记录、不新建记录，直接在原订阅上顺延有效期。
+      // 保持同一 subscription_id，当期 AI 用量/剩余额度延续，不会被重置。
+      log::info!(
+        "[订阅续费] uid: {}, 套餐 {} 续费 {} 个月，仅顺延有效期（订阅 id={} 不变，AI 用量不重置）",
+        uid, plan.plan_code, request.billing_type.months(), old_sub.id
+      );
+      extend_user_subscription(
+        pg_pool, old_sub.id, request.billing_type.months(), billing_type_str,
+      ).await?
+    } else if new_level > old_level && old_level > 0 {
       // 升级（旧套餐为付费且未到期）：暂停旧套餐（转 pending + 存剩余时长），插入新的高级 active。
       // 待高级套餐自然到期不续费时，逐级恢复暂存的低级套餐继续执行。
       log::info!(
@@ -93,7 +103,7 @@ pub async fn subscribe_plan(
         Some(grace_end), Some(old_sub.plan_id),
       ).await?
     } else {
-      // 同级续费 / 从免费版(等级0)升级：作废旧的，插入新的 active（pending 的低级套餐不受影响）。
+      // 同级换套餐 / 从免费版(等级0)升级：作废旧的，插入新的 active（pending 的低级套餐不受影响）。
       upsert_user_subscription(
         pg_pool, uid, plan.id, billing_type_str, start_date, end_date, None, None,
       ).await?
@@ -219,11 +229,11 @@ async fn build_current_subscription_with_plan(
   let plan_info = to_plan_info(plan.clone());
   let limits = PlanLimitsContext::from(&plan);
 
-  let (usage_start_date, usage_end_date) = (
-    subscription.start_date.date_naive(),
-    subscription.end_date.date_naive(),
-  );
-  
+  // AI 次数额度按"计费月"统计：以订阅 start_date 为锚点逐月推进，取 now 所在的那个月窗口。
+  // 同套餐续费顺延 end_date 后，每个计费月各自享有整月额度；续费当月已用次数延续、不重置。
+  let (usage_start_date, usage_end_date) =
+    current_billing_period(subscription.start_date, subscription.end_date);
+
   // Real AI Usage（只统计当前订阅套餐的用量）
   let usage =
     aggregate_user_usage(pg_pool, uid, usage_start_date, usage_end_date, Some(subscription.id))
@@ -597,6 +607,24 @@ fn add_months(
   months: u32,
 ) -> Option<chrono::DateTime<Utc>> {
   start.checked_add_months(Months::new(months.into()))
+}
+
+/// 计算当前时间落在订阅的哪个"计费月"窗口内（以 start_date 为锚点按整月推进）。
+/// 返回 (窗口起始日, 窗口结束日)，结束日不超过订阅 end_date。
+fn current_billing_period(
+  start: chrono::DateTime<Utc>,
+  end: chrono::DateTime<Utc>,
+) -> (NaiveDate, NaiveDate) {
+  let now = Utc::now();
+  let mut months =
+    ((now.year() - start.year()) * 12 + now.month() as i32 - start.month() as i32).max(0) as u32;
+  // 若本月锚点日尚未到达（如 15 日订阅、今天是下月 10 日），回退一个月
+  if add_months(start, months).map_or(false, |p| p > now) {
+    months = months.saturating_sub(1);
+  }
+  let period_start = add_months(start, months).unwrap_or(start).min(end);
+  let period_end = add_months(period_start, 1).unwrap_or(end).min(end);
+  (period_start.date_naive(), period_end.date_naive())
 }
 
 fn month_range(reference: chrono::DateTime<Utc>) -> (NaiveDate, NaiveDate) {

@@ -360,14 +360,6 @@ pub async fn init_state(config: &Config) -> Result<AppState, Error> {
     start_subscription_expiry_task(expiry_pg_pool).await;
   });
 
-  // 启动资源清理定时任务（每24小时）
-  info!("Setting up resource cleanup task...");
-  let cleanup_pg_pool = pg_pool.clone();
-  let cleanup_s3_client = s3_client.clone();
-  tokio::spawn(async move {
-    start_resource_cleanup_task(cleanup_pg_pool, cleanup_s3_client).await;
-  });
-
   info!("Setting up Indexer scheduler...");
   let (open_ai_config, azure_ai_config) = get_open_ai_config();
   let embedder_config = IndexerConfiguration {
@@ -411,7 +403,7 @@ pub async fn init_state(config: &Config) -> Result<AppState, Error> {
   info!("ChatClient initialized");
 
   // Initialize Qiniu Cloud S3-compatible bucket storage for document file uploads
-  let qiniu_bucket_storage = if config.qiniu.enabled {
+  let (qiniu_bucket_storage, qiniu_cleanup_client) = if config.qiniu.enabled {
     info!("🗄️ [七牛云S3存储] 正在初始化用于文档文件上传的S3兼容存储...");
     match get_qiniu_s3_client(&config.qiniu).await {
       Ok(qiniu_s3_client) => {
@@ -422,21 +414,30 @@ pub async fn init_state(config: &Config) -> Result<AppState, Error> {
           None,
         );
         let storage = Arc::new(S3BucketStorage::from_bucket_impl(
-          qiniu_s3_bucket_client,
+          qiniu_s3_bucket_client.clone(),
           pg_pool.clone(),
         ));
         info!("✅ [七牛云S3存储] 文档文件存储初始化成功！bucket: {}", config.qiniu.bucket);
-        Some(storage)
+        (Some(storage), Some(qiniu_s3_bucket_client))
       },
       Err(e) => {
         error!("❌ [七牛云S3存储] 初始化失败: {}，将使用MinIO作为文件存储", e);
-        None
+        (None, None)
       }
     }
   } else {
     info!("ℹ️ [七牛云S3存储] 未启用，文档文件将存储到MinIO");
-    None
+    (None, None)
   };
+
+  // 启动资源清理定时任务（每24小时）。物理文件可能分布在七牛云（主存储）和 MinIO（历史数据），
+  // 因此把两个存储客户端都交给清理任务。
+  info!("Setting up resource cleanup task...");
+  let cleanup_pg_pool = pg_pool.clone();
+  let cleanup_s3_client = s3_client.clone();
+  tokio::spawn(async move {
+    start_resource_cleanup_task(cleanup_pg_pool, cleanup_s3_client, qiniu_cleanup_client).await;
+  });
 
   // Initialize Qiniu Cloud client for AI file storage (optional)
   let qiniu_client = if config.qiniu.enabled {

@@ -258,14 +258,38 @@ pub async fn get_or_create_free_subscription(
 ) -> Result<UserSubscriptionRow, AppError> {
   // 首先检查是否已有活跃订阅
   if let Some(existing_sub) = get_user_active_subscription(pg_pool, uid).await? {
+    // 自愈：若当前 active 是免费版，但用户还有升级时暂存的付费 pending 套餐，
+    // 且最近一次订阅终止是"自然到期"（而非主动取消，主动取消按约定不恢复），
+    // 说明恢复流程曾被跳过、错误补发了免费版（旧逻辑只在"本次请求标记过期"时才恢复）。
+    // 此时优先恢复暂存的付费套餐，并作废这条自动补发的免费版。
+    let free_plan_id = get_free_plan_id(pg_pool).await?;
+    if existing_sub.plan_id == free_plan_id
+      && last_terminated_subscription_is_expired(pg_pool, uid).await?
+    {
+      if let Some(resumed) = resume_highest_pending_subscription(pg_pool, uid).await? {
+        sqlx::query(
+          r#"
+          UPDATE af_user_subscriptions
+          SET status = 'canceled', canceled_at = NOW(),
+              cancel_reason = '系统: 恢复暂存付费套餐, 作废自动补发的免费版'
+          WHERE id = $1
+          "#,
+        )
+        .bind(existing_sub.id)
+        .execute(pg_pool)
+        .await?;
+        tracing::info!(
+          "[订阅自愈] uid: {}, 作废自动补发的免费版订阅 id={}, 改用恢复的暂存套餐 id={}",
+          uid, existing_sub.id, resumed.id
+        );
+        return Ok(resumed);
+      }
+    }
     return Ok(existing_sub);
   }
 
-  // 无有效 active。先把"自然到期(status=active 且 end_date<=NOW)"的订阅标记为 expired；
-  // 若确有自然到期发生，则尝试恢复升级前暂存的、等级最高的 pending 低级套餐，避免错误地降级到免费版。
-  // 注意：用户主动取消的订阅 status 已是 'canceled'，不会命中下面的 UPDATE，因此不会触发恢复
-  //（符合"只有自然到期才恢复"的约定，竞态下也不会补免费版后再有两条 active）。
-  let expired = sqlx::query(
+  // 无有效 active。先把"自然到期(status=active 且 end_date<=NOW)"的订阅标记为 expired。
+  sqlx::query(
     r#"
     UPDATE af_user_subscriptions
     SET status = 'expired'
@@ -274,9 +298,13 @@ pub async fn get_or_create_free_subscription(
   )
   .bind(uid)
   .execute(pg_pool)
-  .await?
-  .rows_affected();
-  if expired > 0 {
+  .await?;
+
+  // 只要最近一次订阅终止是"自然到期"(expired) 而非"主动取消"(canceled)，
+  // 就尝试恢复升级前暂存的、等级最高的 pending 低级套餐 —— 不论 expired 是本次请求
+  // 标记的，还是此前定时任务/其它路径标记的。（旧逻辑只认"本次标记"，一旦定时任务先把
+  // 订阅标记为 expired、而恢复又未完成，这里就会跳过恢复、错误补发一年免费版。）
+  if last_terminated_subscription_is_expired(pg_pool, uid).await? {
     if let Some(resumed) = resume_highest_pending_subscription(pg_pool, uid).await? {
       return Ok(resumed);
     }
@@ -316,6 +344,30 @@ pub async fn get_or_create_free_subscription(
     grace_period_end: row.get(9),
     downgraded_from_plan_id: row.get(10),
   })
+}
+
+/// 判断用户最近一次终止的订阅是否为"自然到期"(expired)。
+/// 按真实终止时间排序：expired 取 end_date，canceled 取 canceled_at
+/// （续费/升级作废的旧订阅 end_date 在未来，不能用 end_date 排）。
+/// 返回 true 表示可按约定恢复暂存的 pending 套餐；主动取消(canceled)返回 false。
+#[instrument(skip_all, err)]
+pub async fn last_terminated_subscription_is_expired(
+  pg_pool: &PgPool,
+  uid: i64,
+) -> Result<bool, AppError> {
+  let row: Option<(String,)> = sqlx::query_as(
+    r#"
+    SELECT status FROM af_user_subscriptions
+    WHERE uid = $1 AND status IN ('expired', 'canceled')
+    ORDER BY COALESCE(canceled_at, end_date) DESC, id DESC
+    LIMIT 1
+    "#,
+  )
+  .bind(uid)
+  .fetch_optional(pg_pool)
+  .await?;
+
+  Ok(row.as_ref().map(|s| s.0.as_str()) == Some("expired"))
 }
 
 #[instrument(skip_all, err)]
@@ -456,6 +508,33 @@ pub async fn upsert_user_subscription(
     pg_pool, uid, plan_id, billing_type, start_date, end_date, grace_period_end, downgraded_from_plan_id,
   )
   .await
+}
+
+/// 同套餐续费：不作废、不新建记录，仅把现有 active 订阅的 end_date 顺延指定月数。
+/// 保持同一条记录（同一 subscription_id），当期 AI 用量按订阅延续、不会重置。
+#[instrument(skip_all, err)]
+pub async fn extend_user_subscription(
+  pg_pool: &PgPool,
+  subscription_id: i64,
+  months: u32,
+  billing_type: &str,
+) -> Result<UserSubscriptionRow, AppError> {
+  let row = sqlx::query(
+    r#"
+    UPDATE af_user_subscriptions
+    SET end_date = end_date + make_interval(months => $2::int),
+        billing_type = $3
+    WHERE id = $1 AND status = 'active'
+    RETURNING id, uid, plan_id, billing_type, status, start_date, end_date, canceled_at, cancel_reason, grace_period_end, downgraded_from_plan_id
+    "#,
+  )
+  .bind(subscription_id)
+  .bind(months as i32)
+  .bind(billing_type)
+  .fetch_one(pg_pool)
+  .await?;
+
+  Ok(map_subscription_row(&row))
 }
 
 /// 升级到更高付费套餐：把当前 active 套餐暂停(转 pending 并记录剩余时长)，插入新的高级 active 套餐。
