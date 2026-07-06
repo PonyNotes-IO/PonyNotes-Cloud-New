@@ -975,11 +975,17 @@ async fn get_current_collab_permission_handler(
     }
   }
 
-  if state
-    .collab_access_control
-    .enforce_action(&workspace_id, &uid, &object_id, Action::Read)
-    .await
-    .is_ok()
+  // 【新建对象权限修复 2026-07-06】ReadOnly 兜底只对"已持久化到 af_collab 的对象"生效。
+  // create_collab 经写队列异步落库，新建的表格/看板/日历在打开瞬间往往还不在 af_collab，
+  // collab_in_workspace=false 会跳过上面的工作区角色分支;若此处仍返回 200+ReadOnly，
+  // 客户端会以该"明确答复"短路本地的创建者/工作区角色兜底，导致新建视图整页只读
+  // (点击无反应)。对未知对象应返回 404，让客户端走本地兜底判定。
+  if collab_in_workspace
+    && state
+      .collab_access_control
+      .enforce_action(&workspace_id, &uid, &object_id, Action::Read)
+      .await
+      .is_ok()
   {
     return Ok(
       AppResponse::Ok()
@@ -989,6 +995,14 @@ async fn get_current_collab_permission_handler(
         ))
         .into(),
     );
+  }
+
+  if !collab_in_workspace {
+    return Err(AppError::RecordNotFound(format!(
+      "collab {} not found in workspace {}",
+      object_id, workspace_id
+    ))
+    .into());
   }
 
   Err(AppError::NotEnoughPermissions.into())
