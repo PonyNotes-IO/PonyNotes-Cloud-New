@@ -288,6 +288,8 @@ pub async fn get_all_user_workspaces(
   };
   let mut workspaces = workspaces
     .into_iter()
+    // 过滤已逻辑删除的工作区（过期会员超限清理，对客户端表现为已删除）
+    .filter(|row| row.deleted_at.is_none())
     .flat_map(|row| {
       let result = AFWorkspace::try_from(row);
       if let Err(err) = &result {

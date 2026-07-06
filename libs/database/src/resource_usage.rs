@@ -15,12 +15,13 @@ pub async fn is_blob_metadata_exists(
   workspace_id: &Uuid,
   file_id: &str,
 ) -> Result<bool, AppError> {
+  // 逻辑删除(deleted_at 非空)的记录视为不存在, 允许重新上传时走 upsert 复活
   let exists: (bool,) = sqlx::query_as(
     r#"
      SELECT EXISTS (
          SELECT 1
          FROM af_blob_metadata
-         WHERE workspace_id = $1 AND file_id = $2
+         WHERE workspace_id = $1 AND file_id = $2 AND deleted_at IS NULL
      );
     "#,
   )
@@ -40,20 +41,22 @@ pub async fn insert_blob_metadata(
   file_type: &str,
   file_size: usize,
 ) -> Result<(), AppError> {
-  let res = sqlx::query!(
+  // 重新上传同名文件时清除逻辑删除标记(复活), 使用运行时查询以避免重新生成 .sqlx 缓存
+  let res = sqlx::query(
     r#"
         INSERT INTO af_blob_metadata
         (workspace_id, file_id, file_type, file_size)
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (workspace_id, file_id) DO UPDATE SET
             file_type = $3,
-            file_size = $4
+            file_size = $4,
+            deleted_at = NULL
         "#,
-    workspace_id,
-    file_id,
-    file_type,
-    file_size as i64,
   )
+  .bind(workspace_id)
+  .bind(file_id)
+  .bind(file_type)
+  .bind(file_size as i64)
   .execute(pg_pool)
   .await?;
   let n = res.rows_affected();
@@ -143,15 +146,16 @@ pub async fn get_blob_metadata(
     metadata_key
   );
   // file_id is the BlobPath's blob_metadata_key
-  let metadata = sqlx::query_as!(
-    AFBlobMetadataRow,
+  // 逻辑删除(deleted_at 非空)的文件对外表现为不存在(下载返回 404), 对象存储保留可恢复
+  let metadata = sqlx::query_as::<_, AFBlobMetadataRow>(
     r#"
-        SELECT * FROM af_blob_metadata
-        WHERE workspace_id = $1 AND file_id = $2
+        SELECT workspace_id, file_id, file_type, file_size, modified_at, status, source, source_metadata
+        FROM af_blob_metadata
+        WHERE workspace_id = $1 AND file_id = $2 AND deleted_at IS NULL
         "#,
-    workspace_id,
-    metadata_key,
   )
+  .bind(workspace_id)
+  .bind(metadata_key)
   .fetch_one(pg_pool)
   .await?;
   Ok(metadata)
@@ -164,14 +168,15 @@ pub async fn get_all_workspace_blob_metadata(
   pg_pool: &PgPool,
   workspace_id: &Uuid,
 ) -> Result<Vec<AFBlobMetadataRow>, AppError> {
-  let all_metadata = sqlx::query_as!(
-    AFBlobMetadataRow,
+  // 排除逻辑删除的文件, 使用运行时查询以避免重新生成 .sqlx 缓存
+  let all_metadata = sqlx::query_as::<_, AFBlobMetadataRow>(
     r#"
-        SELECT * FROM af_blob_metadata
-        WHERE workspace_id = $1
+        SELECT workspace_id, file_id, file_type, file_size, modified_at, status, source, source_metadata
+        FROM af_blob_metadata
+        WHERE workspace_id = $1 AND deleted_at IS NULL
         "#,
-    workspace_id,
   )
+  .bind(workspace_id)
   .fetch_all(pg_pool)
   .await?;
   Ok(all_metadata)
@@ -204,7 +209,9 @@ pub async fn get_all_workspace_blob_ids(
 #[inline]
 pub async fn get_workspace_usage_size(pool: &PgPool, workspace_id: &Uuid) -> Result<u64, AppError> {
   let row: (Option<Decimal>,) =
-    sqlx::query_as(r#"SELECT SUM(file_size) FROM af_blob_metadata WHERE workspace_id = $1;"#)
+    sqlx::query_as(
+      r#"SELECT SUM(file_size) FROM af_blob_metadata WHERE workspace_id = $1 AND deleted_at IS NULL;"#,
+    )
       .bind(workspace_id)
       .fetch_one(pool)
       .await?;

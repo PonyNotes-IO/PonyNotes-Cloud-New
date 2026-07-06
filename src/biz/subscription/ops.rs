@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use app_error::AppError;
 use chrono::{Datelike, Months, NaiveDate, Utc};
-use database::subscription::{aggregate_user_usage, calculate_addon_period_end, extend_user_subscription, get_or_create_free_subscription, get_plan_level, get_subscription_addon, get_subscription_plan, get_subscription_plan_by_code, get_user_active_subscription, get_user_owned_workspace_count, get_user_total_usage_bytes, insert_user_addon, list_subscription_addons, list_subscription_plans, list_user_addons, upgrade_user_subscription_with_pause, upsert_usage_record, upsert_user_subscription, SubscriptionAddonRow, SubscriptionPlanRow, UserAddonRow, UserSubscriptionRow};
+use database::subscription::{aggregate_user_usage, calculate_addon_period_end, extend_user_subscription, get_or_create_free_subscription, get_plan_level, get_subscription_addon, get_subscription_plan, get_subscription_plan_by_code, get_user_active_subscription, get_user_owned_workspace_count, get_user_total_usage_bytes, insert_user_addon, list_subscription_addons, list_subscription_plans, list_user_addons, restore_blobs_within_budget, restore_workspaces_within_limit, upsert_usage_record, upsert_user_subscription, SubscriptionAddonRow, SubscriptionPlanRow, UserAddonRow, UserSubscriptionRow};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use shared_entity::dto::subscription_dto::{
@@ -66,13 +66,14 @@ pub async fn subscribe_plan(
   let billing_type_str = request.billing_type.as_str();
   let existing_sub = get_user_active_subscription(pg_pool, uid).await?;
 
+  let new_level = get_plan_level(&plan.plan_code);
+
   let subscription = if let Some(ref old_sub) = existing_sub {
     let old_plan = get_subscription_plan(pg_pool, old_sub.plan_id).await?;
     let old_level = get_plan_level(&old_plan.plan_code);
-    let new_level = get_plan_level(&plan.plan_code);
 
     if old_sub.plan_id == plan.id {
-      // 同套餐续费：不作废旧记录、不新建记录，直接在原订阅上顺延有效期。
+      // 规则3：同级别续费只延长有效期。不作废、不新建，
       // 保持同一 subscription_id，当期 AI 用量/剩余额度延续，不会被重置。
       log::info!(
         "[订阅续费] uid: {}, 套餐 {} 续费 {} 个月，仅顺延有效期（订阅 id={} 不变，AI 用量不重置）",
@@ -81,41 +82,107 @@ pub async fn subscribe_plan(
       extend_user_subscription(
         pg_pool, old_sub.id, request.billing_type.months(), billing_type_str,
       ).await?
-    } else if new_level > old_level && old_level > 0 {
-      // 升级（旧套餐为付费且未到期）：暂停旧套餐（转 pending + 存剩余时长），插入新的高级 active。
-      // 待高级套餐自然到期不续费时，逐级恢复暂存的低级套餐继续执行。
+    } else if old_level > 0 && new_level < old_level {
+      // 规则2：高级别会员生效期间，不允许再购买低级别会员。
+      return Err(AppError::InvalidRequest(format!(
+        "当前 {} 会员生效期间，不能购买更低级别的 {}",
+        old_plan.plan_name_cn, plan.plan_name_cn
+      )));
+    } else if old_level > 0 && new_level > old_level {
+      // 规则4：年付会员生效期间，只能购买年付的更高级别会员。
+      if old_sub.billing_type == "yearly" && request.billing_type.as_str() == "monthly" {
+        return Err(AppError::InvalidRequest(
+          "年付会员生效期间，只能购买年付的更高级别会员".to_string(),
+        ));
+      }
+      // 规则1/4：升级 → 低级别套餐直接废弃（canceled），高级别立即生效。
       log::info!(
-        "[订阅升级] uid: {}, 从 {} (等级{}) 升级到 {} (等级{})，旧套餐转 pending 暂存",
+        "[订阅升级] uid: {}, 从 {} (等级{}) 升级到 {} (等级{})，旧套餐直接废弃",
         uid, old_plan.plan_code, old_level, plan.plan_code, new_level
       );
-      upgrade_user_subscription_with_pause(
-        pg_pool, uid, plan.id, billing_type_str, start_date, end_date,
-      ).await?
-    } else if new_level < old_level {
-      // 降级：设置15天宽限期，宽限期内多余资源保留（作废旧套餐，不暂存）。
-      let grace_end = start_date + chrono::Duration::days(15);
-      log::info!(
-        "[订阅降级] uid: {}, 从 {} (等级{}) 降级到 {} (等级{}), 宽限期至 {}",
-        uid, old_plan.plan_code, old_level, plan.plan_code, new_level, grace_end
-      );
-      upsert_user_subscription(
-        pg_pool, uid, plan.id, billing_type_str, start_date, end_date,
-        Some(grace_end), Some(old_sub.plan_id),
-      ).await?
-    } else {
-      // 同级换套餐 / 从免费版(等级0)升级：作废旧的，插入新的 active（pending 的低级套餐不受影响）。
       upsert_user_subscription(
         pg_pool, uid, plan.id, billing_type_str, start_date, end_date, None, None,
       ).await?
+    } else {
+      // 从免费版(等级0)购买付费套餐 / 同级换套餐：
+      // 若此前有更高级别套餐已过期（高级别过期后续费较低级别），给 15 天宽限期，
+      // 期满后由清理任务对超出新套餐限额的内容做逻辑删除。
+      let (grace_end, downgraded_from) =
+        grace_for_rebuy_lower_plan(pg_pool, uid, new_level, start_date).await?;
+      upsert_user_subscription(
+        pg_pool, uid, plan.id, billing_type_str, start_date, end_date,
+        grace_end, downgraded_from,
+      ).await?
     }
   } else {
-    // 无现有 active：直接插入新 active。
+    // 无现有 active：直接插入新 active（同样检查"过期后续费较低级别"的宽限期）。
+    let (grace_end, downgraded_from) =
+      grace_for_rebuy_lower_plan(pg_pool, uid, new_level, start_date).await?;
     upsert_user_subscription(
-      pg_pool, uid, plan.id, billing_type_str, start_date, end_date, None, None,
+      pg_pool, uid, plan.id, billing_type_str, start_date, end_date,
+      grace_end, downgraded_from,
     ).await?
   };
 
+  // 购买成功后，在新套餐限额内自动恢复此前被逻辑删除的内容（工作区/文件）。
+  // 恢复失败不影响订阅生效，仅记录日志。
+  if let Err(e) = restore_resources_within_plan_limits(pg_pool, uid, &plan).await {
+    log::error!("[订阅购买] uid: {}, 自动恢复逻辑删除内容失败: {:?}", uid, e);
+  }
+
   build_current_subscription_with_plan(pg_pool, uid, subscription, plan).await
+}
+
+/// 判断本次购买是否属于"更高级别套餐过期后，续费较低级别"：
+/// 是则返回 15 天宽限期（期间保留超额内容，期满由清理任务逻辑删除多余部分）。
+async fn grace_for_rebuy_lower_plan(
+  pg_pool: &PgPool,
+  uid: i64,
+  new_level: i32,
+  start_date: chrono::DateTime<Utc>,
+) -> Result<(Option<chrono::DateTime<Utc>>, Option<i64>), AppError> {
+  if new_level <= 0 {
+    return Ok((None, None));
+  }
+  let recently_expired =
+    database::subscription::get_user_recently_expired_subscription(pg_pool, uid).await?;
+  if let Some(prev) = recently_expired {
+    let prev_plan = get_subscription_plan(pg_pool, prev.plan_id).await?;
+    if get_plan_level(&prev_plan.plan_code) > new_level {
+      let grace_end = start_date + chrono::Duration::days(15);
+      log::info!(
+        "[订阅降级续费] uid: {}, 此前 {} 已过期, 现购买较低级别, 宽限期至 {}",
+        uid, prev_plan.plan_code, grace_end
+      );
+      return Ok((Some(grace_end), Some(prev.plan_id)));
+    }
+  }
+  Ok((None, None))
+}
+
+/// 购买/续费成功后，在新套餐限额内自动恢复被逻辑删除的工作区与文件。
+async fn restore_resources_within_plan_limits(
+  pg_pool: &PgPool,
+  uid: i64,
+  plan: &SubscriptionPlanRow,
+) -> Result<(), AppError> {
+  let workspace_limit = plan.collaborative_workspace_limit as i64;
+  let restored_workspaces =
+    restore_workspaces_within_limit(pg_pool, uid, workspace_limit).await?;
+
+  let limit_bytes =
+    (plan.cloud_storage_gb.to_f64().unwrap_or(0.0) * STORAGE_MB_IN_BYTES) as i64;
+  let current_usage = get_user_total_usage_bytes(pg_pool, uid).await?;
+  let restored_blobs =
+    restore_blobs_within_budget(pg_pool, uid, limit_bytes - current_usage).await?;
+
+  if restored_workspaces > 0 || restored_blobs > 0 {
+    log::info!(
+      "[订阅购买] uid: {}, 自动恢复逻辑删除内容: 工作区 {} 个, 文件 {} 个",
+      uid, restored_workspaces, restored_blobs
+    );
+  }
+  Ok(())
 }
 
 pub async fn cancel_subscription(

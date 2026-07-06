@@ -1,10 +1,7 @@
 use sqlx::PgPool;
-use std::collections::HashSet;
 use tracing::{info, error};
 use tokio::time::{interval, Duration};
-use database::subscription::{
-  expire_overdue_subscriptions, get_user_active_subscription, resume_highest_pending_subscription,
-};
+use database::subscription::expire_overdue_subscriptions;
 
 const EXPIRY_CHECK_INTERVAL_SECS: u64 = 3600; // 每小时检查一次
 
@@ -18,23 +15,14 @@ pub async fn start_subscription_expiry_task(pg_pool: PgPool) {
 
   loop {
     timer.tick().await;
+    // 按规则：付费套餐到期不续费 → 直接降级为免费版。
+    // 这里只负责把到期订阅标记为 expired；免费版由用户下次请求时
+    // get_or_create_free_subscription 自动补发，超限内容由资源清理任务
+    // 在 15 天宽限期后做逻辑删除。
     match expire_overdue_subscriptions(&pg_pool).await {
       Ok(uids) => {
         if !uids.is_empty() {
           info!("[订阅过期检查] 已将 {} 条过期订阅状态更新为 expired", uids.len());
-        }
-        // 对自然到期的用户，逐个尝试恢复升级前暂存的、等级最高的 pending 低级套餐
-        //（去重；仅当该用户当前确无有效 active 时才恢复）。
-        for uid in uids.into_iter().collect::<HashSet<_>>() {
-          match get_user_active_subscription(&pg_pool, uid).await {
-            Ok(Some(_)) => {} // 仍有其它有效 active，无需恢复
-            Ok(None) => {
-              if let Err(e) = resume_highest_pending_subscription(&pg_pool, uid).await {
-                error!("[订阅过期检查] uid {} 恢复暂存套餐失败: {:?}", uid, e);
-              }
-            }
-            Err(e) => error!("[订阅过期检查] uid {} 查询当前订阅失败: {:?}", uid, e),
-          }
         }
       }
       Err(e) => {

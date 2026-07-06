@@ -258,37 +258,11 @@ pub async fn get_or_create_free_subscription(
 ) -> Result<UserSubscriptionRow, AppError> {
   // 首先检查是否已有活跃订阅
   if let Some(existing_sub) = get_user_active_subscription(pg_pool, uid).await? {
-    // 自愈：若当前 active 是免费版，但用户还有升级时暂存的付费 pending 套餐，
-    // 且最近一次订阅终止是"自然到期"（而非主动取消，主动取消按约定不恢复），
-    // 说明恢复流程曾被跳过、错误补发了免费版（旧逻辑只在"本次请求标记过期"时才恢复）。
-    // 此时优先恢复暂存的付费套餐，并作废这条自动补发的免费版。
-    let free_plan_id = get_free_plan_id(pg_pool).await?;
-    if existing_sub.plan_id == free_plan_id
-      && last_terminated_subscription_is_expired(pg_pool, uid).await?
-    {
-      if let Some(resumed) = resume_highest_pending_subscription(pg_pool, uid).await? {
-        sqlx::query(
-          r#"
-          UPDATE af_user_subscriptions
-          SET status = 'canceled', canceled_at = NOW(),
-              cancel_reason = '系统: 恢复暂存付费套餐, 作废自动补发的免费版'
-          WHERE id = $1
-          "#,
-        )
-        .bind(existing_sub.id)
-        .execute(pg_pool)
-        .await?;
-        tracing::info!(
-          "[订阅自愈] uid: {}, 作废自动补发的免费版订阅 id={}, 改用恢复的暂存套餐 id={}",
-          uid, existing_sub.id, resumed.id
-        );
-        return Ok(resumed);
-      }
-    }
     return Ok(existing_sub);
   }
 
-  // 无有效 active。先把"自然到期(status=active 且 end_date<=NOW)"的订阅标记为 expired。
+  // 无有效 active。先把"自然到期(status=active 且 end_date<=NOW)"的订阅标记为 expired，
+  // 然后按规则直接降级为免费版（付费套餐到期不续费 → 免费版，不做任何恢复）。
   sqlx::query(
     r#"
     UPDATE af_user_subscriptions
@@ -299,16 +273,6 @@ pub async fn get_or_create_free_subscription(
   .bind(uid)
   .execute(pg_pool)
   .await?;
-
-  // 只要最近一次订阅终止是"自然到期"(expired) 而非"主动取消"(canceled)，
-  // 就尝试恢复升级前暂存的、等级最高的 pending 低级套餐 —— 不论 expired 是本次请求
-  // 标记的，还是此前定时任务/其它路径标记的。（旧逻辑只认"本次标记"，一旦定时任务先把
-  // 订阅标记为 expired、而恢复又未完成，这里就会跳过恢复、错误补发一年免费版。）
-  if last_terminated_subscription_is_expired(pg_pool, uid).await? {
-    if let Some(resumed) = resume_highest_pending_subscription(pg_pool, uid).await? {
-      return Ok(resumed);
-    }
-  }
 
   // 获取免费版计划ID
   let free_plan_id = get_free_plan_id(pg_pool).await?;
@@ -344,30 +308,6 @@ pub async fn get_or_create_free_subscription(
     grace_period_end: row.get(9),
     downgraded_from_plan_id: row.get(10),
   })
-}
-
-/// 判断用户最近一次终止的订阅是否为"自然到期"(expired)。
-/// 按真实终止时间排序：expired 取 end_date，canceled 取 canceled_at
-/// （续费/升级作废的旧订阅 end_date 在未来，不能用 end_date 排）。
-/// 返回 true 表示可按约定恢复暂存的 pending 套餐；主动取消(canceled)返回 false。
-#[instrument(skip_all, err)]
-pub async fn last_terminated_subscription_is_expired(
-  pg_pool: &PgPool,
-  uid: i64,
-) -> Result<bool, AppError> {
-  let row: Option<(String,)> = sqlx::query_as(
-    r#"
-    SELECT status FROM af_user_subscriptions
-    WHERE uid = $1 AND status IN ('expired', 'canceled')
-    ORDER BY COALESCE(canceled_at, end_date) DESC, id DESC
-    LIMIT 1
-    "#,
-  )
-  .bind(uid)
-  .fetch_optional(pg_pool)
-  .await?;
-
-  Ok(row.as_ref().map(|s| s.0.as_str()) == Some("expired"))
 }
 
 #[instrument(skip_all, err)]
@@ -537,93 +477,123 @@ pub async fn extend_user_subscription(
   Ok(map_subscription_row(&row))
 }
 
-/// 升级到更高付费套餐：把当前 active 套餐暂停(转 pending 并记录剩余时长)，插入新的高级 active 套餐。
-/// 与 upsert 的区别是旧套餐不作废、而是暂存，待高级套餐自然到期后可逐级恢复。
+/// 逻辑删除用户超出限额的工作区（保留最早创建的 `workspace_limit` 个）。
+/// 仅打 deleted_at 标记：对象存储与数据库内容全部保留，可恢复；
+/// 客户端列表不再显示、用量不再计入。返回本次删除的工作区数。
 #[instrument(skip_all, err)]
-pub async fn upgrade_user_subscription_with_pause(
+pub async fn soft_delete_workspaces_over_limit(
   pg_pool: &PgPool,
   uid: i64,
-  plan_id: i64,
-  billing_type: &str,
-  start_date: DateTime<Utc>,
-  end_date: DateTime<Utc>,
-) -> Result<UserSubscriptionRow, AppError> {
-  // 暂停当前 active：转 pending，记录剩余时长（秒），暂停计时。
-  sqlx::query(
+  workspace_limit: i64,
+) -> Result<u64, AppError> {
+  let affected = sqlx::query(
     r#"
-    UPDATE af_user_subscriptions
-    SET status = 'pending',
-        remaining_seconds = GREATEST(0, EXTRACT(EPOCH FROM (end_date - NOW())))::BIGINT
-    WHERE uid = $1 AND status = 'active'
+    UPDATE af_workspace
+    SET deleted_at = NOW()
+    WHERE workspace_id IN (
+      SELECT workspace_id
+      FROM af_workspace
+      WHERE owner_uid = $1 AND deleted_at IS NULL
+      ORDER BY created_at ASC
+      OFFSET $2
+    )
     "#,
   )
   .bind(uid)
+  .bind(workspace_limit)
   .execute(pg_pool)
-  .await?;
+  .await?
+  .rows_affected();
 
-  insert_active_subscription(pg_pool, uid, plan_id, billing_type, start_date, end_date, None, None).await
+  Ok(affected)
 }
 
-/// 恢复用户等级最高的 pending 套餐（升级前暂存的低级套餐）。
-/// 仅应在用户已无有效 active、且是"高级套餐自然到期"场景下调用。
-/// start_date=NOW()，end_date=NOW()+remaining_seconds，随后置空 remaining_seconds。
-/// 无可恢复的 pending（不存在或剩余<=0）时返回 None。
+/// 恢复用户被逻辑删除的工作区，直到达到 `workspace_limit`（按创建时间从早到晚恢复）。
+/// 返回本次恢复的工作区数。
 #[instrument(skip_all, err)]
-pub async fn resume_highest_pending_subscription(
+pub async fn restore_workspaces_within_limit(
   pg_pool: &PgPool,
   uid: i64,
-) -> Result<Option<UserSubscriptionRow>, AppError> {
+  workspace_limit: i64,
+) -> Result<u64, AppError> {
+  let current = get_user_owned_workspace_count(pg_pool, uid).await?;
+  let slots = workspace_limit - current;
+  if slots <= 0 {
+    return Ok(0);
+  }
+
+  let affected = sqlx::query(
+    r#"
+    UPDATE af_workspace
+    SET deleted_at = NULL
+    WHERE workspace_id IN (
+      SELECT workspace_id
+      FROM af_workspace
+      WHERE owner_uid = $1 AND deleted_at IS NOT NULL
+      ORDER BY created_at ASC
+      LIMIT $2
+    )
+    "#,
+  )
+  .bind(uid)
+  .bind(slots)
+  .execute(pg_pool)
+  .await?
+  .rows_affected();
+
+  Ok(affected)
+}
+
+/// 恢复用户被逻辑删除的 blob 文件（按修改时间从新到旧），直到再恢复会超出
+/// `budget_bytes`（新套餐剩余可用空间）为止。返回本次恢复的文件数。
+#[instrument(skip_all, err)]
+pub async fn restore_blobs_within_budget(
+  pg_pool: &PgPool,
+  uid: i64,
+  budget_bytes: i64,
+) -> Result<u64, AppError> {
+  if budget_bytes <= 0 {
+    return Ok(0);
+  }
+
   let rows = sqlx::query(
     r#"
-    SELECT s.id, p.plan_code, s.remaining_seconds
-    FROM af_user_subscriptions s
-    JOIN af_subscription_plans p ON p.id = s.plan_id
-    WHERE s.uid = $1 AND s.status = 'pending'
-      AND s.remaining_seconds IS NOT NULL AND s.remaining_seconds > 0
+    SELECT b.workspace_id, b.file_id, b.file_size
+    FROM af_blob_metadata b
+    JOIN af_workspace w ON w.workspace_id = b.workspace_id
+    WHERE w.owner_uid = $1 AND w.deleted_at IS NULL AND b.deleted_at IS NOT NULL
+    ORDER BY b.modified_at DESC
     "#,
   )
   .bind(uid)
   .fetch_all(pg_pool)
   .await?;
 
-  // 逐级恢复：选套餐等级最高的一条 pending。
-  let mut best: Option<(i64, i64, i32)> = None; // (id, remaining_seconds, level)
-  for row in &rows {
-    let id: i64 = row.get(0);
-    let plan_code: String = row.get(1);
-    let remaining: i64 = row.get(2);
-    let level = get_plan_level(&plan_code);
-    if best.map_or(true, |(_, _, best_level)| level > best_level) {
-      best = Some((id, remaining, level));
+  let mut remaining = budget_bytes;
+  let mut restored: u64 = 0;
+  for row in rows {
+    let file_size: i64 = row.get(2);
+    if file_size > remaining {
+      continue;
     }
+    let workspace_id: uuid::Uuid = row.get(0);
+    let file_id: String = row.get(1);
+    sqlx::query(
+      r#"
+      UPDATE af_blob_metadata
+      SET deleted_at = NULL
+      WHERE workspace_id = $1 AND file_id = $2
+      "#,
+    )
+    .bind(workspace_id)
+    .bind(&file_id)
+    .execute(pg_pool)
+    .await?;
+    remaining -= file_size;
+    restored += 1;
   }
-  let (sub_id, remaining, _) = match best {
-    Some(v) => v,
-    None => return Ok(None),
-  };
 
-  let row = sqlx::query(
-    r#"
-    UPDATE af_user_subscriptions
-    SET status = 'active',
-        start_date = NOW(),
-        end_date = NOW() + make_interval(secs => $2::double precision),
-        remaining_seconds = NULL,
-        canceled_at = NULL
-    WHERE id = $1
-    RETURNING id, uid, plan_id, billing_type, status, start_date, end_date, canceled_at, cancel_reason, grace_period_end, downgraded_from_plan_id
-    "#,
-  )
-  .bind(sub_id)
-  .bind(remaining as f64)
-  .fetch_one(pg_pool)
-  .await?;
-
-  tracing::info!(
-    "[订阅恢复] uid: {}, 恢复暂存的 pending 订阅 id={}, 剩余 {} 秒",
-    uid, sub_id, remaining
-  );
-  Ok(Some(map_subscription_row(&row)))
+  Ok(restored)
 }
 
 /// 将一行订阅查询结果映射为 UserSubscriptionRow（列顺序须与各查询的 SELECT/RETURNING 一致）。
@@ -1005,10 +975,12 @@ pub async fn get_user_total_storage_usage(pg_pool: &PgPool, uid: i64) -> Result<
 pub async fn get_user_total_usage_bytes(pg_pool: &PgPool, uid: i64) -> Result<i64, AppError> {
   let row: (Option<i64>,) = sqlx::query_as(
     r#"
-        WITH user_workspaces AS (SELECT workspace_id FROM af_workspace WHERE owner_uid = $1),
+        WITH user_workspaces AS (SELECT workspace_id FROM af_workspace
+                                 WHERE owner_uid = $1 AND deleted_at IS NULL),
              blob_sum AS (SELECT SUM(file_size)::BIGINT as total
                           FROM af_blob_metadata
-                          WHERE workspace_id IN (SELECT workspace_id FROM user_workspaces)),
+                          WHERE workspace_id IN (SELECT workspace_id FROM user_workspaces)
+                            AND deleted_at IS NULL),
              collab_sum AS (SELECT SUM(len)::BIGINT as total
                             FROM af_collab
                             WHERE workspace_id IN (SELECT workspace_id FROM user_workspaces)),
@@ -1031,7 +1003,7 @@ pub async fn get_user_owned_workspace_count(pg_pool: &PgPool, uid: i64) -> Resul
     r#"
     SELECT COUNT(*)::BIGINT
     FROM af_workspace
-    WHERE owner_uid = $1
+    WHERE owner_uid = $1 AND deleted_at IS NULL
     "#,
   )
   .bind(uid)
