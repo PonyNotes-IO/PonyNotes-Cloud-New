@@ -1032,26 +1032,29 @@ pub async fn expire_overdue_subscriptions(pg_pool: &PgPool) -> Result<Vec<i64>, 
 }
 
 /// 查询需要资源清理的用户列表
-/// 场景1：过期/取消的订阅超过15天宽限期
+/// 场景1：最近一次过期/取消的订阅超过15天宽限期
 /// 场景2：降级后的活跃订阅，降级宽限期已过
 /// 排除：已有更新活跃订阅且无降级宽限期的用户
+///
+/// 注意：场景1 只看每个用户"最近一条" expired/canceled 记录（按 end_date 取最新），
+/// 与 `get_user_recently_expired_subscription`（清理执行前复核用）保持同一基准记录，
+/// 避免用户存在多条历史记录时，候选名单命中较早记录、但复核命中较新记录导致的
+/// "入围但被跳过"口径不一致（2026-07-07 修复）。
 #[instrument(skip_all, err)]
 pub async fn get_users_needing_cleanup(pg_pool: &PgPool) -> Result<Vec<i64>, AppError> {
   let rows: Vec<(i64,)> = sqlx::query_as(
     r#"
-    SELECT DISTINCT uid
+    WITH latest_terminated AS (
+      SELECT DISTINCT ON (uid) uid, end_date
+      FROM af_user_subscriptions
+      WHERE status IN ('expired', 'canceled')
+      ORDER BY uid, end_date DESC
+    )
+    SELECT uid FROM latest_terminated WHERE end_date + INTERVAL '15 days' < NOW()
+    UNION
+    SELECT uid
     FROM af_user_subscriptions
-    WHERE
-      (
-        status IN ('expired', 'canceled')
-        AND end_date + INTERVAL '15 days' < NOW()
-      )
-      OR
-      (
-        status = 'active'
-        AND grace_period_end IS NOT NULL
-        AND grace_period_end < NOW()
-      )
+    WHERE status = 'active' AND grace_period_end IS NOT NULL AND grace_period_end < NOW()
     "#,
   )
   .fetch_all(pg_pool)

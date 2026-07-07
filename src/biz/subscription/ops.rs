@@ -402,33 +402,10 @@ pub async fn get_user_resource_limit_status(
     Some(sub) => {
       let plan = get_subscription_plan(pg_pool, sub.plan_id).await?;
 
-      // 检查订阅是否已过期但仍在宽限期内
-      if sub.end_date < now {
-        // 检查是否在15天宽限期内（仅对过期订阅有效）
-        let grace_end = sub.end_date + chrono::Duration::days(15);
-        if now <= grace_end {
-          return Ok(ResourceLimitStatus {
-            plan_code: plan.plan_code.clone(),
-            storage_limit_mb: plan.cloud_storage_gb.to_f64().unwrap_or(0.0),
-            workspace_limit: plan.collaborative_workspace_limit as i64,
-            member_limit: plan.workspace_member_limit as i64,
-            is_grace_period: true,
-            grace_period_end: Some(grace_end),
-          });
-        }
-
-        // 超过宽限期，应用免费版限制
-        // 检查是否有历史订阅记录，如果有，使用免费版；否则返回降级限制
-        let free_plan = get_subscription_plan_by_code(pg_pool, "mfb").await?;
-        return Ok(ResourceLimitStatus {
-          plan_code: free_plan.plan_code,
-          storage_limit_mb: free_plan.cloud_storage_gb.to_f64().unwrap_or(0.0),
-          workspace_limit: free_plan.collaborative_workspace_limit as i64,
-          member_limit: free_plan.workspace_member_limit as i64,
-          is_grace_period: false,
-          grace_period_end: None,
-        });
-      }
+      // 注：sub 来自 get_user_active_subscription，查询条件已保证 end_date > NOW()，
+      // 因此这里不会再出现"active 但已过期"的记录，已过期场景统一由下方
+      // None 分支（走 get_user_recently_expired_subscription）处理，避免两套宽限期
+      // 计算并存导致口径不一致（2026-07-07 清理原 sub.end_date < now 死分支）。
 
       // 订阅有效，检查是否处于降级宽限期
       if let (Some(grace_end), Some(old_plan_id)) = (sub.grace_period_end, sub.downgraded_from_plan_id) {
