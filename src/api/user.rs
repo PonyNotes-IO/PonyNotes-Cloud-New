@@ -70,6 +70,24 @@ pub fn user_scope() -> Scope {
       web::resource("/notifications/{notification_id}/read")
         .route(web::post().to(mark_notification_read_handler)),
     )
+    // 全部归档 / 全部取消归档（归档状态服务端持久化，跨工作区/设备一致）
+    .service(
+      web::resource("/notifications/archive-all")
+        .route(web::post().to(archive_all_notifications_handler)),
+    )
+    .service(
+      web::resource("/notifications/unarchive-all")
+        .route(web::post().to(unarchive_all_notifications_handler)),
+    )
+    // 单条归档 / 取消归档
+    .service(
+      web::resource("/notifications/{notification_id}/archive")
+        .route(web::post().to(archive_notification_handler)),
+    )
+    .service(
+      web::resource("/notifications/{notification_id}/unarchive")
+        .route(web::post().to(unarchive_notification_handler)),
+    )
 }
 
 #[tracing::instrument(skip(state, path), err)]
@@ -475,11 +493,11 @@ async fn list_user_notifications_handler(
 
   let rows = sqlx::query(
     r#"
-    SELECT id, workspace_id, notification_type, payload, recipient_uid, created_at, processed, is_read, read_at
+    SELECT id, workspace_id, notification_type, payload, recipient_uid, created_at, processed, is_read, read_at, is_archived
     FROM af_notification
     WHERE recipient_uid = $1
     ORDER BY created_at DESC
-    LIMIT 50
+    LIMIT 100
     "#,
   )
   .bind(uid)
@@ -501,6 +519,7 @@ async fn list_user_notifications_handler(
         "processed": row.get::<bool, _>("processed"),
         "is_read": row.get::<bool, _>("is_read"),
         "read_at": row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("read_at").map(|v| v.to_rfc3339()),
+        "is_archived": row.get::<bool, _>("is_archived"),
       })
     })
     .collect();
@@ -546,5 +565,71 @@ async fn mark_all_notifications_read_handler(
   let affected = crate::biz::notification::ops::mark_all_notifications_read(&state.pg_pool, uid)
     .await
     .map_err(AppResponseError::from)?;
+  Ok(HttpResponse::Ok().json(json!({ "updated": affected })))
+}
+
+/// 单条通知归档（归档同时置已读）。
+/// POST /api/user/notifications/{notification_id}/archive
+async fn archive_notification_handler(
+  user_uuid: UserUuid,
+  state: Data<AppState>,
+  path: web::Path<uuid::Uuid>,
+) -> Result<HttpResponse> {
+  set_notification_archived_inner(user_uuid, state, Some(path.into_inner()), true).await
+}
+
+/// 单条通知取消归档。
+/// POST /api/user/notifications/{notification_id}/unarchive
+async fn unarchive_notification_handler(
+  user_uuid: UserUuid,
+  state: Data<AppState>,
+  path: web::Path<uuid::Uuid>,
+) -> Result<HttpResponse> {
+  set_notification_archived_inner(user_uuid, state, Some(path.into_inner()), false).await
+}
+
+/// 全部归档（同时置已读）。
+/// POST /api/user/notifications/archive-all
+async fn archive_all_notifications_handler(
+  user_uuid: UserUuid,
+  state: Data<AppState>,
+) -> Result<HttpResponse> {
+  set_notification_archived_inner(user_uuid, state, None, true).await
+}
+
+/// 全部取消归档。
+/// POST /api/user/notifications/unarchive-all
+async fn unarchive_all_notifications_handler(
+  user_uuid: UserUuid,
+  state: Data<AppState>,
+) -> Result<HttpResponse> {
+  set_notification_archived_inner(user_uuid, state, None, false).await
+}
+
+async fn set_notification_archived_inner(
+  user_uuid: UserUuid,
+  state: Data<AppState>,
+  notification_id: Option<uuid::Uuid>,
+  archived: bool,
+) -> Result<HttpResponse> {
+  let uid = state
+    .user_cache
+    .get_user_uid(&user_uuid)
+    .await
+    .map_err(AppResponseError::from)?;
+  let affected = match notification_id {
+    Some(id) => {
+      crate::biz::notification::ops::set_notification_archived(&state.pg_pool, uid, id, archived)
+        .await
+        .map_err(AppResponseError::from)?
+    },
+    None => crate::biz::notification::ops::set_all_notifications_archived(
+      &state.pg_pool,
+      uid,
+      archived,
+    )
+    .await
+    .map_err(AppResponseError::from)?,
+  };
   Ok(HttpResponse::Ok().json(json!({ "updated": affected })))
 }

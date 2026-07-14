@@ -115,6 +115,58 @@ pub async fn mark_all_notifications_read(
   Ok(result.rows_affected())
 }
 
+/// 设置单条通知的归档状态（仅限本人的通知）。返回受影响行数。
+/// 归档状态收敛到服务端，保证任意工作区/设备看到一致的归档结果。
+pub async fn set_notification_archived(
+  pg_pool: &PgPool,
+  recipient_uid: i64,
+  notification_id: Uuid,
+  archived: bool,
+) -> Result<u64, AppError> {
+  let result = sqlx::query(
+    r#"
+    UPDATE af_notification
+    SET is_archived = $3,
+        archived_at = CASE WHEN $3 THEN now() ELSE NULL END,
+        is_read = CASE WHEN $3 THEN TRUE ELSE is_read END,
+        read_at = CASE WHEN $3 AND read_at IS NULL THEN now() ELSE read_at END
+    WHERE id = $1 AND recipient_uid = $2 AND is_archived <> $3
+    "#,
+  )
+  .bind(notification_id)
+  .bind(recipient_uid)
+  .bind(archived)
+  .execute(pg_pool)
+  .await
+  .context("Set notification archived")?;
+  Ok(result.rows_affected())
+}
+
+/// 设置该用户全部通知的归档状态。归档时同时置已读（与客户端"归档即已读"语义一致）。
+/// 返回受影响行数。
+pub async fn set_all_notifications_archived(
+  pg_pool: &PgPool,
+  recipient_uid: i64,
+  archived: bool,
+) -> Result<u64, AppError> {
+  let result = sqlx::query(
+    r#"
+    UPDATE af_notification
+    SET is_archived = $2,
+        archived_at = CASE WHEN $2 THEN now() ELSE NULL END,
+        is_read = CASE WHEN $2 THEN TRUE ELSE is_read END,
+        read_at = CASE WHEN $2 AND read_at IS NULL THEN now() ELSE read_at END
+    WHERE recipient_uid = $1 AND is_archived <> $2
+    "#,
+  )
+  .bind(recipient_uid)
+  .bind(archived)
+  .execute(pg_pool)
+  .await
+  .context("Set all notifications archived")?;
+  Ok(result.rows_affected())
+}
+
 /// 标记通知为已处理
 pub async fn mark_notifications_processed(
   pg_pool: &PgPool,

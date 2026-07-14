@@ -12,6 +12,24 @@ use crate::biz::notification::ops::create_workspace_notification;
 
 const INVITE_LINK_CODE_LENGTH: usize = 16;
 
+/// 查询工作区所有者 uid（用作通知收件人）。
+/// 通知拉取/补发均按 recipient_uid 过滤，收件人为 NULL 的通知永远无人可见，
+/// 因此产生通知时必须填入明确的收件人。
+async fn select_workspace_owner_uid(
+  pg_pool: &PgPool,
+  workspace_id: &Uuid,
+) -> Result<Option<i64>, AppError> {
+  let owner_uid: Option<i64> = sqlx::query_scalar(
+    r#"
+    SELECT owner_uid FROM public.af_workspace WHERE workspace_id = $1
+    "#,
+  )
+  .bind(workspace_id)
+  .fetch_optional(pg_pool)
+  .await?;
+  Ok(owner_uid)
+}
+
 pub async fn generate_workspace_invite_token(
   pg_pool: &PgPool,
   workspace_id: &Uuid,
@@ -29,7 +47,9 @@ pub async fn generate_workspace_invite_token(
     "created_at": chrono::Utc::now().timestamp(),
     "message": "您的工作空间邀请链接已生成"
   });
-  if let Err(err) = create_workspace_notification(pg_pool, workspace_id, "workspace_invite_created", &payload, None).await {
+  // 【修复】收件人此前为 None，导致该通知永远无人可见；改为发给工作区所有者
+  let owner_uid = select_workspace_owner_uid(pg_pool, workspace_id).await.ok().flatten();
+  if let Err(err) = create_workspace_notification(pg_pool, workspace_id, "workspace_invite_created", &payload, owner_uid).await {
     tracing::warn!("Failed to create workspace invite notification: {:?}", err);
   }
 
@@ -73,7 +93,9 @@ pub async fn join_workspace_invite_by_code(
     "title": "新成员加入工作区",
     "message": format!("【{}】通过邀请链接加入了你的工作区「{}」", joiner_name, workspace_name),
   });
-  if let Err(err) = create_workspace_notification(pg_pool, &invited_workspace_id, "workspace_member_joined", &payload_owner, None).await {
+  // 【修复】收件人此前为 None，导致"新成员加入"通知所有者永远收不到；改为发给工作区所有者
+  let owner_uid = select_workspace_owner_uid(pg_pool, &invited_workspace_id).await.ok().flatten();
+  if let Err(err) = create_workspace_notification(pg_pool, &invited_workspace_id, "workspace_member_joined", &payload_owner, owner_uid).await {
     tracing::warn!("Failed to create workspace member joined notification: {:?}", err);
   }
 
