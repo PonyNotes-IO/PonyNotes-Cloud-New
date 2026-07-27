@@ -3,15 +3,15 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::yrs::updates::decoder::Decode;
+use crate::yrs::updates::encoder::{Encode, Encoder, EncoderV1};
+use crate::yrs::{ReadTxn, StateVector};
 use collab::core::awareness::Awareness;
 use collab::core::origin::CollabOrigin;
 use collab::preclude::Collab;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{broadcast, watch};
 use tracing::{error, info, instrument, trace};
-use crate::yrs::updates::decoder::Decode;
-use crate::yrs::updates::encoder::{Encode, Encoder, EncoderV1};
-use crate::yrs::{ReadTxn, StateVector};
 
 use collab_rt_entity::{ClientCollabMessage, InitSync, ServerCollabMessage, UpdateSync};
 use collab_rt_protocol::{ClientSyncProtocol, CollabSyncProtocol, Message, SyncMessage};
@@ -23,6 +23,7 @@ use crate::collab_sync::{
 };
 
 pub const DEFAULT_SYNC_TIMEOUT: u64 = 10;
+pub const DEFAULT_SEND_DELAY: Duration = Duration::from_millis(500);
 
 pub struct SyncControl<Sink, Stream> {
   object: SyncObject,
@@ -269,6 +270,9 @@ pub struct SinkConfig {
   /// `timeout` is the time to wait for the remote to ack the message. If the remote
   /// does not ack the message in time, the message will be sent again.
   pub send_timeout: Duration,
+  /// `send_delay` is the batching window for ordinary local updates. Init sync and
+  /// reconnect recovery bypass this delay.
+  pub send_delay: Duration,
   /// `maximum_payload_size` is the maximum size of the messages to be merged.
   pub maximum_payload_size: usize,
 }
@@ -281,13 +285,34 @@ impl SinkConfig {
     self.send_timeout = Duration::from_secs(secs);
     self
   }
+
+  pub fn send_delay(mut self, delay: Duration) -> Self {
+    self.send_delay = delay;
+    self
+  }
 }
 
 impl Default for SinkConfig {
   fn default() -> Self {
     Self {
       send_timeout: Duration::from_secs(DEFAULT_SYNC_TIMEOUT),
+      send_delay: DEFAULT_SEND_DELAY,
       maximum_payload_size: 1024 * 10,
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn sink_config_uses_independent_batch_and_ack_intervals() {
+    let config = SinkConfig::new()
+      .send_delay(Duration::from_millis(750))
+      .send_timeout(8);
+
+    assert_eq!(config.send_delay, Duration::from_millis(750));
+    assert_eq!(config.send_timeout, Duration::from_secs(8));
   }
 }

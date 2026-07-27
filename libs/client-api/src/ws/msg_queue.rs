@@ -13,6 +13,7 @@ use collab_rt_entity::{MessageByObjectId, RealtimeMessage};
 
 pub type AggregateMessagesSender = mpsc::Sender<Message>;
 pub type AggregateMessagesReceiver = mpsc::Receiver<Message>;
+const AGGREGATE_INTERVAL: Duration = Duration::from_millis(500);
 
 pub struct AggregateMessageQueue {
   maximum_payload_size: usize,
@@ -56,7 +57,7 @@ impl AggregateMessageQueue {
     let maximum_payload_size = self.maximum_payload_size;
     let weak_queue = Arc::downgrade(&self.queue);
     let weak_seen_ids = Arc::downgrade(&self.seen_ids);
-    let interval_duration = Duration::from_millis(200);
+    let interval_duration = AGGREGATE_INTERVAL;
     let mut next_tick = Instant::now() + interval_duration;
     tokio::spawn(async move {
       loop {

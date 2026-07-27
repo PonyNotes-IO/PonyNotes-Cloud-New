@@ -40,9 +40,26 @@ impl Default for WSClientConfig {
   fn default() -> Self {
     Self {
       buffer_capacity: 2000,
-      ping_per_secs: 5,
-      retry_connect_per_pings: 6,
+      // Keep the same ~30s dead-connection detection window while halving idle
+      // heartbeat traffic.
+      ping_per_secs: 10,
+      retry_connect_per_pings: 3,
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::WSClientConfig;
+
+  #[test]
+  fn default_heartbeat_preserves_failure_detection_window() {
+    let config = WSClientConfig::default();
+
+    assert_eq!(
+      config.ping_per_secs * u64::from(config.retry_connect_per_pings),
+      30
+    );
   }
 }
 

@@ -17,9 +17,6 @@ use crate::collab_sync::collab_stream::SeqNumCounter;
 use crate::collab_sync::{SinkConfig, SyncError, SyncObject};
 use collab_rt_entity::{ClientCollabMessage, MsgId, ServerCollabMessage, SinkMessage};
 
-pub(crate) const SEND_INTERVAL: Duration = Duration::from_secs(3);
-pub const COLLAB_SINK_DELAY_MILLIS: u64 = 100;
-
 pub struct CollabSink<Sink> {
   uid: i64,
   config: SinkConfig,
@@ -67,7 +64,8 @@ where
     let message_queue = Arc::new(parking_lot::Mutex::new(SinkQueue::new()));
     let sending_messages = Arc::new(parking_lot::Mutex::new(HashSet::new()));
     let state = Arc::new(CollabSinkState::new());
-    let mut interval = interval(SEND_INTERVAL);
+    let send_timeout = config.send_timeout;
+    let mut interval = interval(send_timeout);
     let weak_sending_messages = Arc::downgrade(&sending_messages);
 
     let _weak_notifier = Arc::downgrade(&notifier);
@@ -79,18 +77,22 @@ where
     let cloned_state = state.clone();
     let weak_notifier = Arc::downgrade(&notifier);
     tokio::spawn(async move {
-      // Initial delay to make sure the first tick waits for SEND_INTERVAL
-      sleep(SEND_INTERVAL).await;
+      // Initial delay to make sure the first tick waits for the configured ACK timeout.
+      sleep(send_timeout).await;
       loop {
         interval.tick().await;
         match weak_notifier.upgrade() {
           Some(notifier) => {
+            if cloned_state.pause_sync.load(Ordering::SeqCst) {
+              continue;
+            }
+
             // Removing the flying messages allows for the re-sending of the top k messages in the message queue.
             if let Some(sending_messages) = weak_sending_messages.upgrade() {
-              // remove all the flying messages if the last sync is expired within the SEND_INTERVAL.
+              // Remove all in-flight messages after the ACK timeout so they can be retried.
               if cloned_state
                 .latest_sync
-                .is_time_for_next_sync(SEND_INTERVAL)
+                .is_time_for_next_sync(send_timeout)
                 .await
               {
                 sending_messages.lock().clear();
@@ -133,10 +135,14 @@ where
     drop(msg_queue);
     self.merge();
 
-    // Notify the sink to process the next message after 500ms.
+    if self.state.pause_sync.load(Ordering::SeqCst) {
+      return;
+    }
+
+    // Use a short batching window so adjacent CRDT transactions can be merged before sending.
     let _ = self
       .notifier
-      .send(SinkSignal::ProcessAfterMillis(COLLAB_SINK_DELAY_MILLIS));
+      .send(SinkSignal::ProcessAfter(self.config.send_delay));
   }
 
   /// When queue the init message, the sink will clear all the pending messages and send the init
@@ -181,7 +187,7 @@ where
       trace!("{}:{} pause", self.uid, self.object.object_id);
     }
 
-    self.state.pause_ping.store(true, Ordering::SeqCst);
+    self.state.pause_sync.store(true, Ordering::SeqCst);
   }
 
   pub fn resume(&self) {
@@ -189,7 +195,7 @@ where
       trace!("{}:{} resume", self.uid, self.object.object_id);
     }
 
-    self.state.pause_ping.store(false, Ordering::SeqCst);
+    self.state.pause_sync.store(false, Ordering::SeqCst);
   }
 
   /// Notify the sink to process the next message and mark the current message as done.
@@ -455,7 +461,7 @@ fn get_next_batch_item(
 
 fn retry_later(weak_notifier: Weak<watch::Sender<SinkSignal>>) {
   if let Some(notifier) = weak_notifier.upgrade() {
-    let _ = notifier.send(SinkSignal::ProcessAfterMillis(200));
+    let _ = notifier.send(SinkSignal::ProcessAfter(Duration::from_millis(200)));
   }
 }
 
@@ -482,8 +488,8 @@ impl CollabSinkRunner {
           SinkSignal::Proceed => {
             sync_sink.process_next_msg().await;
           },
-          SinkSignal::ProcessAfterMillis(millis) => {
-            sleep(Duration::from_millis(millis)).await;
+          SinkSignal::ProcessAfter(delay) => {
+            sleep(delay).await;
             sync_sink.process_next_msg().await;
           },
         }
@@ -537,7 +543,7 @@ impl SyncTimestamp {
 
 pub(crate) struct CollabSinkState {
   pub(crate) latest_sync: SyncTimestamp,
-  pub(crate) pause_ping: AtomicBool,
+  pub(crate) pause_sync: AtomicBool,
   pub(crate) id_counter: DefaultMsgIdCounter,
   pub(crate) did_queue_int_sync: AtomicBool,
 }
@@ -547,7 +553,7 @@ impl CollabSinkState {
     let msg_id_counter = DefaultMsgIdCounter::new();
     CollabSinkState {
       latest_sync: SyncTimestamp::new(),
-      pause_ping: AtomicBool::new(false),
+      pause_sync: AtomicBool::new(false),
       id_counter: msg_id_counter,
       did_queue_int_sync: Default::default(),
     }
@@ -572,7 +578,7 @@ impl CollabSyncState {
 pub enum SinkSignal {
   Stop,
   Proceed,
-  ProcessAfterMillis(u64),
+  ProcessAfter(Duration),
 }
 
 pub(crate) struct SinkQueue<Msg> {
