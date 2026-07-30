@@ -125,11 +125,33 @@ impl ChatClient {
       );
       return self.stream_deepseek_bot(params).await;
     }
+    // 【联网搜索兜底 2026-07-30】Bot 未配置时改由通义千问处理联网查询。
+    //
+    // 背景：DeepSeek 系模型在火山方舟上**没有原生联网能力**
+    // （实测 tools:[{"type":"web_search"}] 返回 400 missing `tools.function`），
+    // 真实联网必须经由开通了「联网内容插件」的 Bot 应用。
+    // 而 Bot 依赖的预置推理接入点属于共享免费额度，实测持续返回
+    // 429 RateLimitExceeded.EndpointRPMExceeded（0.1s 秒拒），该路径长期不可用。
+    //
+    // 通义千问走的是原生 enable_search 参数、无需 Bot，实测可返回当日新闻与来源链接，
+    // 故此处委托给它，而不是像原先那样只打一行警告、然后静默降级成"不联网"——
+    // 后者对用户是欺骗：界面上联网搜索开着，实际并没有联网。
+    //
+    // 切换方式（无需改代码）：
+    //   - 配置 AI_CHAT_DEEPSEEK_WEB_SEARCH_MODEL → 走 Bot（修好 Bot 后设回即可）
+    //   - 留空 → 走本兜底（通义千问）
     if params.enable_web_search && self.deepseek_web_search_bot_model.is_empty() {
+      if !self.qwen_api_key.is_empty() {
+        info!(
+          "[DeepSeek] 联网搜索兜底：DeepSeek 无原生联网能力且未配置 Bot，\
+          改用通义千问 {} 处理本次联网查询",
+          self.qwen_search_model
+        );
+        return self.stream_qwen(params, &self.qwen3_vl_plus_model).await;
+      }
       warn!(
-        "[DeepSeek] 联网搜索被请求，但 AI_CHAT_DEEPSEEK_WEB_SEARCH_MODEL 未配置。\
-        请在火山方舟控制台创建 Bot 应用并开通联网搜索插件，然后将 Bot ID 填入环境变量。\
-        当前将使用普通模式（无法联网）。"
+        "[DeepSeek] 联网搜索被请求，但 AI_CHAT_DEEPSEEK_WEB_SEARCH_MODEL 与 \
+        AI_CHAT_QWEN_API_KEY 均未配置，无法联网，将降级为普通模式。"
       );
     }
 
