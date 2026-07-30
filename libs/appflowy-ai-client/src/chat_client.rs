@@ -62,8 +62,21 @@ impl ChatClient {
     }
 
     Ok(Self {
+      // 【修复长回答被腰斩 2026-07-30】原为 .timeout(120s)。
+      // reqwest 的 timeout 是**整个请求的总时限**（含 body 读取），对 SSE 流式响应
+      // 意味着"回答超过 2 分钟就被硬切断"。实测日志中请求与报错的间隔精确等于 120s：
+      //   12:06:17 请求 → 12:08:17 报错 ；12:08:43 请求 → 12:10:43 报错
+      // 客户端表现为回答到一半戛然而止，并抛出
+      //   "stream error received: unexpected internal error encountered"（HTTP/2 流被重置）。
+      // 豆包这类思考型模型长回答很容易超过 2 分钟，因此几乎必现。
+      //
+      // 改为只限制"建连"与"两次数据之间的空档"，不对流的总时长设限——
+      // 与客户端 Rust 侧 ai_session_client.rs 的做法一致（那里注释已写明
+      // "不设置 timeout()，避免对 SSE 流式传输施加总时限"）。
+      // read_timeout 仍能在上游真正卡死时及时释放连接。
       http_client: Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .read_timeout(std::time::Duration::from_secs(120))
         .build()?,
       deepseek_api_key,
       deepseek_api_base: std::env::var("AI_CHAT_DEEPSEEK_API_BASE")
