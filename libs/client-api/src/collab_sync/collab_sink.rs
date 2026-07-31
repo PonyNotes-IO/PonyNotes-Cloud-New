@@ -225,19 +225,45 @@ where
 
     let mut message_queue = self.message_queue.lock();
     let mut is_valid = false;
-    // if sending_messages.contains(&income_message_id) {
-    if let Some(current_item) = message_queue.pop() {
-      if current_item.msg_id() != income_message_id {
-        error!(
-          "{} expect message id:{}, but receive:{}",
+
+    // 【修复协作同步中途停止 2026-07-30】
+    //
+    // 此前这里只比对**队首**：pop 出队首，若其 msg_id 与 ack 不符就原样 push 回去、
+    // 丢弃这条 ack（is_valid 保持 false，且不从 sending_messages 移除）。
+    //
+    // 但队列是按优先级排序的 BinaryHeap，并非发送顺序：
+    // ClientInitSync / ServerInitSync 一律排在最前（见 collab-rt-entity 的
+    // `impl Ord for ClientCollabMessage`），普通更新才按 msg_id 递增。
+    // 因此一旦发生重连或缺更新触发 InitSync，它会插到队首，
+    // 先前已发出的普通更新的 ack 回来时就与队首错配，**全部被丢弃**。
+    // 实测日志（两端合计 40 次）：
+    //   `expect message id:137, but receive:128 / 129 / 134 / 135`
+    //
+    // 后果：这些消息既不从队列移除、也不从 sending_messages 移除，
+    // 只能等 send_timeout（本项目配置为 8s）到期后被整体清空并**重发**——
+    // 服务端其实早已处理过，属纯粹重复；且 is_valid=false 使得
+    // seq_num 不被记录，后续 check_ack_broadcast_contiguous 更易判定为缺更新，
+    // 从而再触发一次 InitSync，形成"错配 → 重发 → 再错配"的自我强化循环，
+    // 表现为协作编辑一开始正常、过一会儿就不同步了。
+    //
+    // 改为按 msg_id 精确移除：ack 对应哪条就移除哪条，不再依赖它是否恰好在队首。
+    // 队首本就该等自己的 ack，不应因为别人的 ack 先到而被误判。
+    let before = message_queue.len();
+    message_queue.retain(|item| item.msg_id() != income_message_id);
+    if message_queue.len() < before {
+      is_valid = true;
+      sending_messages.remove(&income_message_id);
+    } else {
+      // 走到这里说明 sending_messages 认为它在途、队列里却没有，
+      // 属状态不一致（例如已被超时清理逻辑移出队列）。
+      // 仍从在途集合中摘除，避免它永久滞留、阻碍后续判定。
+      sending_messages.remove(&income_message_id);
+      if cfg!(feature = "sync_verbose_log") {
+        trace!(
+          "{}: ack {} not found in queue, dropped from sending set",
           self.object.object_id,
-          current_item.msg_id(),
-          income_message_id,
+          income_message_id
         );
-        message_queue.push(current_item);
-      } else {
-        is_valid = true;
-        sending_messages.remove(&income_message_id);
       }
     }
 
@@ -690,5 +716,78 @@ where
 {
   fn cmp(&self, other: &Self) -> std::cmp::Ordering {
     self.inner.cmp(&other.inner)
+  }
+}
+
+
+#[cfg(test)]
+mod ack_removal_tests {
+  use super::*;
+  use bytes::Bytes;
+  use client_api_entity::CollabType;
+  use collab_rt_entity::{InitSync, UpdateSync};
+
+  fn origin() -> CollabOrigin {
+    CollabOrigin::Client(CollabClient {
+      uid: 1,
+      device_id: "test-device".to_string(),
+    })
+  }
+
+  fn update(msg_id: MsgId) -> ClientCollabMessage {
+    ClientCollabMessage::new_update_sync(UpdateSync {
+      origin: origin(),
+      object_id: "obj".to_string(),
+      msg_id,
+      payload: Bytes::from_static(b"u"),
+    })
+  }
+
+  fn init(msg_id: MsgId) -> ClientCollabMessage {
+    ClientCollabMessage::new_init_sync(InitSync {
+      origin: origin(),
+      object_id: "obj".to_string(),
+      collab_type: CollabType::Document,
+      workspace_id: "ws".to_string(),
+      msg_id,
+      payload: Bytes::from_static(b"i"),
+    })
+  }
+
+  /// 【回归防护 2026-07-30】InitSync 会插到队首，先前普通更新的 ack 因此与队首错配。
+  /// 旧实现只比对队首、错配即丢弃该 ack，消息滞留 8 秒后被超时清理并重发，
+  /// 与新的 InitSync 再次错配，形成"错配 → 重发 → 再错配"的循环，
+  /// 表现为协作编辑一开始正常、过一会儿就不同步。
+  #[test]
+  fn init_sync_jumps_queue_head() {
+    let mut q: SinkQueue<ClientCollabMessage> = SinkQueue::new();
+    q.push_msg(128, update(128));
+    q.push_msg(129, update(129));
+    q.push_msg(137, init(137));
+
+    // 队首是后入队的 InitSync，而非 msg_id 最小的 128 —— 这正是错配的成因
+    assert_eq!(
+      q.peek().map(|i| i.msg_id()),
+      Some(137),
+      "InitSync 应插队到队首"
+    );
+  }
+
+  /// ack 必须按 msg_id 精确移除，即使目标不在队首；且不得误伤其他在途消息。
+  #[test]
+  fn ack_removes_target_not_at_head() {
+    let mut q: SinkQueue<ClientCollabMessage> = SinkQueue::new();
+    q.push_msg(128, update(128));
+    q.push_msg(129, update(129));
+    q.push_msg(137, init(137));
+
+    let before = q.len();
+    q.retain(|item| item.msg_id() != 128); // validate_response 中的同一操作
+    assert_eq!(q.len(), before - 1, "128 应被移除");
+
+    let left: Vec<MsgId> = q.iter().map(|i| i.msg_id()).collect();
+    assert!(!left.contains(&128), "目标未被移除");
+    assert!(left.contains(&129), "误伤了其他在途消息");
+    assert!(left.contains(&137), "误删了队首");
   }
 }
