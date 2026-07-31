@@ -308,8 +308,18 @@ impl Handler<UpdateUserPermissions> for WsServer {
   type Result = ();
 
   fn handle(&mut self, msg: UpdateUserPermissions, _ctx: &mut Self::Context) -> Self::Result {
-    if let Some(workspace) = self.workspaces.get(&msg.workspace_id) {
-      workspace.do_send(msg);
+    // 投递给全部 workspace actor，而不是只投 msg.workspace_id 那一个。
+    //
+    // msg.workspace_id 是**文档所有者**的工作区。通过分享链接进来的协作者通常
+    // 不是该工作区的成员，其会话可能挂在别的 workspace actor 下；原先只查一个
+    // actor，找不到就静默丢弃 —— 表现为「移出协作者后对方毫无反应，还能继续
+    // 编辑」，而重新进入文档后再移出却又生效（此时会话落到了预期的 actor 上）。
+    //
+    // 接收端 Handler<UpdateUserPermissions> for Workspace 已按 session.uid
+    // 过滤、且无匹配会话时直接返回，因此广播是安全且幂等的：只有目标用户的
+    // 会话会被处理。权限变更是低频操作，遍历 actor 的开销可忽略。
+    for workspace in self.workspaces.values() {
+      workspace.do_send(msg.clone());
     }
   }
 }
@@ -398,7 +408,7 @@ pub struct WsOutput {
   pub message: ServerMessage,
 }
 
-#[derive(actix::Message)]
+#[derive(actix::Message, Clone)]
 #[rtype(result = "()")]
 pub struct UpdateUserPermissions {
   pub workspace_id: WorkspaceId,

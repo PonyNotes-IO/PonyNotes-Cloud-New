@@ -21,7 +21,7 @@ use collab_entity::CollabType;
 use collab_stream::model::{AwarenessStreamUpdate, UpdateStreamMessage};
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -192,6 +192,39 @@ impl Workspace {
             sender.uid,
             msg.object_id,
           );
+
+          // 权限被撤销后必须回推一条 AccessChanges，不能只是丢掉这条 update。
+          //
+          // 早先这里是直接 return：被移出的协作者收不到任何信号，本地照常编辑，
+          // 而每一次改动都被服务端静默丢弃 —— 用户看到的是「还能编辑」，其他人
+          // 却看不到他的任何内容，直到他重新进入文档才发现全丢了。
+          //
+          // 撤权的主推送走 UpdateUserPermissions（按文档所有者的 workspace_id
+          // 路由）。协作者是通过分享链接进来的，未必是该 workspace 的成员，其会话
+          // 也未必挂在同一个 workspace actor 下，这条推送因此可能送不到。
+          // 这里作为**兜底**：不依赖任何推送路由，只要被撤权的人一动手就会收到，
+          // 客户端拿到 AccessChanges 后会丢弃本地分叉状态并退出文档。
+          if sender.mark_write_denied(&msg.object_id).await {
+            let can_read = sender
+              .can_read_collab(&store, &msg.object_id)
+              .await
+              .unwrap_or(false);
+            tracing::info!(
+              "notify uid={} write access revoked on {}, can_read={}",
+              sender.uid,
+              msg.object_id,
+              can_read,
+            );
+            sender.conn.do_send(WsOutput {
+              message: ServerMessage::AccessChanges {
+                object_id: msg.object_id,
+                collab_type,
+                can_read,
+                can_write: false,
+                reason: AccessChangedReason::PermissionDenied,
+              },
+            });
+          }
           return;
         }
 
@@ -882,6 +915,12 @@ struct WorkspaceSessionHandle {
   permission_cache: Arc<RwLock<HashMap<ObjectId, (PermissionType, Instant)>>>,
   tracked_object_ids: Arc<RwLock<HashMap<ObjectId, CollabType>>>,
   cache_ttl: Duration,
+  /// 已经就「写权限被拒」通知过客户端的 object，用于去重。
+  ///
+  /// 被撤权的用户往往还在连续打字，每一次击键都会送来一条 update。若每条都回推
+  /// AccessChanges，会在客户端处理完、断开之前打出一串重复消息。这里保证每个
+  /// object 只推一次，写权限恢复时清除，恢复后再被撤权仍能再次推送。
+  denied_notified: Arc<RwLock<HashSet<ObjectId>>>,
 }
 
 impl WorkspaceSessionHandle {
@@ -915,6 +954,7 @@ impl WorkspaceSessionHandle {
       permission_cache: Arc::new(RwLock::new(HashMap::new())),
       tracked_object_ids: Arc::new(RwLock::new(HashMap::new())),
       cache_ttl,
+      denied_notified: Arc::new(RwLock::new(HashSet::new())),
     }
   }
 
@@ -945,7 +985,17 @@ impl WorkspaceSessionHandle {
       .await
       .insert(*object_id, (permission_type, now));
 
+    // 写权限恢复即清除「已通知」标记，使「撤权 → 恢复 → 再撤权」时第二次仍能推送。
+    if has_permission {
+      self.denied_notified.write().await.remove(object_id);
+    }
+
     Ok(has_permission)
+  }
+
+  /// 首次就该 object 拒绝写入时返回 `true`；后续重复拒绝返回 `false`。
+  async fn mark_write_denied(&self, object_id: &ObjectId) -> bool {
+    self.denied_notified.write().await.insert(*object_id)
   }
 
   async fn can_read_collab(
