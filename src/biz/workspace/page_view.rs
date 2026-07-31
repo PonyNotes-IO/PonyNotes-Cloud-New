@@ -1555,6 +1555,72 @@ pub async fn move_page(
   Ok(())
 }
 
+/// 把文档在「私有空间」与「协作区」之间移动。
+///
+/// 与 [`move_page`] 的区别：这里会同时改变文档的归属 —— folder 里该 uid 的
+/// Private section 增删一条记录。权限校验在 handler 层完成（移入需 Member
+/// 及以上，移出需 Owner）。
+#[allow(clippy::too_many_arguments)]
+pub async fn move_page_cross_space(
+  state: &AppState,
+  user: RealtimeUser,
+  workspace_id: Uuid,
+  view_id: &str,
+  new_parent_view_id: &str,
+  prev_view_id: Option<String>,
+  to_private: bool,
+) -> Result<(), AppError> {
+  let mut folder = state.ws_server.get_folder(workspace_id).await?;
+  let folder_update = move_view_cross_space(
+    view_id,
+    new_parent_view_id,
+    prev_view_id,
+    to_private,
+    &mut folder,
+    user.uid,
+  )
+  .await?;
+  update_workspace_folder_data(
+    &state.metrics.appflowy_web_metrics,
+    &state.ws_server,
+    user,
+    workspace_id,
+    folder_update,
+  )
+  .await?;
+  Ok(())
+}
+
+/// 挪树节点 + 改 Private section，**必须在同一个 yrs 事务内完成**。
+///
+/// 拆成两个事务会产生两条独立更新：若第二条丢失或乱序，文档会停在
+/// 「已经在协作区的树里、但仍留在 private section」的中间态 —— 看起来共享了，
+/// 其他成员却看不到。合并为一条更新即可从根上排除这种中间态。
+#[allow(clippy::too_many_arguments)]
+async fn move_view_cross_space(
+  view_id: &str,
+  new_parent_view_id: &str,
+  prev_view_id: Option<String>,
+  to_private: bool,
+  folder: &mut Folder,
+  uid: i64,
+) -> Result<Vec<u8>, AppError> {
+  let encoded_update = {
+    let mut txn = folder.collab.transact_mut();
+    folder
+      .body
+      .move_nested_view(&mut txn, view_id, new_parent_view_id, prev_view_id, uid);
+    folder.body.views.update_view(
+      &mut txn,
+      view_id,
+      |update| update.set_private(to_private).done(),
+      uid,
+    );
+    txn.encode_update_v1()
+  };
+  Ok(encoded_update)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn reorder_favorite_page(
   state: &AppState,

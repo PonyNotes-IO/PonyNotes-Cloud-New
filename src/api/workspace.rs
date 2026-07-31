@@ -25,10 +25,10 @@ use crate::biz::workspace::ops::{
 use crate::biz::workspace::page_view::{
   add_recent_pages, append_block_at_the_end_of_page, create_database_view, create_folder_view,
   create_orphaned_view, create_page, create_space, delete_all_pages_from_trash, delete_trash,
-  favorite_page, get_page_view_collab, move_page, move_page_to_trash, publish_page,
-  reorder_favorite_page, restore_all_pages_from_trash, restore_page_from_trash, unpublish_page,
-  update_page, update_page_collab_data, update_page_extra, update_page_icon, update_page_name,
-  update_space,
+  favorite_page, get_page_view_collab, move_page, move_page_cross_space, move_page_to_trash,
+  publish_page, reorder_favorite_page, restore_all_pages_from_trash, restore_page_from_trash,
+  unpublish_page, update_page, update_page_collab_data, update_page_extra, update_page_icon,
+  update_page_name, update_space,
 };
 use crate::biz::workspace::publish::get_workspace_default_publish_view_info_meta;
 use crate::biz::workspace::publish::list_collab_publish_info;
@@ -309,6 +309,10 @@ pub fn workspace_scope() -> Scope {
         .service(
             web::resource("/{workspace_id}/page-view/{view_id}/move")
                 .route(web::post().to(move_page_handler)),
+        )
+        .service(
+            web::resource("/{workspace_id}/page-view/{view_id}/move-cross-space")
+                .route(web::post().to(move_page_cross_space_handler)),
         )
         .service(
             web::resource("/{workspace_id}/page-view/{view_id}/reorder-favorite")
@@ -1885,6 +1889,52 @@ async fn move_page_handler(
     &view_id,
     &payload.new_parent_view_id,
     payload.prev_view_id.clone(),
+  )
+  .await?;
+  Ok(Json(AppResponse::Ok()))
+}
+
+/// 文档在「私有空间」与「协作区」之间移动。
+///
+/// 权限规则（与 folder 里 Private section 的语义对应）：
+///
+/// - **移入协作区**（`to_private = false`）== 在协作区新增一篇文档
+///   → 需要 Member 及以上（Casbin 中 Member 拥有 Write）。
+/// - **移出协作区**（`to_private = true`）== 把文档从协作区拿走
+///   → 需要 Owner（Casbin 中只有 Owner 拥有 Delete）。
+///
+/// 之所以对「移出」要求更高：folder 的 section 是按 uid 隔离的，某个成员把
+/// 共享文档移进自己的私有区，等同于把它从其他所有人眼前拿走。
+async fn move_page_cross_space_handler(
+  user_uuid: UserUuid,
+  path: web::Path<(Uuid, String)>,
+  payload: Json<MovePageCrossSpaceParams>,
+  state: Data<AppState>,
+
+  req: HttpRequest,
+) -> Result<Json<AppResponse<()>>> {
+  let uid = state.user_cache.get_user_uid(&user_uuid).await?;
+  let (workspace_uuid, view_id) = path.into_inner();
+
+  let required_role = if payload.to_private {
+    AFRole::Owner
+  } else {
+    AFRole::Member
+  };
+  state
+    .workspace_access_control
+    .enforce_role_weak(&uid, &workspace_uuid, required_role)
+    .await?;
+
+  let user = realtime_user_for_web_request(req.headers(), uid)?;
+  move_page_cross_space(
+    &state,
+    user,
+    workspace_uuid,
+    &view_id,
+    &payload.new_parent_view_id,
+    payload.prev_view_id.clone(),
+    payload.to_private,
   )
   .await?;
   Ok(Json(AppResponse::Ok()))

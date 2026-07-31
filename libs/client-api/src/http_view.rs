@@ -1,9 +1,9 @@
 use client_api_entity::workspace_dto::{
   AddRecentPagesParams, AppendBlockToPageParams, CreateFolderViewParams,
   CreatePageDatabaseViewParams, CreatePageParams, CreateSpaceParams, DuplicatePageParams,
-  FavoritePageParams, MovePageParams, Page, PageCollab, PublishPageParams, Space,
-  UpdatePageExtraParams, UpdatePageIconParams, UpdatePageNameParams, UpdatePageParams,
-  UpdateSpaceParams,
+  FavoritePageParams, MovePageCrossSpaceParams, MovePageParams, Page, PageCollab,
+  PublishPageParams, Space, UpdatePageExtraParams, UpdatePageIconParams, UpdatePageNameParams,
+  UpdatePageParams, UpdateSpaceParams,
 };
 use reqwest::Method;
 use serde_json::json;
@@ -73,6 +73,30 @@ impl Client {
   ) -> Result<(), AppResponseError> {
     let url = format!(
       "{}/api/workspace/{}/page-view/{}/move",
+      self.base_url, workspace_id, view_id
+    );
+    let resp = self
+      .http_client_with_auth(Method::POST, &url)
+      .await?
+      .json(params)
+      .send()
+      .await?;
+    process_response_error(resp).await
+  }
+
+  /// 把文档在「私有空间」与「协作区」之间移动。
+  ///
+  /// 与 [`Self::move_workspace_page_view`] 的区别：这一类移动会改变文档归属，
+  /// 服务端按角色校验 —— 移入协作区需 Member 及以上，移出协作区需 Owner，
+  /// 不满足时返回 `NotEnoughPermissions`。
+  pub async fn move_workspace_page_view_cross_space(
+    &self,
+    workspace_id: Uuid,
+    view_id: &Uuid,
+    params: &MovePageCrossSpaceParams,
+  ) -> Result<(), AppResponseError> {
+    let url = format!(
+      "{}/api/workspace/{}/page-view/{}/move-cross-space",
       self.base_url, workspace_id, view_id
     );
     let resp = self

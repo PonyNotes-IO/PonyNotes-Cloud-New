@@ -289,6 +289,19 @@ pub struct MovePageParams {
   pub prev_view_id: Option<String>,
 }
 
+/// 文档在「私有空间」与「协作区」之间移动。
+///
+/// 与 [`MovePageParams`] 的区别：这一类移动会改变文档的归属（folder 里的
+/// Private section），因此受角色管控 —— 移入协作区需 Member 及以上，
+/// 移出协作区需 Owner。普通的同区内移动仍走 [`MovePageParams`]。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MovePageCrossSpaceParams {
+  pub new_parent_view_id: String,
+  pub prev_view_id: Option<String>,
+  /// `true` = 移入私有空间（即移出协作区）；`false` = 移入协作区。
+  pub to_private: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReorderFavoritePageParams {
   pub prev_view_id: Option<String>,
