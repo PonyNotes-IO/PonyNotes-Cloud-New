@@ -275,6 +275,19 @@ pub struct SinkConfig {
   pub send_delay: Duration,
   /// `maximum_payload_size` is the maximum size of the messages to be merged.
   pub maximum_payload_size: usize,
+  /// 「编辑静默后才推送」的静默时长。`None` 表示不启用（维持原有的固定
+  /// [`Self::send_delay`] 批处理节奏）。
+  ///
+  /// 仅用于**私有空间**内容：私有内容没有协作方在等更新，编辑期间完全没必要
+  /// 占用网络，停笔后一次推走即可。协作内容**绝不能**启用 —— 那会让协作方在
+  /// 对端停止输入前什么都看不到。
+  pub idle_flush: Option<Duration>,
+  /// 启用 [`Self::idle_flush`] 时的强制上推上限：自首条待发消息入队起超过该
+  /// 时长就必须推送，无论用户是否还在连续编辑。
+  ///
+  /// 没有这个上限，连续书写半小时就半小时不落云；而且攒下的合并更新会越来越
+  /// 大，更容易撞上实时消息的体积上限（`the size limit has been reached`）。
+  pub max_hold: Duration,
 }
 
 impl SinkConfig {
@@ -290,6 +303,13 @@ impl SinkConfig {
     self.send_delay = delay;
     self
   }
+
+  /// 启用「编辑静默后才推送」。仅可用于私有空间内容，理由见 [`Self::idle_flush`]。
+  pub fn idle_flush(mut self, idle: Duration, max_hold: Duration) -> Self {
+    self.idle_flush = Some(idle);
+    self.max_hold = max_hold;
+    self
+  }
 }
 
 impl Default for SinkConfig {
@@ -298,6 +318,9 @@ impl Default for SinkConfig {
       send_timeout: Duration::from_secs(DEFAULT_SYNC_TIMEOUT),
       send_delay: DEFAULT_SEND_DELAY,
       maximum_payload_size: 1024 * 10,
+      // 默认不启用：协作内容必须维持原有的实时推送节奏。
+      idle_flush: None,
+      max_hold: Duration::from_secs(60),
     }
   }
 }
@@ -314,5 +337,29 @@ mod tests {
 
     assert_eq!(config.send_delay, Duration::from_millis(750));
     assert_eq!(config.send_timeout, Duration::from_secs(8));
+  }
+}
+
+#[cfg(test)]
+mod idle_flush_config_tests {
+  use super::SinkConfig;
+  use std::time::Duration;
+
+  /// 默认必须**不启用**静默推送 —— 协作内容一旦启用，协作方在对端停手前
+  /// 什么都看不到。这条断言是防止未来有人顺手把默认值改成启用。
+  #[test]
+  fn idle_flush_is_disabled_by_default() {
+    let config = SinkConfig::default();
+    assert!(
+      config.idle_flush.is_none(),
+      "静默推送默认必须关闭，否则协作编辑会退化为「对方停手才可见」"
+    );
+  }
+
+  #[test]
+  fn idle_flush_builder_sets_both_thresholds() {
+    let config = SinkConfig::new().idle_flush(Duration::from_secs(3), Duration::from_secs(60));
+    assert_eq!(config.idle_flush, Some(Duration::from_secs(3)));
+    assert_eq!(config.max_hold, Duration::from_secs(60));
   }
 }

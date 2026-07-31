@@ -33,6 +33,11 @@ pub struct CollabSink<Sink> {
   notifier: Arc<watch::Sender<SinkSignal>>,
   sync_state_tx: broadcast::Sender<CollabSyncState>,
   state: Arc<CollabSinkState>,
+  /// 最近一次本地更新入队的时刻，用于「编辑静默」判定。
+  last_queued_at: Arc<parking_lot::Mutex<Instant>>,
+  /// 当前这批待发消息中，最早一条的入队时刻；队列清空后复位为 `None`。
+  /// 用于 [`SinkConfig::max_hold`] 的强制上推判定。
+  first_pending_at: Arc<parking_lot::Mutex<Option<Instant>>>,
 }
 
 impl<Sink> Drop for CollabSink<Sink> {
@@ -118,7 +123,38 @@ where
       config,
       sending_messages,
       state,
+      last_queued_at: Arc::new(parking_lot::Mutex::new(Instant::now())),
+      first_pending_at: Arc::new(parking_lot::Mutex::new(None)),
     }
+  }
+
+  /// 距离可以推送还需等待多久。
+  ///
+  /// 返回 `None` 表示现在就可以推：要么未启用静默推送，要么本地已静默满
+  /// [`SinkConfig::idle_flush`]，要么已 hold 满 [`SinkConfig::max_hold`]。
+  /// 返回 `Some(d)` 表示还需再等 `d`（取「距静默达标」与「距触顶」的较小值，
+  /// 保证两个条件谁先满足就谁生效）。
+  fn remaining_idle_wait(&self) -> Option<Duration> {
+    let idle = self.config.idle_flush?;
+    let now = Instant::now();
+
+    let since_last_edit = now.saturating_duration_since(*self.last_queued_at.lock());
+    if since_last_edit >= idle {
+      return None;
+    }
+
+    let held = self
+      .first_pending_at
+      .lock()
+      .map(|t| now.saturating_duration_since(t))
+      .unwrap_or_default();
+    if held >= self.config.max_hold {
+      return None;
+    }
+
+    let by_idle = idle - since_last_edit;
+    let by_cap = self.config.max_hold - held;
+    Some(by_idle.min(by_cap))
   }
 
   /// Put the message into the queue and notify the sink to process the next message.
@@ -134,6 +170,17 @@ where
     msg_queue.push_msg(msg_id, new_msg);
     drop(msg_queue);
     self.merge();
+
+    // 记录编辑时刻：每来一条本地更新都把静默窗口往后推，
+    // 同时记下这批待发消息中最早一条的入队时刻（用于 max_hold 触顶）。
+    let now = Instant::now();
+    *self.last_queued_at.lock() = now;
+    {
+      let mut first = self.first_pending_at.lock();
+      if first.is_none() {
+        *first = Some(now);
+      }
+    }
 
     if self.state.pause_sync.load(Ordering::SeqCst) {
       return;
@@ -329,7 +376,13 @@ where
           return;
         },
       };
-      get_next_batch_item(&self.state, &mut sending_messages, &mut msg_queue)
+      let batch = get_next_batch_item(&self.state, &mut sending_messages, &mut msg_queue);
+      // 队列取空即复位 max_hold 计时起点，否则下一批会带着上一批的 hold 时长，
+      // 一入队就判定触顶，静默推送形同虚设。
+      if msg_queue.is_empty() {
+        *self.first_pending_at.lock() = None;
+      }
+      batch
     };
     self.send_immediately(items).await;
   }
@@ -516,6 +569,12 @@ impl CollabSinkRunner {
           },
           SinkSignal::ProcessAfter(delay) => {
             sleep(delay).await;
+            // 私有空间内容：等到本地停止编辑（静默满 idle_flush）再推，
+            // 或自首条待发消息入队起已 hold 满 max_hold 时强制推。
+            // 未启用时 remaining_idle_wait 恒为 None，行为与原先完全一致。
+            while let Some(wait) = sync_sink.remaining_idle_wait() {
+              sleep(wait).await;
+            }
             sync_sink.process_next_msg().await;
           },
         }
