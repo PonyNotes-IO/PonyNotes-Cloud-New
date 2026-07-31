@@ -1571,6 +1571,26 @@ pub async fn move_page_cross_space(
   to_private: bool,
 ) -> Result<(), AppError> {
   let mut folder = state.ws_server.get_folder(workspace_id).await?;
+
+  // move_nested_view 对不存在的视图或父级是**静默空操作**：不校验的话接口会
+  // 返回成功而实际什么都没发生，客户端据此认为移动完成，界面与服务端就此分叉。
+  // 线上实测确认过这一点（传入全零 uuid 作父级 → code=0，文档纹丝未动）。
+  if folder.get_view(view_id, user.uid).is_none() {
+    return Err(AppError::InvalidRequest(format!(
+      "待移动的视图不存在: {}",
+      view_id
+    )));
+  }
+  // 目标父级可以是空间或普通视图；工作区根节点单独放行。
+  if new_parent_view_id != workspace_id.to_string()
+    && folder.get_view(new_parent_view_id, user.uid).is_none()
+  {
+    return Err(AppError::InvalidRequest(format!(
+      "目标父级视图不存在: {}",
+      new_parent_view_id
+    )));
+  }
+
   let folder_update = move_view_cross_space(
     view_id,
     new_parent_view_id,
