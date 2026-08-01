@@ -548,6 +548,17 @@ pub struct CompletionMetadata {
   /// 联网搜索开关(文档内 AI 会话),兼容性同上。
   #[serde(default)]
   pub enable_web_search: bool,
+  /// 是否随本次提问附带图片(文档内 AI 会话的图片分析)。
+  ///
+  /// 文档内 AI 与「问 AI」最终落在同一个 `/api/ai/chat/session` 接口上
+  /// (见客户端 flowy-server `chat.rs` 的 stream_complete),该接口的
+  /// [`ChatRequestParams`] 早已支持多模态;缺的只是把图片从文档侧带下来。
+  /// 与 [`Self::enable_thinking`] 同样用 serde(default) 保证旧客户端兼容。
+  #[serde(default)]
+  pub has_images: bool,
+  /// base64 编码的图片,与 [`ChatRequestParams::images`] 同格式。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub images: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
