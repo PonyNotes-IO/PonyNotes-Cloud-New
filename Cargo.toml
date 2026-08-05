@@ -257,7 +257,8 @@ sqlx = { version = "0.8.1", default-features = false }
 dashmap = "5.5.3"
 futures = "0.3.30"
 async-stream = "0.3.5"
-reqwest = "0.12.9"
+# default-features=false + rustls-tls：避免 native-tls → openssl-sys 在 Android 交叉编译时要求 OpenSSL
+reqwest = { version = "0.12.9", default-features = false, features = ["rustls-tls"] }
 lazy_static = "1.4.0"
 tonic = "0.12.3"
 prost = "0.13.3"
@@ -278,7 +279,8 @@ chrono = { version = "0.4.39", features = [
   "clock",
 ], default-features = false }
 http = "0.2.12"
-tokio-tungstenite = "0.20"
+# 0.26：rustls 0.23 + 新版 webpki-roots（0.20 的 rustls 0.21 无法验证 ISRG X2 交叉链 → Android ws 握手 UnknownIssuer）
+tokio-tungstenite = "0.26.1"
 secrecy = { version = "0.8.0", features = ["serde"] }
 thiserror = "2.0"
 # collaboration

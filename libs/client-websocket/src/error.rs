@@ -161,6 +161,9 @@ pub enum ProtocolError {
   /// The `Sec-WebSocket-Accept` header is either not present or does not specify the correct key value.
   #[error("Key mismatch in \"Sec-WebSocket-Accept\" header")]
   SecWebSocketAcceptKeyMismatch,
+  /// The `Sec-WebSocket-Protocol` response header is invalid.
+  #[error("SubProtocol error: {0}")]
+  SecWebSocketSubProtocolError(String),
   /// Garbage data encountered after client request.
   #[error("Junk after client request")]
   JunkAfterRequest,

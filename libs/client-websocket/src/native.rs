@@ -82,11 +82,11 @@ fn to_fut_message(msg: Result<Message>) -> FutMessage {
   fn inner(msg: Result<Message>) -> Option<crate::Result<crate::Message>> {
     let msg = match msg {
       Ok(msg) => match msg {
-        Message::Text(inner) => Ok(crate::Message::Text(inner)),
-        Message::Binary(inner) => Ok(crate::Message::Binary(inner)),
+        Message::Text(inner) => Ok(crate::Message::Text(inner.to_string())),
+        Message::Binary(inner) => Ok(crate::Message::Binary(inner.to_vec())),
         Message::Close(inner) => Ok(crate::Message::Close(inner.map(Into::into))),
-        Message::Pong(inner) => Ok(crate::Message::Pong(inner)),
-        Message::Ping(inner) => Ok(crate::Message::Ping(inner)),
+        Message::Pong(inner) => Ok(crate::Message::Pong(inner.to_vec())),
+        Message::Ping(inner) => Ok(crate::Message::Ping(inner.to_vec())),
         Message::Frame(_) => return None,
       },
       Err(err) => Err(crate::Error::from(err)),
@@ -96,20 +96,20 @@ fn to_fut_message(msg: Result<Message>) -> FutMessage {
   futures_util::future::ready(inner(msg))
 }
 
-impl<'a> From<CloseFrame<'a>> for crate::message::CloseFrame<'a> {
-  fn from(close_frame: CloseFrame<'a>) -> Self {
+impl From<CloseFrame> for crate::message::CloseFrame<'static> {
+  fn from(close_frame: CloseFrame) -> Self {
     crate::message::CloseFrame {
       code: u16::from(close_frame.code).into(),
-      reason: close_frame.reason,
+      reason: std::borrow::Cow::Owned(close_frame.reason.to_string()),
     }
   }
 }
 
-impl<'a> From<crate::message::CloseFrame<'a>> for CloseFrame<'a> {
-  fn from(close_frame: crate::message::CloseFrame<'a>) -> Self {
+impl From<crate::message::CloseFrame<'_>> for CloseFrame {
+  fn from(close_frame: crate::message::CloseFrame<'_>) -> Self {
     CloseFrame {
       code: u16::from(close_frame.code).into(),
-      reason: close_frame.reason,
+      reason: close_frame.reason.into_owned().into(),
     }
   }
 }
@@ -117,8 +117,8 @@ impl<'a> From<crate::message::CloseFrame<'a>> for CloseFrame<'a> {
 impl From<Message> for crate::Message {
   fn from(msg: Message) -> Self {
     match msg {
-      Message::Text(inner) => crate::Message::Text(inner),
-      Message::Binary(inner) => crate::Message::Binary(inner),
+      Message::Text(inner) => crate::Message::Text(inner.to_string()),
+      Message::Binary(inner) => crate::Message::Binary(inner.to_vec()),
       Message::Close(inner) => crate::Message::Close(inner.map(Into::into)),
       Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {
         unreachable!("Unsendable via interface.")
@@ -130,11 +130,11 @@ impl From<Message> for crate::Message {
 impl From<crate::Message> for Message {
   fn from(msg: crate::Message) -> Self {
     match msg {
-      crate::Message::Text(inner) => Message::Text(inner),
-      crate::Message::Binary(inner) => Message::Binary(inner),
+      crate::Message::Text(inner) => Message::Text(inner.into()),
+      crate::Message::Binary(inner) => Message::Binary(inner.into()),
       crate::Message::Close(inner) => Message::Close(inner.map(Into::into)),
-      crate::Message::Ping(data) => Message::Ping(data),
-      crate::Message::Pong(data) => Message::Pong(data),
+      crate::Message::Ping(data) => Message::Ping(data.into()),
+      crate::Message::Pong(data) => Message::Pong(data.into()),
     }
   }
 }
@@ -199,6 +199,9 @@ impl From<ProtocolError> for crate::error::ProtocolError {
       ProtocolError::MissingSecWebSocketKey => crate::error::ProtocolError::MissingSecWebSocketKey,
       ProtocolError::SecWebSocketAcceptKeyMismatch => {
         crate::error::ProtocolError::SecWebSocketAcceptKeyMismatch
+      },
+      ProtocolError::SecWebSocketSubProtocolError(inner) => {
+        crate::error::ProtocolError::SecWebSocketSubProtocolError(inner.to_string())
       },
       ProtocolError::JunkAfterRequest => crate::error::ProtocolError::JunkAfterRequest,
       ProtocolError::CustomResponseSuccessful => {

@@ -262,7 +262,7 @@ impl WorkspaceControllerActor {
   async fn ping(&self) -> anyhow::Result<()> {
     if let Some(conn) = self.ws_sink() {
       let mut lock = conn.lock().await;
-      lock.send(Message::Ping(Vec::new())).await?;
+      lock.send(Message::Ping(Vec::new().into())).await?;
       lock.flush().await?;
     }
     Ok(())
@@ -424,7 +424,7 @@ impl WorkspaceControllerActor {
       {
         let bytes = msg.into_bytes()?;
         let mut sink = sink.lock().await;
-        sink.send(Message::Binary(bytes)).await?;
+        sink.send(Message::Binary(bytes.into())).await?;
       }
       if let Some((object_id, sync_state)) = sync_state {
         self.set_collab_sync_state(&object_id, sync_state).await;
@@ -1143,10 +1143,8 @@ impl WorkspaceControllerActor {
       write!(url, "&lastMessageId={}", last_message_id).unwrap();
     }
     let req = url.into_client_request()?;
-    let config = WebSocketConfig {
-      max_frame_size: None,
-      ..WebSocketConfig::default()
-    };
+    let mut config = WebSocketConfig::default();
+    config.max_frame_size = None;
     let fut = connect_async_with_config(req, Some(config), false);
     tokio::select! {
       res = fut => {

@@ -27,7 +27,7 @@ mime = "0.3.17"
 tokio = { workspace = true, features = ["sync", "macros"] }
 tokio-stream = { version = "0.1.14" }
 chrono = "0.4"
-client-websocket = { workspace = true, features = ["native-tls"] }
+client-websocket = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 semver = "1.0.22"
 zstd = { version = "0.13.2" }
 
