@@ -95,7 +95,10 @@ pub struct WSClient {
   user_channel: Arc<Sender<UserMessage>>,
   channels: Arc<RwLock<ChannelByObjectId>>,
   ping: Arc<Mutex<Option<ServerFixIntervalPing>>>,
+  connect_lock: Mutex<()>,
   stop_ws_msg_loop_tx: Mutex<Option<oneshot::Sender<()>>>,
+  stop_ws_recv_msg_loop_tx: Mutex<Option<oneshot::Sender<()>>>,
+  stop_aggregate_msg_loop_tx: Mutex<Option<oneshot::Sender<()>>>,
   aggregate_queue: Arc<AggregateMessageQueue>,
 
   #[cfg(debug_assertions)]
@@ -126,7 +129,10 @@ impl WSClient {
       user_channel: Arc::new(user_channel),
       channels,
       ping,
+      connect_lock: Mutex::new(()),
       stop_ws_msg_loop_tx: Mutex::from(None),
+      stop_ws_recv_msg_loop_tx: Mutex::from(None),
+      stop_aggregate_msg_loop_tx: Mutex::from(None),
       aggregate_queue,
 
       #[cfg(debug_assertions)]
@@ -136,6 +142,7 @@ impl WSClient {
   }
 
   pub async fn connect(&self) -> Result<(), WSError> {
+    let _connect_guard = self.connect_lock.lock().await;
     let connect_info = self.connect_provider.connect_info().await?;
     let device_id = connect_info.device_id.clone();
 
@@ -171,6 +178,8 @@ impl WSClient {
     // 4. after the connection is established, the client will start sending ping messages to the server
     // at regular intervals to detect the connection status.
     let (sink, stream) = conn_result?.split();
+    let (stop_ws_recv_msg_loop_tx, stop_ws_recv_msg_loop_rx) = oneshot::channel();
+    *self.stop_ws_recv_msg_loop_tx.lock().await = Some(stop_ws_recv_msg_loop_tx);
     self.set_state(ConnectState::Connected).await;
 
     // 5. start pinging
@@ -182,27 +191,39 @@ impl WSClient {
       Arc::downgrade(&self.channels),
       self.ws_msg_sender.clone(),
       pong_tx,
+      stop_ws_recv_msg_loop_rx,
     );
 
     let (tx, rx) = tokio::sync::mpsc::channel(100);
     self.aggregate_queue.set_sender(tx).await;
+    let (stop_aggregate_msg_loop_tx, stop_aggregate_msg_loop_rx) = oneshot::channel();
+    *self.stop_aggregate_msg_loop_tx.lock().await = Some(stop_aggregate_msg_loop_tx);
 
     // 7. spawn a task that continuously sending client message.
     self.spawn_send_client_message(sink, &device_id, stop_ws_msg_loop_rx, rx);
 
     // 8. start aggregating messages
     // combine multiple messages into one message to reduce the number of messages sent over the network
-    self.spawn_aggregate_message();
+    self.spawn_aggregate_message(stop_aggregate_msg_loop_rx);
     Ok(())
   }
 
-  fn spawn_aggregate_message(&self) {
+  fn spawn_aggregate_message(&self, mut stop_rx: oneshot::Receiver<()>) {
     let mut rx = self.rt_msg_sender.subscribe();
     let weak_aggregate_queue = Arc::downgrade(&self.aggregate_queue);
     tokio::spawn(async move {
-      while let Ok(msg) = rx.recv().await {
+      loop {
+        let msg = tokio::select! {
+          _ = &mut stop_rx => break,
+          result = rx.recv() => match result {
+            Ok(msg) => msg,
+            Err(_) => break,
+          },
+        };
         if let Some(aggregate_queue) = weak_aggregate_queue.upgrade() {
           aggregate_queue.push(msg).await;
+        } else {
+          break;
         }
       }
     });
@@ -236,13 +257,16 @@ impl WSClient {
     let weak_http_sender = Arc::downgrade(&self.http_sender);
     let device_id = device_id.to_string();
 
-    let handle_error = move |err| {
+    let handle_error = move |err: &WSError| {
       error!("{}", err);
       match weak_state_notify.upgrade() {
         None => error!("websocket state_notify is dropped"),
-        Some(state_notify) => match &err {
+        Some(state_notify) => match err {
           WSError::LostConnection(_) => state_notify.lock().set_state(ConnectState::Lost),
           WSError::AuthError(_) => state_notify.lock().set_state(ConnectState::Unauthorized),
+          WSError::Close(_) | WSError::TungsteniteError(_) => {
+            state_notify.lock().set_state(ConnectState::Lost)
+          },
           _ => {},
         },
       }
@@ -254,18 +278,18 @@ impl WSClient {
            _ = &mut stop_ws_msg_loop_rx => break,
            Ok(msg) = ws_msg_rx.recv() => {
               if let Err(err) = send_message(&mut sink, &device_id, msg, &weak_http_sender).await {
+                handle_error(&err);
                 if err.should_stop() {
                   break;
                 }
-                handle_error(err);
               }
            }
            Some(msg) = aggregate_msg_rx.recv() => {
               if let Err(err) = send_message(&mut sink, &device_id, msg, &weak_http_sender).await {
+                handle_error(&err);
                 if err.should_stop() {
                   break;
                 }
-                handle_error(err);
               }
           }
         }
@@ -279,12 +303,24 @@ impl WSClient {
     weak_collab_channels: Weak<RwLock<ChannelByObjectId>>,
     sender: Sender<Message>,
     pong_tx: tokio::sync::mpsc::Sender<()>,
+    mut stop_rx: oneshot::Receiver<()>,
   ) {
     #[cfg(debug_assertions)]
     let cloned_skip_realtime_message = self.skip_realtime_message.clone();
     let user_message_tx = self.user_channel.as_ref().clone();
     tokio::spawn(async move {
-      while let Some(Ok(ws_msg)) = stream.next().await {
+      loop {
+        let ws_msg = tokio::select! {
+          _ = &mut stop_rx => break,
+          result = stream.next() => match result {
+            Some(Ok(ws_msg)) => ws_msg,
+            Some(Err(err)) => {
+              error!("websocket receive error: {}", err);
+              break;
+            },
+            None => break,
+          },
+        };
         match ws_msg {
           Message::Binary(data) => {
             #[cfg(debug_assertions)]
@@ -409,6 +445,14 @@ impl WSClient {
   async fn clean(&self) {
     if let Some(old_stop_ws_tx) = self.stop_ws_msg_loop_tx.lock().await.take() {
       let _ = old_stop_ws_tx.send(());
+    }
+
+    if let Some(old_stop_ws_recv_tx) = self.stop_ws_recv_msg_loop_tx.lock().await.take() {
+      let _ = old_stop_ws_recv_tx.send(());
+    }
+
+    if let Some(old_stop_aggregate_tx) = self.stop_aggregate_msg_loop_tx.lock().await.take() {
+      let _ = old_stop_aggregate_tx.send(());
     }
 
     if let Some(old_ping) = self.ping.lock().await.as_ref() {
