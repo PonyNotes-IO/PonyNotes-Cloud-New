@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+use crate::yrs::updates::encoder::Encode;
 use anyhow::anyhow;
 use collab::core::awareness::{AwarenessUpdate, Event};
 use collab::core::collab_plugin::CollabPluginType;
@@ -16,7 +17,6 @@ use tokio_retry::{Action, Condition, RetryIf};
 use tokio_stream::StreamExt;
 use tracing::{error, trace};
 use uuid::Uuid;
-use crate::yrs::updates::encoder::Encode;
 
 use client_api_entity::{CollabObject, CollabType};
 use collab_rt_entity::{ClientCollabMessage, ServerCollabMessage, UpdateSync};
@@ -112,7 +112,10 @@ where
               break;
             }
           },
-          ConnectState::Unauthorized | ConnectState::Lost => {
+          ConnectState::Connecting
+          | ConnectState::PingTimeout
+          | ConnectState::Unauthorized
+          | ConnectState::Lost => {
             if let Some(sync_queue) = weak_sync_queue.upgrade() {
               // Stop sync if the websocket is unauthorized or disconnected
               sync_queue.pause();
@@ -120,7 +123,6 @@ where
               break;
             }
           },
-          _ => {},
         }
       }
     });

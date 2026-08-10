@@ -24,7 +24,10 @@ pub enum WSError {
 
 impl WSError {
   pub fn should_stop(&self) -> bool {
-    matches!(self, WSError::LostConnection(_) | WSError::Close(_))
+    matches!(
+      self,
+      WSError::TungsteniteError(_) | WSError::LostConnection(_) | WSError::Close(_)
+    )
   }
 }
 

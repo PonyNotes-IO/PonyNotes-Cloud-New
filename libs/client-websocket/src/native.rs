@@ -1,6 +1,8 @@
 use futures_util::{Sink, Stream, StreamExt};
+use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderMap;
 use tokio_tungstenite::{
@@ -16,7 +18,18 @@ pub async fn connect_async(url: &str, header_map: HeaderMap) -> crate::Result<We
   let mut request = url.into_client_request()?;
   request.headers_mut().extend(header_map);
 
-  let (inner, _response) = tokio_tungstenite::connect_async(request).await?;
+  let connect_result = tokio::time::timeout(
+    Duration::from_secs(15),
+    tokio_tungstenite::connect_async(request),
+  )
+  .await
+  .map_err(|_| {
+    crate::Error::Io(io::Error::new(
+      io::ErrorKind::TimedOut,
+      "websocket handshake timed out",
+    ))
+  })?;
+  let (inner, _response) = connect_result?;
   let inner = inner.filter_map(to_fut_message as fn(_) -> _);
   Ok(WebSocketStream { inner })
 }
