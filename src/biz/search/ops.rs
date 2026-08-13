@@ -24,7 +24,7 @@ use uuid::Uuid;
 static MAX_SEARCH_DEPTH: i32 = 10;
 
 fn is_view_searchable(view: &View, workspace_id: &str) -> bool {
-  view.id != workspace_id && view.parent_view_id != workspace_id && view.layout.is_document()
+  view.id != workspace_id && view.parent_view_id != workspace_id
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -226,4 +226,54 @@ pub async fn summarize_search_results(
   }
 
   Ok(SearchSummaryResult { summaries })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::is_view_searchable;
+  use collab_folder::{View, ViewLayout};
+
+  #[test]
+  fn every_page_layout_is_searchable() {
+    let workspace_id = "workspace";
+    for layout in [
+      ViewLayout::Document,
+      ViewLayout::Grid,
+      ViewLayout::Board,
+      ViewLayout::Calendar,
+      ViewLayout::Chat,
+    ] {
+      let view = View::new(
+        format!("view-{}", layout.clone() as u8),
+        "space".to_string(),
+        "searchable page".to_string(),
+        layout,
+        Some(1),
+      );
+
+      assert!(is_view_searchable(&view, workspace_id));
+    }
+  }
+
+  #[test]
+  fn workspace_and_space_roots_are_not_searchable() {
+    let workspace_id = "workspace";
+    let workspace = View::new(
+      workspace_id.to_string(),
+      "root".to_string(),
+      "workspace".to_string(),
+      ViewLayout::Document,
+      Some(1),
+    );
+    let space = View::new(
+      "space".to_string(),
+      workspace_id.to_string(),
+      "space".to_string(),
+      ViewLayout::Document,
+      Some(1),
+    );
+
+    assert!(!is_view_searchable(&workspace, workspace_id));
+    assert!(!is_view_searchable(&space, workspace_id));
+  }
 }
