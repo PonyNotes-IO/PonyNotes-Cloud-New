@@ -5,7 +5,7 @@ use crate::biz::collab::database::{
   resolve_dependencies_when_create_database_linked_view, LinkedViewDependencies,
 };
 use crate::biz::collab::folder_view::{
-  check_if_space_is_private, check_if_view_is_space, get_prev_view_id,
+  check_if_space_is_private, check_if_view_is_private, check_if_view_is_space, get_prev_view_id,
   get_space_view_for_current_view, parse_extra_field_as_json, to_dto_view_icon, to_dto_view_layout,
   to_folder_view_icon, to_folder_view_layout, to_space_permission,
 };
@@ -21,6 +21,7 @@ use appflowy_collaborate::ws2::{CollabUpdatePublisher, WorkspaceCollabInstanceCa
 use chrono::DateTime;
 use collab::core::collab::{default_client_id, Collab, CollabOptions};
 use collab::core::origin::CollabClient;
+use collab::preclude::ReadTxn;
 use collab_database::database::{
   gen_database_group_id, gen_database_id, gen_field_id, gen_row_id, Database, DatabaseContext,
 };
@@ -44,7 +45,7 @@ use collab_document::document::{Document, DocumentBody};
 use collab_document::document_data::default_document_data;
 use collab_entity::{CollabType, EncodedCollab};
 use collab_folder::hierarchy_builder::NestedChildViewBuilder;
-use collab_folder::{timestamp, CollabOrigin, Folder, SectionItem, SpaceInfo, View};
+use collab_folder::{timestamp, CollabOrigin, Folder, FolderBody, SectionItem, SpaceInfo, View};
 use collab_rt_entity::user::RealtimeUser;
 use database::collab::{
   select_collab_meta_from_af_collab, select_workspace_database_oid, CollabStore, GetCollabOrigin,
@@ -56,7 +57,7 @@ use database::workspace::{
   upsert_page_mention,
 };
 use database_entity::dto::{
-  CollabParams, MentionablePerson, MentionablePersonWithAccess, PageMentionUpdate,
+  AFRole, CollabParams, MentionablePerson, MentionablePersonWithAccess, PageMentionUpdate,
   PublishCollabItem, PublishCollabMetadata, QueryCollab, QueryCollabResult,
 };
 use fancy_regex::Regex;
@@ -1558,8 +1559,8 @@ pub async fn move_page(
 /// 把文档在「私有空间」与「协作区」之间移动。
 ///
 /// 与 [`move_page`] 的区别：这里会同时改变文档的归属 —— folder 里该 uid 的
-/// Private section 增删一条记录。权限校验在 handler 层完成（移入需 Member
-/// 及以上，移出需 Owner）。
+/// Private section 增删一条记录。目标归属由服务端 folder 推导，不能信任客户端
+/// 的 `to_private`；移入协作区需 Member 及以上，移出需 Owner。
 #[allow(clippy::too_many_arguments)]
 pub async fn move_page_cross_space(
   state: &AppState,
@@ -1569,18 +1570,15 @@ pub async fn move_page_cross_space(
   new_parent_view_id: &str,
   prev_view_id: Option<String>,
   to_private: bool,
-) -> Result<(), AppError> {
+) -> Result<Vec<u8>, AppError> {
   let mut folder = state.ws_server.get_folder(workspace_id).await?;
 
   // move_nested_view 对不存在的视图或父级是**静默空操作**：不校验的话接口会
   // 返回成功而实际什么都没发生，客户端据此认为移动完成，界面与服务端就此分叉。
   // 线上实测确认过这一点（传入全零 uuid 作父级 → code=0，文档纹丝未动）。
-  if folder.get_view(view_id, user.uid).is_none() {
-    return Err(AppError::InvalidRequest(format!(
-      "待移动的视图不存在: {}",
-      view_id
-    )));
-  }
+  let view = folder
+    .get_view(view_id, user.uid)
+    .ok_or_else(|| AppError::InvalidRequest(format!("待移动的视图不存在: {}", view_id)))?;
   // 目标父级可以是空间或普通视图；工作区根节点单独放行。
   if new_parent_view_id != workspace_id.to_string()
     && folder.get_view(new_parent_view_id, user.uid).is_none()
@@ -1591,11 +1589,29 @@ pub async fn move_page_cross_space(
     )));
   }
 
+  let target_is_private = new_parent_view_id != workspace_id.to_string()
+    && check_if_view_is_private(&folder, new_parent_view_id, user.uid);
+  validate_cross_space_target(to_private, target_is_private)?;
+
+  let required_role = if target_is_private {
+    AFRole::Owner
+  } else {
+    AFRole::Member
+  };
+  state
+    .workspace_access_control
+    .enforce_role_weak(&user.uid, &workspace_id, required_role)
+    .await?;
+
+  if is_whiteboard_view(&view) && view.created_by != Some(user.uid) {
+    return Err(AppError::NotEnoughPermissions);
+  }
+
   let folder_update = move_view_cross_space(
     view_id,
     new_parent_view_id,
     prev_view_id,
-    to_private,
+    target_is_private,
     &mut folder,
     user.uid,
   )
@@ -1605,10 +1621,45 @@ pub async fn move_page_cross_space(
     &state.ws_server,
     user,
     workspace_id,
-    folder_update,
+    folder_update.clone(),
   )
   .await?;
-  Ok(())
+  Ok(folder_update)
+}
+
+fn relation_parent_ids_for_view<T: ReadTxn>(
+  body: &FolderBody,
+  txn: &T,
+  view_id: &str,
+  uid: i64,
+) -> Vec<String> {
+  body
+    .views
+    .get_all_views(txn, uid)
+    .into_iter()
+    .flat_map(|parent| {
+      let occurrence_count = parent
+        .children
+        .iter()
+        .filter(|child| child.id == view_id)
+        .count();
+      std::iter::repeat_n(parent.id.clone(), occurrence_count)
+    })
+    .collect()
+}
+
+fn redundant_relation_parent_ids(
+  canonical_parent_id: &str,
+  parent_ids: Vec<String>,
+) -> Vec<String> {
+  let keep_index = parent_ids
+    .iter()
+    .position(|parent_id| parent_id == canonical_parent_id);
+  parent_ids
+    .into_iter()
+    .enumerate()
+    .filter_map(|(index, parent_id)| (Some(index) != keep_index).then_some(parent_id))
+    .collect()
 }
 
 /// 挪树节点 + 改 Private section，**必须在同一个 yrs 事务内完成**。
@@ -1626,19 +1677,86 @@ async fn move_view_cross_space(
   uid: i64,
 ) -> Result<Vec<u8>, AppError> {
   let encoded_update = {
-    let mut txn = folder.collab.transact_mut();
-    folder
-      .body
-      .move_nested_view(&mut txn, view_id, new_parent_view_id, prev_view_id, uid);
-    folder.body.views.update_view(
+    let (collab, body) = (&mut folder.collab, &folder.body);
+    let mut txn = collab.transact_mut();
+    let canonical_parent_id = body
+      .views
+      .get_view(&txn, view_id, uid)
+      .map(|view| view.parent_view_id.clone())
+      .ok_or_else(|| AppError::InvalidRequest(format!("待移动的视图不存在: {}", view_id)))?;
+    let relation_parent_ids = relation_parent_ids_for_view(body, &txn, view_id, uid);
+    for parent_id in redundant_relation_parent_ids(&canonical_parent_id, relation_parent_ids) {
+      body
+        .views
+        .dissociate_parent_child_with_txn(&mut txn, &parent_id, view_id);
+    }
+
+    let moved = body.move_nested_view(&mut txn, view_id, new_parent_view_id, prev_view_id, uid);
+    if moved.is_none() {
+      return Err(AppError::InvalidRequest(format!(
+        "无法移动视图 {} 到父级 {}",
+        view_id, new_parent_view_id
+      )));
+    }
+    body.views.update_view(
       &mut txn,
       view_id,
-      |update| update.set_private(to_private).done(),
+      |update| update.set_private(to_private).set_trash(false).done(),
       uid,
     );
     txn.encode_update_v1()
   };
   Ok(encoded_update)
+}
+
+fn validate_cross_space_target(requested: bool, actual: bool) -> Result<(), AppError> {
+  if requested == actual {
+    Ok(())
+  } else {
+    Err(AppError::InvalidRequest(format!(
+      "目标空间归属不匹配: requested_private={}, actual_private={}",
+      requested, actual
+    )))
+  }
+}
+
+fn is_whiteboard_view(view: &View) -> bool {
+  view
+    .extra
+    .as_deref()
+    .and_then(|extra| serde_json::from_str::<serde_json::Value>(extra).ok())
+    .and_then(|extra| extra.get("view_type")?.as_str().map(str::to_owned))
+    .is_some_and(|view_type| view_type == "whiteboard")
+}
+
+#[cfg(test)]
+mod cross_space_move_tests {
+  use super::{redundant_relation_parent_ids, validate_cross_space_target};
+
+  #[test]
+  fn target_privacy_must_match_request() {
+    assert!(validate_cross_space_target(false, false).is_ok());
+    assert!(validate_cross_space_target(true, true).is_ok());
+    assert!(validate_cross_space_target(false, true).is_err());
+    assert!(validate_cross_space_target(true, false).is_err());
+  }
+
+  #[test]
+  fn removes_every_relation_except_one_canonical_parent() {
+    let removals = redundant_relation_parent_ids(
+      "new-parent",
+      vec![
+        "old-parent".to_string(),
+        "new-parent".to_string(),
+        "new-parent".to_string(),
+      ],
+    );
+
+    assert_eq!(
+      removals,
+      vec!["old-parent".to_string(), "new-parent".to_string()]
+    );
+  }
 }
 
 #[allow(clippy::too_many_arguments)]

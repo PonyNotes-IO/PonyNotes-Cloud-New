@@ -1912,22 +1912,12 @@ async fn move_page_cross_space_handler(
   state: Data<AppState>,
 
   req: HttpRequest,
-) -> Result<Json<AppResponse<()>>> {
+) -> Result<HttpResponse> {
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
   let (workspace_uuid, view_id) = path.into_inner();
 
-  let required_role = if payload.to_private {
-    AFRole::Owner
-  } else {
-    AFRole::Member
-  };
-  state
-    .workspace_access_control
-    .enforce_role_weak(&uid, &workspace_uuid, required_role)
-    .await?;
-
   let user = realtime_user_for_web_request(req.headers(), uid)?;
-  move_page_cross_space(
+  let folder_update = move_page_cross_space(
     &state,
     user,
     workspace_uuid,
@@ -1937,7 +1927,13 @@ async fn move_page_cross_space_handler(
     payload.to_private,
   )
   .await?;
-  Ok(Json(AppResponse::Ok()))
+  if payload.return_update {
+    Ok(HttpResponse::Ok().json(AppResponse::Ok().with_data(
+      MovePageCrossSpaceResponse { folder_update },
+    )))
+  } else {
+    Ok(HttpResponse::Ok().json(AppResponse::<()>::Ok()))
+  }
 }
 
 async fn reorder_favorite_page_handler(
