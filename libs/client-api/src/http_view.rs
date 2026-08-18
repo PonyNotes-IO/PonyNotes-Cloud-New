@@ -2,15 +2,25 @@ use client_api_entity::workspace_dto::{
   AddRecentPagesParams, AppendBlockToPageParams, CreateFolderViewParams,
   CreatePageDatabaseViewParams, CreatePageParams, CreateSpaceParams, DuplicatePageParams,
   FavoritePageParams, MovePageCrossSpaceParams, MovePageParams, Page, PageCollab,
-  PublishPageParams, Space, UpdatePageExtraParams, UpdatePageIconParams, UpdatePageNameParams,
-  UpdatePageParams, UpdateSpaceParams,
+  MovePageCrossSpaceResponse, PublishPageParams, Space, UpdatePageExtraParams, UpdatePageIconParams,
+  UpdatePageNameParams, UpdatePageParams, UpdateSpaceParams,
 };
 use reqwest::Method;
 use serde_json::json;
-use shared_entity::response::AppResponseError;
+use shared_entity::response::{AppResponse, AppResponseError};
 use uuid::Uuid;
 
 use crate::{process_response_data, process_response_error, Client};
+
+fn cross_space_folder_update(
+  response: AppResponse<MovePageCrossSpaceResponse>,
+) -> Result<Option<Vec<u8>>, AppResponseError> {
+  if response.is_ok() {
+    Ok(response.data.map(|data| data.folder_update))
+  } else {
+    Err(AppResponseError::new(response.code, response.message))
+  }
+}
 
 impl Client {
   pub async fn create_folder_view(
@@ -94,7 +104,7 @@ impl Client {
     workspace_id: Uuid,
     view_id: &Uuid,
     params: &MovePageCrossSpaceParams,
-  ) -> Result<(), AppResponseError> {
+  ) -> Result<Option<Vec<u8>>, AppResponseError> {
     let url = format!(
       "{}/api/workspace/{}/page-view/{}/move-cross-space",
       self.base_url, workspace_id, view_id
@@ -105,7 +115,10 @@ impl Client {
       .json(params)
       .send()
       .await?;
-    process_response_error(resp).await
+    let response = AppResponse::<MovePageCrossSpaceResponse>::from_response(resp)
+      .await
+      .map_err(AppResponseError::from)?;
+    cross_space_folder_update(response)
   }
 
   pub async fn move_workspace_page_view_to_trash(
@@ -450,5 +463,24 @@ impl Client {
       .send()
       .await?;
     process_response_error(resp).await
+  }
+}
+
+#[cfg(test)]
+mod cross_space_move_tests {
+  use super::{cross_space_folder_update, AppResponse, MovePageCrossSpaceResponse};
+
+  #[test]
+  fn supports_old_and_new_cloud_success_responses() {
+    assert_eq!(cross_space_folder_update(AppResponse::Ok()).unwrap(), None);
+    assert_eq!(
+      cross_space_folder_update(
+        AppResponse::Ok().with_data(MovePageCrossSpaceResponse {
+          folder_update: vec![1, 2, 3],
+        }),
+      )
+      .unwrap(),
+      Some(vec![1, 2, 3])
+    );
   }
 }
