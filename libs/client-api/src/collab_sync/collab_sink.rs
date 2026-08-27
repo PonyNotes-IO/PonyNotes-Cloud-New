@@ -9,7 +9,7 @@ use anyhow::Error;
 use collab::core::origin::{CollabClient, CollabOrigin};
 use collab::lock::Mutex;
 use futures_util::SinkExt;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, watch, Notify};
 use tokio::time::{interval, sleep};
 use tracing::{error, trace, warn};
 
@@ -38,6 +38,35 @@ pub struct CollabSink<Sink> {
   /// 当前这批待发消息中，最早一条的入队时刻；队列清空后复位为 `None`。
   /// 用于 [`SinkConfig::max_hold`] 的强制上推判定。
   first_pending_at: Arc<parking_lot::Mutex<Option<Instant>>>,
+  force_notify: Arc<Notify>,
+}
+
+#[derive(Clone)]
+pub struct SyncTrigger {
+  notifier: Weak<watch::Sender<SinkSignal>>,
+  message_queue: Weak<parking_lot::Mutex<SinkQueue<ClientCollabMessage>>>,
+  force_notify: Weak<Notify>,
+}
+
+impl SyncTrigger {
+  pub fn flush(&self) -> bool {
+    let (Some(notifier), Some(force_notify)) =
+      (self.notifier.upgrade(), self.force_notify.upgrade())
+    else {
+      return false;
+    };
+    force_notify.notify_one();
+    notifier.send(SinkSignal::Proceed).is_ok()
+  }
+
+  pub fn is_finished(&self) -> bool {
+    self.message_queue.upgrade().is_none_or(|queue| {
+      !queue
+        .lock()
+        .iter()
+        .any(|item| !item.message().is_ping_sync())
+    })
+  }
 }
 
 impl<Sink> Drop for CollabSink<Sink> {
@@ -125,6 +154,7 @@ where
       state,
       last_queued_at: Arc::new(parking_lot::Mutex::new(Instant::now())),
       first_pending_at: Arc::new(parking_lot::Mutex::new(None)),
+      force_notify: Arc::new(Notify::new()),
     }
   }
 
@@ -243,6 +273,14 @@ where
     }
 
     self.state.pause_sync.store(false, Ordering::SeqCst);
+  }
+
+  pub fn sync_trigger(&self) -> SyncTrigger {
+    SyncTrigger {
+      notifier: Arc::downgrade(&self.notifier),
+      message_queue: Arc::downgrade(&self.message_queue),
+      force_notify: Arc::downgrade(&self.force_notify),
+    }
   }
 
   /// Notify the sink to process the next message and mark the current message as done.
@@ -568,12 +606,18 @@ impl CollabSinkRunner {
             sync_sink.process_next_msg().await;
           },
           SinkSignal::ProcessAfter(delay) => {
-            sleep(delay).await;
+            tokio::select! {
+              _ = sleep(delay) => {},
+              _ = sync_sink.force_notify.notified() => {},
+            }
             // 私有空间内容：等到本地停止编辑（静默满 idle_flush）再推，
             // 或自首条待发消息入队起已 hold 满 max_hold 时强制推。
             // 未启用时 remaining_idle_wait 恒为 None，行为与原先完全一致。
             while let Some(wait) = sync_sink.remaining_idle_wait() {
-              sleep(wait).await;
+              tokio::select! {
+                _ = sleep(wait) => {},
+                _ = sync_sink.force_notify.notified() => break,
+              }
             }
             sync_sink.process_next_msg().await;
           },
@@ -664,6 +708,31 @@ pub enum SinkSignal {
   Stop,
   Proceed,
   ProcessAfter(Duration),
+}
+
+#[cfg(test)]
+mod sync_trigger_tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn flush_wakes_a_live_sink_and_ignores_a_dropped_sink() {
+    let (notifier, mut receiver) = watch::channel(SinkSignal::Stop);
+    let notifier = Arc::new(notifier);
+    let message_queue = Arc::new(parking_lot::Mutex::new(SinkQueue::new()));
+    let force_notify = Arc::new(Notify::new());
+    let trigger = SyncTrigger {
+      notifier: Arc::downgrade(&notifier),
+      message_queue: Arc::downgrade(&message_queue),
+      force_notify: Arc::downgrade(&force_notify),
+    };
+
+    assert!(trigger.is_finished());
+    assert!(trigger.flush());
+    receiver.changed().await.unwrap();
+
+    drop(notifier);
+    assert!(!trigger.flush());
+  }
 }
 
 pub(crate) struct SinkQueue<Msg> {

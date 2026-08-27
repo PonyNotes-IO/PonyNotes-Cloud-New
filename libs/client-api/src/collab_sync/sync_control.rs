@@ -19,7 +19,7 @@ use collab_rt_protocol::{ClientSyncProtocol, CollabSyncProtocol, Message, SyncMe
 use crate::collab_sync::collab_stream::{CollabRef, ObserveCollab};
 use crate::collab_sync::{
   CollabSink, CollabSinkRunner, CollabSyncState, MissUpdateReason, SinkSignal, SyncError,
-  SyncObject,
+  SyncObject, SyncTrigger,
 };
 
 pub const DEFAULT_SYNC_TIMEOUT: u64 = 10;
@@ -108,6 +108,10 @@ where
 
   pub fn subscribe_sync_state(&self) -> broadcast::Receiver<CollabSyncState> {
     self.sync_state_tx.subscribe()
+  }
+
+  pub fn sync_trigger(&self) -> SyncTrigger {
+    self.sink.sync_trigger()
   }
 
   /// Returns bool indicating whether the init sync is queued.

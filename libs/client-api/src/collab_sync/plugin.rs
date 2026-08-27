@@ -23,7 +23,7 @@ use collab_rt_entity::{ClientCollabMessage, ServerCollabMessage, UpdateSync};
 use collab_rt_protocol::{Message, SyncMessage};
 
 use crate::collab_sync::collab_stream::CollabRef;
-use crate::collab_sync::{CollabSyncState, SinkConfig, SyncControl, SyncReason};
+use crate::collab_sync::{CollabSyncState, SinkConfig, SyncControl, SyncReason, SyncTrigger};
 use crate::ws::{ConnectState, WSConnectStateReceiver};
 
 pub struct SyncPlugin<Sink, Stream, Channel> {
@@ -134,6 +134,10 @@ where
       collab,
       is_destroyed: Arc::new(Default::default()),
     }
+  }
+
+  pub fn sync_trigger(&self) -> SyncTrigger {
+    self.sync_queue.sync_trigger()
   }
 }
 
