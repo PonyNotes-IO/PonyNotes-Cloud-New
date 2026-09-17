@@ -785,19 +785,48 @@ pub async fn leave_workspace(
   user_uuid: &Uuid,
   workspace_access_control: Arc<dyn WorkspaceAccessControl>,
 ) -> Result<(), AppResponseError> {
-  let email = database::user::select_email_from_user_uuid(pg_pool, user_uuid).await?;
-  if let Some(email) = email {
-    remove_workspace_members(pg_pool, workspace_id, &[email], workspace_access_control, None).await
-  } else {
-    // User has no email, cannot remove by email
-    Ok(())
-  }
+  // 退出必须使用认证身份对应的 uid，手机号注册账号可能没有邮箱。
+  let uid = database::user::select_uid_from_uuid(pg_pool, user_uuid).await?;
+  remove_workspace_members_internal(
+    pg_pool,
+    workspace_id,
+    &[WorkspaceMemberRemoval::Uid(uid)],
+    workspace_access_control,
+    None,
+  )
+  .await
+}
+
+enum WorkspaceMemberRemoval<'a> {
+  Identifier(&'a str),
+  Uid(i64),
 }
 
 pub async fn remove_workspace_members(
   pg_pool: &PgPool,
   workspace_id: &Uuid,
   member_identifiers: &[String],
+  workspace_access_control: Arc<dyn WorkspaceAccessControl>,
+  operator_uid: Option<i64>,
+) -> Result<(), AppResponseError> {
+  let members: Vec<_> = member_identifiers
+    .iter()
+    .map(|identifier| WorkspaceMemberRemoval::Identifier(identifier.as_str()))
+    .collect();
+  remove_workspace_members_internal(
+    pg_pool,
+    workspace_id,
+    &members,
+    workspace_access_control,
+    operator_uid,
+  )
+  .await
+}
+
+async fn remove_workspace_members_internal(
+  pg_pool: &PgPool,
+  workspace_id: &Uuid,
+  members: &[WorkspaceMemberRemoval<'_>],
   workspace_access_control: Arc<dyn WorkspaceAccessControl>,
   operator_uid: Option<i64>,
 ) -> Result<(), AppResponseError> {
@@ -812,15 +841,21 @@ pub async fn remove_workspace_members(
   // 事务尚未提交，服务端仍会返回该工作区，导致客户端检测不到变化，无法自动切换工作区。
   let mut to_notify: Vec<(i64, String)> = Vec::new();
 
-  for identifier in member_identifiers {
-    // Skip empty identifiers
-    if identifier.is_empty() {
-      tracing::warn!("Skipping empty member identifier");
-      continue;
-    }
-
-    // Try to find user by email or phone (supports both email and phone number)
-    match select_uid_from_email_or_phone(txn.deref_mut(), identifier).await {
+  for member in members {
+    let (identifier, uid_result) = match member {
+      WorkspaceMemberRemoval::Uid(uid) => ("authenticated user", Ok(*uid)),
+      WorkspaceMemberRemoval::Identifier(identifier) => {
+        if identifier.is_empty() {
+          tracing::warn!("Skipping empty member identifier");
+          continue;
+        }
+        (
+          *identifier,
+          select_uid_from_email_or_phone(txn.deref_mut(), identifier).await,
+        )
+      },
+    };
+    match uid_result {
       Ok(uid) => {
         delete_workspace_members(&mut txn, workspace_id, uid).await?;
 
