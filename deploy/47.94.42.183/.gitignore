@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.env
+*.env
+.env.*
+config/
+releases/
+backups/
+deployment.json
+*.dump
+*.tar.gz
+*.jar
+compose.override.yaml*
