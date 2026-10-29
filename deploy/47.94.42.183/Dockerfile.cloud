@@ -1,8 +1,0 @@
-FROM ubuntu:26.04
-RUN sed -i 's|http://archive.ubuntu.com/ubuntu|http://mirrors.cloud.aliyuncs.com/ubuntu|g; s|http://security.ubuntu.com/ubuntu|http://mirrors.cloud.aliyuncs.com/ubuntu|g; s/^Components:.*/Components: main/' /etc/apt/sources.list.d/ubuntu.sources \
-    && apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/*
-COPY source/target/release/appflowy_cloud source/target/release/appflowy_worker /usr/local/bin/
-ENV APPFLOWY_ENVIRONMENT=production
-WORKDIR /app
-CMD ["appflowy_cloud"]
