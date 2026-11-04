@@ -178,7 +178,7 @@ async fn restore_resources_within_plan_limits(
 
   if restored_workspaces > 0 || restored_blobs > 0 {
     log::info!(
-      "[订阅购买] uid: {}, 自动恢复逻辑删除内容: 工作区 {} 个, 文件 {} 个",
+      "[订阅购买] uid: {}, 自动恢复逻辑删除内容: 空间 {} 个, 文件 {} 个",
       uid, restored_workspaces, restored_blobs
     );
   }

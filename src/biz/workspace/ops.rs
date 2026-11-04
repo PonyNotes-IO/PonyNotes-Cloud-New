@@ -386,13 +386,13 @@ pub async fn accept_workspace_invite(
     database::workspace::select_workspace_name_from_workspace_id(pg_pool, &inv.workspace_id)
       .await
       .unwrap_or(None)
-      .unwrap_or_else(|| "工作区".to_string());
+      .unwrap_or_else(|| "空间".to_string());
 
   // 通知邀请者（A）：被邀请人已接受邀请
   let notification_payload = json!({
     "title": "邀请已被接受",
     "message": format!(
-      "【{}】已接受你的邀请，以「{}」身份加入了工作区「{}」",
+      "【{}】已接受你的邀请，以「{}」身份加入了空间「{}」",
       invitee_name, role_str, workspace_name
     ),
     "invitee_uid": invited_uid,
@@ -679,8 +679,8 @@ pub async fn invite_workspace_members(
       "inviter_name": inviter_name,
       "workspace_name": workspace_name,
       "role": role_name,
-      "title": "你收到了工作区邀请",
-      "message": format!("【{}】邀请你加入工作区「{}」，你的角色是：{}", inviter_name, workspace_name, role_name),
+      "title": "你收到了空间邀请",
+      "message": format!("【{}】邀请你加入空间「{}」，你的角色是：{}", inviter_name, workspace_name, role_name),
     });
     if let Err(err) = create_workspace_notification(
       pg_pool,
@@ -710,8 +710,8 @@ pub async fn invite_workspace_members(
       "workspace_id": workspace_id.to_string(),
       "workspace_name": workspace_name,
       "invited_count": invited_count,
-      "title": "工作区邀请已发送",
-      "message": format!("你已成功邀请 {} 加入工作区「{}」", names_str, workspace_name),
+      "title": "空间邀请已发送",
+      "message": format!("你已成功邀请 {} 加入空间「{}」", names_str, workspace_name),
     });
     if let Err(err) = create_workspace_notification(
       pg_pool,
@@ -872,7 +872,7 @@ async fn remove_workspace_members_internal(
         // 获取工作区名称（使用 pg_pool 查询）
         let workspace_name = match database::workspace::select_workspace_name_from_workspace_id(pg_pool, workspace_id).await {
             Ok(Some(name)) => name,
-            _ => "未知工作区".to_string(),
+            _ => "未知空间".to_string(),
         };
 
         to_notify.push((uid, workspace_name));
@@ -908,8 +908,8 @@ async fn remove_workspace_members_internal(
     let notification_payload = json!({
       "workspace_id": workspace_id.to_string(),
       "removed_member_uid": uid,
-      "title": "工作区成员已移除",
-      "message": format!("{}用户已经移除了您所在工作区：{}", operator_name, workspace_name),
+      "title": "空间成员已移除",
+      "message": format!("{}用户已经移除了您所在空间：{}", operator_name, workspace_name),
     });
     if let Err(err) = create_workspace_notification(
       pg_pool,
@@ -1049,8 +1049,8 @@ pub async fn update_workspace_member(
       .unwrap_or_else(|_| "管理员".to_string());
     let payload = json!({
       "workspace_id": workspace_id.to_string(),
-      "title": "工作区角色已变更",
-      "message": format!("{}用户已经修改了您在工作区：{}的角色，新角色为：{}", operator_name, workspace_name, role_name),
+      "title": "空间角色已变更",
+      "message": format!("{}用户已经修改了您在空间：{}的角色，新角色为：{}", operator_name, workspace_name, role_name),
     });
     if let Err(err) = create_workspace_notification(pg_pool, workspace_id, "workspace_member_role_changed", &payload, Some(*uid)).await {
       tracing::warn!("Failed to send role change notification to uid={}: {:?}", uid, err);

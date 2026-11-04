@@ -45,7 +45,7 @@ pub async fn generate_workspace_invite_token(
     "invite_code": code,
     "expires_at": expires_at,
     "created_at": chrono::Utc::now().timestamp(),
-    "message": "您的工作空间邀请链接已生成"
+    "message": "您的空间邀请链接已生成"
   });
   // 【修复】收件人此前为 None，导致该通知永远无人可见；改为发给工作区所有者
   let owner_uid = select_workspace_owner_uid(pg_pool, workspace_id).await.ok().flatten();
@@ -77,7 +77,7 @@ pub async fn join_workspace_invite_by_code(
   let workspace_name = database::workspace::select_workspace_name_from_workspace_id(pg_pool, &invited_workspace_id)
     .await
     .unwrap_or(None)
-    .unwrap_or_else(|| "工作区".to_string());
+    .unwrap_or_else(|| "空间".to_string());
   let joiner_name = database::user::select_name_from_uid(pg_pool, uid)
     .await
     .unwrap_or_else(|_| "新成员".to_string());
@@ -90,8 +90,8 @@ pub async fn join_workspace_invite_by_code(
     "joined_at": chrono::Utc::now().timestamp(),
     "workspace_name": workspace_name,
     "role": "成员",
-    "title": "新成员加入工作区",
-    "message": format!("【{}】通过邀请链接加入了你的工作区「{}」", joiner_name, workspace_name),
+    "title": "新成员加入空间",
+    "message": format!("【{}】通过邀请链接加入了你的空间「{}」", joiner_name, workspace_name),
   });
   // 【修复】收件人此前为 None，导致"新成员加入"通知所有者永远收不到；改为发给工作区所有者
   let owner_uid = select_workspace_owner_uid(pg_pool, &invited_workspace_id).await.ok().flatten();
@@ -104,8 +104,8 @@ pub async fn join_workspace_invite_by_code(
     "workspace_id": invited_workspace_id.to_string(),
     "workspace_name": workspace_name,
     "role": "成员",
-    "title": "成功加入工作区",
-    "message": format!("你已通过邀请链接成功加入工作区「{}」，角色：成员", workspace_name),
+    "title": "成功加入空间",
+    "message": format!("你已通过邀请链接成功加入空间「{}」，角色：成员", workspace_name),
   });
   if let Err(err) = create_workspace_notification(pg_pool, &invited_workspace_id, "workspace_joined_via_code", &payload_joiner, Some(uid)).await {
     tracing::warn!("Failed to create workspace joined via code notification to uid={}: {:?}", uid, err);

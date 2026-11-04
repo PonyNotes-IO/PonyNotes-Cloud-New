@@ -69,7 +69,7 @@ pub async fn invite_landing_handler(
   </head>
   <body>
     <div class="card">
-      <h2>你被邀请加入工作空间：{workspace_name}</h2>
+      <h2>你被邀请加入空间：{workspace_name}</h2>
       <p class="muted">使用以下方式加入：</p>
       <p>
         <a class="btn" href="{app_deep_link}">在应用中打开</a>
