@@ -1,0 +1,11 @@
+services:
+  web_frontend:
+    image: ponynotes-web:1.0.0
+    restart: unless-stopped
+    environment:
+      NUXT_API_PROXY_TARGET: http://web_backend:8080
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

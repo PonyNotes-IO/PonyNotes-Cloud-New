@@ -207,6 +207,10 @@ pub fn workspace_scope() -> Scope {
                 .route(web::get().to(get_collab_members_handler)),
         )
         .service(
+            web::resource("/{workspace_id}/collab/{object_id}/sharing")
+                .route(web::delete().to(stop_collab_sharing_handler)),
+        )
+        .service(
             web::resource("/{workspace_id}/collab/{object_id}/permission")
                 .route(web::get().to(get_current_collab_permission_handler)),
         )
@@ -4358,6 +4362,56 @@ async fn remove_collab_member_handler(
     }],
   });
 
+  Ok(Json(AppResponse::Ok()))
+}
+
+/// Stop sharing a document, including outstanding links and accepted invitations.
+async fn stop_collab_sharing_handler(
+  user_uuid: UserUuid,
+  path_param: web::Path<(Uuid, Uuid)>,
+  state: Data<AppState>,
+) -> Result<JsonAppResponse<()>> {
+  let (workspace_id, view_id) = path_param.into_inner();
+  let owner_uid = state.user_cache.get_user_uid(&user_uuid).await?;
+  let actual_owner = select_collab_owner(&state.pg_pool, &workspace_id, &view_id).await?;
+  if owner_uid != actual_owner {
+    return Err(AppError::NotEnoughPermissions.into());
+  }
+
+  // Disable new link lookups before removing existing members.
+  sqlx::query("DELETE FROM af_collab_member_invite WHERE oid = $1 AND received_uid IS NULL")
+    .bind(view_id.to_string())
+    .execute(&state.pg_pool)
+    .await
+    .map_err(AppError::from)?;
+
+  let members = workspace::ops::get_collab_members(&state.pg_pool, &view_id).await?;
+  for member in members.into_iter().filter(|member| member.uid != owner_uid) {
+    workspace::collab_member::remove_collab_member(
+      &state.pg_pool,
+      state.collab_access_control.clone(),
+      &workspace_id,
+      &view_id,
+      owner_uid,
+      member.uid,
+      &view_id.to_string(),
+    )
+    .await?;
+    state.ws_server.do_send(UpdateUserPermissions {
+      workspace_id,
+      uid: member.uid,
+      updates: vec![PermissionUpdate {
+        object_id: view_id,
+        permission_type: PermissionType::NoAccess,
+      }],
+    });
+  }
+
+  sqlx::query("DELETE FROM af_collab_member_invite WHERE oid = $1")
+    .bind(view_id.to_string())
+    .execute(&state.pg_pool)
+    .await
+    .map_err(AppError::from)?;
   Ok(Json(AppResponse::Ok()))
 }
 
