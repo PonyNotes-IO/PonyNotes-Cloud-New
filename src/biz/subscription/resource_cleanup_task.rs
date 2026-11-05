@@ -65,7 +65,7 @@ async fn check_and_cleanup_user(pg_pool: &PgPool, uid: i64) -> Result<(), AppErr
     let workspace_limit = resource_status.workspace_limit;
 
     info!(
-        "[资源清理] 用户 {} 当前套餐: {}, 存储限额: {} MB, 工作区限额: {}",
+        "[资源清理] 用户 {} 当前套餐: {}, 存储限额: {} MB, 空间限额: {}",
         uid, resource_status.plan_code, resource_status.storage_limit_mb, workspace_limit
     );
 
@@ -75,7 +75,7 @@ async fn check_and_cleanup_user(pg_pool: &PgPool, uid: i64) -> Result<(), AppErr
             .await?;
     if removed_workspaces > 0 {
         info!(
-            "[资源清理] 用户 {} 逻辑删除 {} 个超出限额的工作区（限额: {}）",
+            "[资源清理] 用户 {} 逻辑删除 {} 个超出限额的空间（限额: {}）",
             uid, removed_workspaces, workspace_limit
         );
     }
