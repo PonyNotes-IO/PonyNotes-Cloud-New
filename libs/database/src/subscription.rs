@@ -972,7 +972,10 @@ pub async fn get_user_total_storage_usage(pg_pool: &PgPool, uid: i64) -> Result<
 ///
 /// todo 问ai的数据统计没有
 #[instrument(skip_all, err)]
-pub async fn get_user_total_usage_bytes(pg_pool: &PgPool, uid: i64) -> Result<i64, AppError> {
+pub async fn get_user_total_usage_bytes<'a, E>(executor: E, uid: i64) -> Result<i64, AppError>
+where
+  E: sqlx::Executor<'a, Database = sqlx::Postgres>,
+{
   let row: (Option<i64>,) = sqlx::query_as(
     r#"
         WITH user_workspaces AS (SELECT workspace_id FROM af_workspace
@@ -984,14 +987,17 @@ pub async fn get_user_total_usage_bytes(pg_pool: &PgPool, uid: i64) -> Result<i6
              collab_sum AS (SELECT SUM(len)::BIGINT as total
                             FROM af_collab
                             WHERE workspace_id IN (SELECT workspace_id FROM user_workspaces)),
+             version_sum AS (SELECT SUM(octet_length(document))::BIGINT AS total
+                             FROM af_document_version
+                             WHERE workspace_id IN (SELECT workspace_id FROM user_workspaces)),
              avatar_size AS (SELECT COALESCE((metadata ->> 'avatar_file_size')::BIGINT, 0) as total
                              FROM af_user
                              WHERE uid = $1)
         SELECT COALESCE((SELECT total FROM blob_sum), 0) + COALESCE((SELECT total FROM collab_sum), 0)
-                   + (select total from avatar_size)
+                   + (select total from avatar_size) + COALESCE((SELECT total FROM version_sum), 0)
             "#,
   ).bind(uid)
-   .fetch_one(pg_pool)
+   .fetch_one(executor)
    .await?;
 
   Ok(row.0.unwrap_or(0))

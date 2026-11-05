@@ -127,6 +127,12 @@ pub const WORKSPACE_PUBLISH_NAMESPACE_PATTERN: &str =
 
 pub fn workspace_scope() -> Scope {
   web::scope("/api/workspace")
+        .service(web::resource("/{workspace_id}/collab/{object_id}/history")
+            .app_data(web::JsonConfig::default().limit(crate::api::history::MAX_VERSION_BYTES))
+            .route(web::get().to(crate::api::history::list))
+            .route(web::post().to(crate::api::history::save)))
+        .service(web::resource("/{workspace_id}/collab/{object_id}/history/{snapshot_id}")
+            .route(web::get().to(crate::api::history::get)))
         .service(
             web::resource("")
                 .route(web::get().to(list_workspace_handler))

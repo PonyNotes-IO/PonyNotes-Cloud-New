@@ -5,6 +5,7 @@ pub mod chat;
 pub mod data_import;
 pub mod file_storage;
 pub mod guest;
+pub mod history;
 pub mod invite_code;
 pub mod internal;
 pub mod metrics;

@@ -9,7 +9,7 @@ const CLEANUP_INTERVAL_SECS: u64 = 86400;
 
 /// 过期会员资源清理定时任务。
 ///
-/// 按规则全部使用**逻辑删除**：只在数据库打 deleted_at 标记，
+/// 历史版本按 expires_at 物理删除；其他会员资源使用**逻辑删除**：只打 deleted_at 标记，
 /// 对象存储文件与数据库内容全部保留，客户端表现为已删除且禁止访问；
 /// 用户重新购买足够限额的套餐后可自动恢复（见 ops.rs 的恢复逻辑）。
 pub async fn start_resource_cleanup_task(pg_pool: PgPool) {
@@ -27,6 +27,8 @@ pub async fn start_resource_cleanup_task(pg_pool: PgPool) {
 
 #[instrument(skip_all)]
 pub async fn run_resource_cleanup_task(pg_pool: &PgPool) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM af_document_version WHERE expires_at <= NOW()")
+        .execute(pg_pool).await?;
     info!("[资源清理] 开始执行资源清理任务...");
 
     let users_needing_cleanup = database::subscription::get_users_needing_cleanup(pg_pool).await?;
