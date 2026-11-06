@@ -1,5 +1,28 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentVersionMeta {
+  pub snapshot_id: String,
+  pub object_id: String,
+  /// Unix milliseconds, assigned by the server.
+  pub created_at: i64,
+  /// True when saving reused an existing, still-readable version.
+  #[serde(default)]
+  pub reused: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentVersionList {
+  pub items: Vec<DocumentVersionMeta>,
+  pub has_more: bool,
+  pub retention_days: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentVersionData {
+  pub document: serde_json::Value,
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct SnapshotMeta {
   pub oid: String,

@@ -18,6 +18,7 @@ mod http_access_request;
 mod http_blob;
 mod http_collab;
 mod http_guest;
+mod http_history;
 mod http_member;
 mod http_person;
 pub mod http_publish;
