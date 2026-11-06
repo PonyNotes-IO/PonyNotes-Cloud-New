@@ -47,3 +47,6 @@ credentials/
 config/local.yml
 config/production.yml
 deploy_cloud.sh
+
+# Local assistant permissions are machine-specific.
+.claude/settings.local.json
