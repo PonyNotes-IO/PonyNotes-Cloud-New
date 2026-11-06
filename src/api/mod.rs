@@ -8,6 +8,7 @@ pub mod guest;
 pub mod history;
 pub mod invite_code;
 pub mod internal;
+pub mod knowledge;
 pub mod metrics;
 pub mod search;
 pub mod server_info;

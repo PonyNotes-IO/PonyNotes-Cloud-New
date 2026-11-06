@@ -671,6 +671,7 @@ dependencies = [
  "mime",
  "nanoid",
  "pin-project",
+ "ponynotes-weknora",
  "prometheus-client",
  "prost 0.13.5",
  "rand 0.8.5",
@@ -806,6 +807,7 @@ dependencies = [
  "mailer",
  "md5",
  "mime_guess",
+ "ponynotes-weknora",
  "prometheus-client",
  "rayon",
  "redis 0.29.5",
@@ -5478,6 +5480,21 @@ dependencies = [
  "cpufeatures",
  "opaque-debug",
  "universal-hash",
+]
+
+[[package]]
+name = "ponynotes-weknora"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "jsonwebtoken",
+ "reqwest",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

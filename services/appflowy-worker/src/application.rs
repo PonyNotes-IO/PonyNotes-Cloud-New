@@ -101,6 +101,7 @@ pub async fn create_app(listener: TcpListener, config: Config) -> Result<(), Err
   };
 
   let local_set = LocalSet::new();
+  tokio::spawn(ponynotes_weknora::sync::run(state.pg_pool.clone()));
   let email_notifier = EmailNotifier::new(mailer);
   let tick_interval = get_env_var("APPFLOWY_WORKER_IMPORT_TICK_INTERVAL", "10")
     .parse::<u64>()
@@ -180,7 +181,7 @@ async fn get_worker_mailer(config: &Config) -> Result<AFWorkerMailer, Error> {
   AFWorkerMailer::new(mailer).await
 }
 
-async fn get_connection_pool(setting: &DatabaseSetting) -> Result<PgPool, Error> {
+pub(crate) async fn get_connection_pool(setting: &DatabaseSetting) -> Result<PgPool, Error> {
   info!(
     "Connecting to postgres database with setting: {:?}",
     setting

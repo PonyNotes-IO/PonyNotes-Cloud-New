@@ -121,6 +121,7 @@ database-entity.workspace = true
 gotrue = { path = "libs/gotrue" }
 gotrue-entity = { path = "libs/gotrue-entity" }
 infra = { path = "libs/infra" }
+ponynotes-weknora = { path = "libs/weknora" }
 access-control.workspace = true
 app-error = { workspace = true, features = [
   "sqlx_error",
@@ -179,6 +180,7 @@ path = "src/lib.rs"
 
 [workspace]
 members = [
+  "libs/weknora",
   # libs
   "libs/snowflake",
   "libs/collab-rt-entity",
