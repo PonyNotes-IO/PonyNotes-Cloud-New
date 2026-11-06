@@ -76,64 +76,52 @@ curl -fsS http://127.0.0.1:11434/api/version
 
 向量模型验收已通过：三条中文输入均输出 1024 维有限值向量，相关文本余弦相似度约 0.783，无关文本约 0.201；三个同步知识库共 27 条笔记均为 `completed`。禁用关键词召回后，每个知识库均返回实际向量命中，跨租户知识库请求被拒绝；索引完成、模型已加载时，本轮三个样本查询耗时约 0.10～0.19 秒，Ollama 内存峰值约 1.43GiB。这些是当前少量数据的实测结果，不代表大规模或并发导入性能。完整配置与验收记录见 `/opt/ollama/embedding-deployment.json`、`embedding-validation.json`；知识库修改前的私密备份为 `/opt/ollama/weknora-embedding-before.json`。原有 Cloud、GoTrue、Java 和 WeKnora 网页健康检查均为 200。
 
-## 云端笔记同步到 WeKnora
+## Cloud / Worker 原生 WeKnora 集成
 
-在已部署的实例上安装/更新同步程序并启动定时任务：
+笔记同步和检索运行在项目原有 Rust 后端中：Cloud 提供 `POST /api/knowledge/search`，Worker 启动后运行一次同步，每轮结束五分钟后再次运行。共用代码位于 `libs/weknora`，复用现有 PostgreSQL、用户令牌、工作区权限和 Cloud 文档 API，不增加独立同步/检索进程或端口。WeKnora 继续负责文档处理、Embedding 和混合检索。
 
-```powershell
-python PonyNotes-Cloud-New/deploy/47.94.42.183/deploy-weknora.py --sync-notes
-python PonyNotes-Cloud-New/deploy/47.94.42.183/test-sync-weknora.py
+范围包含已同步到服务器的文档正文、数据库结构与记录正文、个人随手记。按 Cloud 用户隔离 WeKnora 租户，每个工作区对应独立知识库；过滤回收站和其他用户的私有页面。附件保留引用，不下载或 OCR；AI 聊天会话不属于笔记同步范围。新增、修改、删除在下一轮成功扫描后同步，来源读取或写入失败时不会清理旧副本。使用 PostgreSQL advisory lock 防止多个 Worker 同时同步。
+
+迁移保留原有用户、租户、知识库、文档 ID 和模型配置。原来的私密 `sync/state.json` 一次性导入 `af_weknora_sync_state.state`，后续由 Worker 写入数据库；该状态含租户凭据，随 Cloud 数据库私密备份，不通过接口返回或记录日志。检索只加载当前登录用户的映射，并实时复核 GoTrue 登录身份、工作区成员资格和页面可见性；客户端传入的用户、租户和知识库 ID 不参与选择。
+
+配置由 Cloud/Worker 共用的 `config/cloud.env` 提供，默认关闭，迁移前已有部署不受影响：
+
+```dotenv
+PONYNOTES_WEKNORA_ENABLED=true
+PONYNOTES_WEKNORA_URL=http://ponynotes-weknora-api:8080/api/v1/
+PONYNOTES_WEKNORA_CLOUD_URL=http://nginx
+PONYNOTES_WEKNORA_ADMIN_FILE=/run/weknora-admin.json
 ```
 
-同步程序仅使用 Python 标准库，复用现有 Cloud 与 WeKnora API，无需重建 Rust 服务或客户端。首次全量导入，随后每轮结束五分钟后再次运行；用户和笔记规模增加、一次扫描超过五分钟时再改事件队列。首次范围为已同步到测试服的文档正文、数据库结构、数据库记录及记录正文、个人随手记，过滤回收站和其他用户的私有空间。AI 聊天会话不在本轮笔记范围内；图片、文件等保留引用和描述，不下载附件或执行 OCR；富文本按云端 API 提供的纯文本导出。
+Cloud、Worker 和 WeKnora app 通过独立的 `ponynotes-knowledge` 内部网络连接，避免两套 PostgreSQL/Redis 同名 DNS 冲突；只有 Worker 只读挂载管理员凭据文件，创建新用户映射时使用。现有账号继续使用各自的租户 Key。新租户的 Embedding 模型仍需在 WeKnora 单独配置，未配置时先导入草稿；配置后下一轮自动发布。
 
-每个不可变 Cloud 用户 UUID 自动映射到独立 WeKnora 原生账号及私人租户，每个工作区创建独立知识库。账号使用 `pn-<Cloud UUID>@cloud.ponynotes.local`，不按邮箱合并身份、不复用小马密码。账号映射、初始随机密码、租户 API Key 和同步摘要保存在服务器 `/opt/ponynotes-weknora/sync/state.json`，目录权限 700、文件 600。管理员可据此向相应用户提供初始登录信息，用户可在原生页面更改密码。此文件含密钥，必须随 WeKnora 一起私密备份，不能提交到 Git、放入网页目录或发送给其他用户；原生账号改密后，已创建的租户同步 Key 继续工作。单点登录与小马客户端知识库入口尚未接入。
-
-程序在服务器内读取 GoTrue 签名密钥，为每位用户生成十分钟有效的普通 `authenticated` 令牌，笔记读取仍经过 Cloud 原有权限校验；签名密钥不写入同步状态、不传给 WeKnora。每个租户的同步 Key 仅授予读取、写入知识、管理知识库三项权限，禁止跨租户读取。当前范围要求工作区成员权限；访客共享页面尚不支持，API 拒绝时记录错误，不能视为空工作区。
-
-来源以知识条目的稳定 `channel` 标识，不依赖标题或本地知识 ID；创建成功但响应丢失时，下轮从远端列表恢复，不重复创建。标题、正文、目录变化覆盖同步副本，小马原文为真源。完整读取所有来源并成功更新后，才删除已不存在的同步副本；超时、缺行、正文缺失、解析失败都会让该工作区整轮失败并保留现有内容。工作区成员资格丢失、账号删除/封禁后清理其受管知识库。权限变更和删除在下一次成功扫描后生效，并非实时撤权；不应把独立 WeKnora 实例作为要求即时撤权的正式生产入口。
-
-尚无 Embedding 配置时导入为 `draft`，可以打开正文，但不会进入检索或问答。为各用户租户中的知识库配置可用 Embedding 模型后，下轮自动将草稿发布，后续通过条目的 `parse_status` 判断处理是否完成；`pending`/`failed` 不代表可检索，失败会在后续轮次重试。对话模型需另行配置。管理员租户的模型不会自动复制给其他租户。
-
-运维命令：
+首次从旧 Python 桥接迁移，在测试服构建包含本次代码的 Cloud/Worker 镜像后执行：
 
 ```sh
-# 仅读取来源，不修改 WeKnora
-python3 /opt/ponynotes-weknora/sync-weknora.py --scan-only
-# 立即同步 / 查看上次摘要与失败
-systemctl start ponynotes-weknora-sync.service
-cat /opt/ponynotes-weknora/sync/last-run.json
-journalctl -u ponynotes-weknora-sync.service -n 30 --no-pager
-systemctl status ponynotes-weknora-sync.timer --no-pager
-# 暂停定时同步，保留数据
-systemctl disable --now ponynotes-weknora-sync.timer
+python3 migrate-weknora-backend.py --image ponynotes/cloud:本次镜像标签
 ```
 
-日志只输出用户/工作区 UUID、数量、状态和错误类型，不输出笔记正文、密码或令牌。`state.json` 缺失时不要直接重新运行创建账号：已有账号的随机密码无法从邮箱恢复；应恢复备份。临时网络失败会让服务返回非零并保留错误摘要，下一次定时运行继续重试。
+脚本仅针对测试服 `/opt/ponynotes`：备份 Compose、Nginx、环境配置和原始同步映射，停止旧同步任务，应用新增表迁移并导入映射，更新 Cloud/Worker，移除 Nginx 到旧 `18082` 的转发。原生同步首轮成功后停用旧同步 timer/service 和检索 service；失败自动恢复旧配置和服务。备份位于 `/opt/ponynotes/backups/weknora-native-时间/`。部署脚本中的 Python 仅用于运维，日常同步和检索不依赖 Python。新网络和挂载写入保留的基础 Compose，后续现有 `deploy-test.py` 更新仍可沿用。
 
-2026-11-06 已部署并验收：3 位有效云端用户、3 个隔离知识库、14 篇文档、2 个数据库结构、10 条数据库记录，共 26 条草稿。定时器已启用，服务最近一次退出码 0、错误数 0、26 条均无变化。用临时源文档和随手记实际验证了新增、改名、追加正文、修改、删除与重复运行；普通网页登录令牌和租户 API Key 均无法跨用户读取，模拟来源超时不会清理副本。临时数据已清理，原有 Cloud/GoTrue/Java 健康检查均正常。离线回归检查另覆盖目录超过十层、随手记分页、长文拆分、创建响应丢失后的恢复及工作区撤权清理。真实模型索引/问答尚未验证。
-
-## 小马聊天的知识库检索开关
-
-Flutter AI 欢迎页和聊天输入栏在「联网搜索」右侧增加「知识库检索」，默认关闭，点击后变为橙色。开启时先检索当前工作区中当前用户有权访问的已同步笔记，再将资料交给原有聊天模型回答；聊天记录保留原问题。没有相关资料时要求模型说明未找到相关笔记，检索失败时显示错误并可关闭开关重试。重新生成回答沿用原问题的检索开关，并重新检索。
-
-检索使用独立的 Python 标准库服务，通过现有 Nginx 暴露 `POST /api/knowledge/search`。请求使用小马登录令牌和 `workspace_id`、`query`；服务通过 GoTrue 验证身份，并通过 Cloud API 检查工作区成员资格和当前页面可见性，不接受客户端指定用户、租户或知识库。WeKnora 密钥保留在服务器。返回最多 5 条去重来源，总计不超过 16000 字符，笔记引用保留小马打开链接。
-
-已有云端笔记同步部署后，执行：
-
-```powershell
-python PonyNotes-Cloud-New/deploy/47.94.42.183/deploy-weknora.py --knowledge-search
-python PonyNotes-Cloud-New/deploy/47.94.42.183/test-search-weknora.py
-```
-
-安装器创建 `ponynotes-weknora-search.service`，仅监听小马 Docker 私有网关的 `18082`，并添加只允许对应 Docker 网桥/子网访问的 UFW 规则。公网通过原有 Cloud 端口访问，18082 不对公网开放。Nginx 修改前备份至 `/opt/ponynotes/nginx.conf.before-knowledge-search`，验证配置后重载。服务读取现有 `sync/state.json` 和 `sync-weknora.py`；同步定时器继续负责新增、修改及删除。
+日常维护和验证：
 
 ```sh
-systemctl status ponynotes-weknora-search.service --no-pager
-journalctl -u ponynotes-weknora-search.service -n 20 --no-pager
+cd /opt/ponynotes
+# 手动执行一轮；与后台任务使用同一把数据库锁
+# 若提示 already_running，等待当前轮结束后再执行。
+docker compose exec -T appflowy_worker appflowy_worker --weknora-sync-once
+# 查看不含正文或凭据的同步摘要
+docker compose exec -T postgres psql -U postgres -d ponynotes -c 'SELECT last_run,updated_at FROM af_weknora_sync_state;'
+docker compose logs --tail 50 appflowy_worker
+# 原生集成回归检查
+cargo test -p ponynotes-weknora --lib
+# 测试服实际身份、租户隔离及新增/修改/删除验证（结束清理临时随手记）
+python3 smoke-weknora-backend.py
 ```
 
-2026-11-06 验证：三个实际用户经 Nginx 均可检索到各自资料；跨用户工作区请求返回 403，匿名请求返回 401。离线回归覆盖伪造用户/知识库参数、页面权限过滤、来源去重和待同步用户。客户端 Rust DLL、Windows Debug 完整构建及 Flutter 开关/消息编码、debug/release/profile 环境配置测试通过，原有合并冲突和生成接口缺失已修复。检索后的生成继续使用小马聊天 API 的对话模型配置，与 WeKnora 模型配置独立；测试服对话模型已按下一节配置并通过上游调用验证，客户端实际回答由用户后续验收。
+Flutter 的「知识库检索」开关和接口协议保持兼容：开启后先检索当前用户当前工作区的资料，再交给原有聊天模型生成回答。最多返回 5 条去重来源、总计 16000 字符；无资料和待同步状态保持原有语义。对话模型仍使用小马聊天 API 的配置。
+
+2026-11-06 已在测试服完成迁移：镜像 `ponynotes/cloud:weknora-native-20261106-173132-agent`，数据库迁移编号 `20261106020000`，保留服务器已有 Agent 功能。8 项 Rust 回归检查通过，实际验证 3 位用户的检索和权限隔离，以及临时随手记的新增、修改、重复运行和删除；3 个原有知识库、32 个文档 ID 和模型绑定均保留。旧 Python 同步和检索 unit 已停用并禁用开机启动。服务器部署记录位于 `/opt/ponynotes/deployment.json`，本次配置备份位于 `/opt/ponynotes/backups/weknora-native-20261106-181011/`；临时测试数据已清理。
 
 ## 测试服聊天模型
 
