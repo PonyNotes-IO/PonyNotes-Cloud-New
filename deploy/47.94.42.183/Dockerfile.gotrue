@@ -1,0 +1,6 @@
+FROM ponynotes/minio:2025-09-07
+COPY gotrue-source/auth /usr/local/bin/auth
+COPY gotrue-source/migrations/ /usr/local/etc/auth/migrations/
+ENV GOTRUE_DB_MIGRATIONS_PATH=/usr/local/etc/auth/migrations
+USER 1000:1000
+ENTRYPOINT ["auth"]
