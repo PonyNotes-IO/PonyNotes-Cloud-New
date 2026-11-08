@@ -483,6 +483,7 @@ pub async fn init_state(config: &Config) -> Result<AppState, Error> {
 
   info!("Application state initialized");
   Ok(AppState {
+    sub2api: crate::api::agent::Sub2ApiGateway::from_env()?,
     pg_pool,
     config: Arc::new(config.clone()),
     user_cache,

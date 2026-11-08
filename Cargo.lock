@@ -659,6 +659,7 @@ dependencies = [
  "gotrue",
  "gotrue-entity",
  "hex",
+ "hmac",
  "html-escape",
  "indexer",
  "infra",

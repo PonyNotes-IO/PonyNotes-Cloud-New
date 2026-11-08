@@ -39,6 +39,7 @@ use crate::mailer::AFCloudMailer;
 pub type RedisConnectionManager = redis::aio::ConnectionManager;
 #[derive(Clone)]
 pub struct AppState {
+  pub sub2api: Option<crate::api::agent::Sub2ApiGateway>,
   pub pg_pool: PgPool,
   pub config: Arc<Config>,
   pub user_cache: UserCache,

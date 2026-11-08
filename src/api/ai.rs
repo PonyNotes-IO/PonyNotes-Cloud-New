@@ -35,6 +35,7 @@ use tracing::{error, info, instrument, trace, warn};
 
 pub fn ai_completion_scope() -> Scope {
   web::scope("/api/ai")
+    .service(crate::api::agent::agent_scope())
     // 公开接口（无需认证，无需workspace_id）
     .service(web::resource("/chat/models").route(web::get().to(list_chat_models_handler)))
     .service(web::resource("/chat/session").route(web::post().to(public_chat_session_handler)))
