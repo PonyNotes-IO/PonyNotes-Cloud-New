@@ -209,17 +209,37 @@ async fn models(user: UserUuid, state: web::Data<AppState>) -> actix_web::Result
   )
 }
 
-fn credit_balance(body: &Value, rate: u32) -> actix_web::Result<Value> {
-  if body["unit"] != "USD" || body["isValid"] == false {
+fn credit_balance(body: &Value, wallet: Option<&Value>, rate: u32) -> actix_web::Result<Value> {
+  if (body.get("unit").is_some() && body["unit"] != "USD")
+    || (body.get("unit").is_none() && wallet.is_none())
+    || body["isValid"] == false
+  {
     return Err(error::ErrorBadGateway("内部积分余额响应无效"));
   }
-  // remaining includes the key/subscription limit; account balance alone can overstate it.
-  let remaining = body
+  let quota = body
     .get("remaining")
     .or_else(|| body.get("balance"))
-    .and_then(Value::as_number)
-    .and_then(|v| v.to_string().parse::<Decimal>().ok())
-    .ok_or_else(|| error::ErrorBadGateway("内部积分余额响应无效"))?;
+    .map(|v| {
+      v.as_number()
+        .and_then(|v| v.to_string().parse::<Decimal>().ok())
+        .ok_or_else(|| error::ErrorBadGateway("内部积分余额响应无效"))
+    })
+    .transpose()?;
+  let remaining = if let Some(wallet) = wallet {
+    let balance = wallet
+      .as_number()
+      .and_then(|v| v.to_string().parse::<Decimal>().ok())
+      .ok_or_else(|| error::ErrorBadGateway("内部积分余额响应无效"))?
+      .max(Decimal::ZERO);
+    match quota {
+      Some(value) if value >= Decimal::ZERO => balance.min(value),
+      Some(value) if value == Decimal::NEGATIVE_ONE => balance,
+      None => balance,
+      _ => return Err(error::ErrorBadGateway("内部积分余额无效")),
+    }
+  } else {
+    quota.ok_or_else(|| error::ErrorBadGateway("内部积分余额响应无效"))?
+  };
   let unlimited = remaining == Decimal::NEGATIVE_ONE;
   if remaining < Decimal::ZERO && !unlimited {
     return Err(error::ErrorBadGateway("内部积分余额无效"));
@@ -244,14 +264,46 @@ fn credit_balance(body: &Value, rate: u32) -> actix_web::Result<Value> {
 
 async fn usage(user: UserUuid, state: web::Data<AppState>) -> actix_web::Result<HttpResponse> {
   let gateway = gateway(&state)?;
-  let key = gateway
-    .key_for_user(&state, user_uid(&user, &state).await?)
+  let (user_id, key_id) = gateway
+    .account_for_user(&state.pg_pool, user_uid(&user, &state).await?)
     .await?;
+  let keys = gateway.user_keys(user_id).await?;
+  let key_info = keys
+    .iter()
+    .find(|key| key["id"].as_i64() == Some(key_id))
+    .ok_or_else(|| error::ErrorForbidden("内部模型凭据已移除，请联系管理员"))?;
+  let key = bound_key(key_info, user_id)?;
+  let body = gateway.get("usage", &key).await?;
+  let wallet = if body["mode"] == "quota_limited" {
+    let billing = if key_info["group_id"].is_null() {
+      "standard"
+    } else {
+      key_info["group"]["subscription_type"]
+        .as_str()
+        .ok_or_else(|| error::ErrorBadGateway("内部模型计费模式响应无效"))?
+    };
+    match billing {
+      "standard" => {
+        let account = gateway
+          .admin_json(&format!("users/{user_id}"), None)
+          .await?;
+        if account["id"].as_i64() != Some(user_id) {
+          return Err(error::ErrorBadGateway("内部模型账户响应无效"));
+        }
+        Some(account["balance"].clone())
+      },
+      "subscription" => None,
+      _ => return Err(error::ErrorBadGateway("内部模型计费模式响应无效")),
+    }
+  } else {
+    None
+  };
   Ok(
     HttpResponse::Ok()
       .insert_header(("Cache-Control", "no-store"))
       .json(credit_balance(
-        &gateway.get("usage", &key).await?,
+        &body,
+        wallet.as_ref(),
         gateway.credits_per_usd,
       )?),
   )
@@ -382,16 +434,48 @@ mod tests {
 
   #[test]
   fn effective_quota_and_unlimited_are_not_account_balance() {
-    let value =
-      credit_balance(&json!({"unit":"USD", "balance":50, "remaining":1.239}), 100).unwrap();
+    let value = credit_balance(
+      &json!({"unit":"USD", "balance":50, "remaining":1.239}),
+      None,
+      100,
+    )
+    .unwrap();
     assert_eq!(value["credits"], 123);
     assert_eq!(
-      credit_balance(&json!({"unit":"USD", "remaining":-1}), 100).unwrap()["unlimited"],
+      credit_balance(&json!({"unit":"USD", "remaining":-1}), None, 100).unwrap()["unlimited"],
       true
     );
-    assert!(credit_balance(&json!({"unit":"USD", "remaining":-2}), 100).is_err());
-    assert!(credit_balance(&json!({"unit":"USD", "isValid":false, "remaining":10}), 100).is_err());
-    assert!(credit_balance(&json!({"unit":"tokens", "remaining":10}), 100).is_err());
+    assert!(credit_balance(&json!({"unit":"USD", "remaining":-2}), None, 100).is_err());
+    assert!(credit_balance(
+      &json!({"unit":"USD", "isValid":false, "remaining":10}),
+      None,
+      100
+    )
+    .is_err());
+    assert!(credit_balance(&json!({"unit":"tokens", "remaining":10}), None, 100).is_err());
+    assert_eq!(
+      credit_balance(
+        &json!({"unit":"USD", "remaining":0.9622}),
+        Some(&json!(0.01)),
+        100
+      )
+      .unwrap()["credits"],
+      1
+    );
+    assert_eq!(
+      credit_balance(
+        &json!({"unit":"USD", "remaining":0.01}),
+        Some(&json!(1)),
+        100
+      )
+      .unwrap()["credits"],
+      1
+    );
+    assert_eq!(
+      credit_balance(&json!({}), Some(&json!(0.01)), 100).unwrap()["credits"],
+      1
+    );
+    assert!(credit_balance(&json!({}), Some(&json!(null)), 100).is_err());
   }
 
   #[test]

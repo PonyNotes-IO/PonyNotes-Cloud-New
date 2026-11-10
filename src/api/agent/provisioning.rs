@@ -206,7 +206,11 @@ impl Sub2ApiGateway {
     Ok(account)
   }
 
-  async fn admin_json(&self, path: &str, body: Option<Value>) -> actix_web::Result<Value> {
+  pub(super) async fn admin_json(
+    &self,
+    path: &str,
+    body: Option<Value>,
+  ) -> actix_web::Result<Value> {
     let url = format!("{}/api/v1/admin/{path}", self.base);
     let request = match body {
       Some(body) => self.client.post(url).json(&body),

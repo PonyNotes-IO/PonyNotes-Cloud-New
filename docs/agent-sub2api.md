@@ -47,14 +47,14 @@
 - 执行器仅收到 cloud 签发的随机 Agent 会话凭证，通过 `/api/ai/agent/chat/completions` 请求。它既不持有登录 JWT，也不持有 sub2api Key。会话有效期 24 小时，后续任务开始前会在临近到期时刷新；切换模型、断开和退出账号时撤销。撤销失败会显示提示，服务端到期兜底。单个连续运行超过 24 小时的任务需要重新连接。
 - cloud 按已认证用户查找绑定，覆盖请求中的 `user` 为小马 uid，只转发模型请求。工具调用产生的后续轮次、重试和上下文压缩仍经过相同代理。
 - **sub2api 是唯一计费账本。** 每轮请求的实际费用、模型倍率、余额/套餐/Key 限额都由 sub2api 结算，cloud 不重复扣减旧 Chat 次数。用量明细在 sub2api 对应用户和 Key 的使用记录中查看。
-- 积分由服务端用 USD 可用额度换算：`floor(remaining × PONYNOTES_CREDITS_PER_USD)`。优先使用 `remaining`，因为它包含套餐和 Key 的可用限额；仅在未返回此字段时使用 `balance`。`remaining = -1` 显示「积分不限额」。调整比例只改变展示单位，不改变 sub2api 的 USD 账本。
-- 内部积分查询失败显示重试入口，不沿用旧余额。自定义模型沿用其原有地址、凭据和余额展示逻辑。
+- 标准余额分组在 Key 有额度或速率限制时，从管理接口读取最新钱包余额；有 Key 总额度时取钱包余额与 Key 剩余额度的较小值。其他模式沿用上游返回的可用额度，`remaining = -1` 显示「积分不限额」。积分按 `PONYNOTES_CREDITS_PER_USD` 换算，调整比例不改变 sub2api 的 USD 账本。
+- Agent 连接期间约每 5 秒刷新一次积分，任务结束和切换模型后也会刷新；网络延迟会增加显示延迟。内部积分查询失败显示重试入口，不沿用旧余额。自定义模型沿用其原有地址、凭据和余额展示逻辑。
 
 ## 发布验收
 
 代码回归使用 `cargo test -p appflowy-cloud --lib api::agent`。其中数据库测试需要 `DATABASE_URL` 指向具有创建测试数据库权限的 PostgreSQL 测试实例；它会验证并发开通、重试恢复及唯一绑定，不调用真实 sub2api。
 
-服务端需要 PostgreSQL、Redis，以及支持以下接口的 sub2api 版本：管理员 `GET/POST /api/v1/admin/users` 和 `GET /api/v1/admin/users/:id/api-keys`（`x-api-key`，分页 `data.items`/`data.pages`）；用户 `POST /api/v1/auth/login` 和 `POST /api/v1/keys`（用户 JWT，支持 `custom_key`）；网关 `GET /v1/models`、`GET /v1/usage` 和 `POST /v1/chat/completions`。契约依据 upstream `Wei-Shaw/sub2api` 的路由及类型核对，发布前需对实际部署版本联调。
+服务端需要 PostgreSQL、Redis，以及支持以下接口的 sub2api 版本：管理员 `GET/POST /api/v1/admin/users`、`GET /api/v1/admin/users/:id` 和 `GET /api/v1/admin/users/:id/api-keys`（`x-api-key`，分页 `data.items`/`data.pages`）；用户 `POST /api/v1/auth/login` 和 `POST /api/v1/keys`（用户 JWT，支持 `custom_key`）；网关 `GET /v1/models`、`GET /v1/usage` 和 `POST /v1/chat/completions`。使用受限管理 Key 时，读取钱包余额还需 `users.balance.read` 权限。契约依据 upstream `Wei-Shaw/sub2api` 的路由及类型核对，发布前需对实际部署版本联调。
 
 自动建 Key 使用 sub2api 的正常用户认证流程；采用管理账号模式时，管理员也通过正常登录接口认证。部署的登录限流、交互验证码、强制双因素或仅管理员后台模式可能阻止此流程；此时会保留开通记录并返回失败，需在 sub2api 侧提供受支持的非交互服务认证能力后重试，不改变现有登录安全策略。
 
