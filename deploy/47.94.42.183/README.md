@@ -85,15 +85,23 @@ python PonyNotes-Cloud-New/deploy/47.94.42.183/deploy-weknora.py --sync-notes
 python PonyNotes-Cloud-New/deploy/47.94.42.183/test-sync-weknora.py
 ```
 
-同步程序仅使用 Python 标准库，复用现有 Cloud 与 WeKnora API，无需重建 Rust 服务或客户端。首次全量导入，随后每轮结束五分钟后再次运行；用户和笔记规模增加、一次扫描超过五分钟时再改事件队列。首次范围为已同步到测试服的文档正文、数据库结构、数据库记录及记录正文、个人随手记，过滤回收站和其他用户的私有空间。AI 聊天会话不在本轮笔记范围内；图片、文件等保留引用和描述，不下载附件或执行 OCR；富文本按云端 API 提供的纯文本导出。
+当前仓库已改为**一个工作空间一个知识库**，同一空间的成员检索相同的知识库，不再按成员分别创建副本。同步程序仅使用 Python 标准库，复用现有 Cloud 与 WeKnora API；主人计费需要先升级 Cloud，侧栏入口需要重建客户端。首次全量导入，随后每轮结束五分钟后再次运行；一次扫描超过五分钟时再改事件队列。范围为文档正文、数据库结构、数据库记录及记录正文、个人随手记，过滤回收站。AI 聊天会话不在同步范围内；图片、文件等保留引用和描述，不下载附件或执行 OCR；富文本按云端 API 提供的纯文本导出。
 
-每个不可变 Cloud 用户 UUID 自动映射到独立 WeKnora 原生账号及私人租户，每个工作区创建独立知识库。账号使用 `pn-<Cloud UUID>@cloud.ponynotes.local`，不按邮箱合并身份、不复用小马密码。账号映射、初始随机密码、租户 API Key 和同步摘要保存在服务器 `/opt/ponynotes-weknora/sync/state.json`，目录权限 700、文件 600。管理员可据此向相应用户提供初始登录信息，用户可在原生页面更改密码。此文件含密钥，必须随 WeKnora 一起私密备份，不能提交到 Git、放入网页目录或发送给其他用户；原生账号改密后，已创建的租户同步 Key 继续工作。单点登录与小马客户端知识库入口尚未接入。
+新知识库由既有的服务端管理员租户管理，知识库 UUID 仅由不可变的工作空间 UUID 派生；成员退出、空间改名或转移所有者均不会更换知识库。`/opt/ponynotes-weknora/sync/state.json` 中的 `workspaces[workspace_id]` 保存唯一知识库映射及同步摘要，`service` 保存租户及同步 Key。目录权限 700、文件 600，密钥不下发客户端，也不向成员提供服务端管理员的原生网页登录凭据。此文件必须私密备份，不得提交 Git、放入网页目录或发送给其他用户。
 
-程序在服务器内读取 GoTrue 签名密钥，为每位用户生成十分钟有效的普通 `authenticated` 令牌，笔记读取仍经过 Cloud 原有权限校验；签名密钥不写入同步状态、不传给 WeKnora。每个租户的同步 Key 仅授予读取、写入知识、管理知识库三项权限，禁止跨租户读取。当前范围要求工作区成员权限；访客共享页面尚不支持，API 拒绝时记录错误，不能视为空工作区。
+程序从 Cloud 数据库读取未删除工作空间及有效普通成员列表，在服务器内为各成员生成十分钟有效的普通 `authenticated` 令牌，通过 Cloud 原有权限校验读取其可见内容，再按来源去重汇总到空间知识库。签名密钥不写入同步状态、不传给 WeKnora；同步 Key 仅授予 `retrieve`、`ingest`、`manage_kbs`、`manage_datasources` 四项能力。最后一项用于桥接读取数据源列表，WeKnora 将此读取操作纳入连接器管理权限；桥接只开放列表并过滤凭据和配置，Key 不下发客户端。已有受管 Key 原地更新能力，无需更换密钥。访客不是同步主体；任一成员的读取失败都会使该空间本轮失败，不能视为空空间。
 
-来源以知识条目的稳定 `channel` 标识，不依赖标题或本地知识 ID；创建成功但响应丢失时，下轮从远端列表恢复，不重复创建。标题、正文、目录变化覆盖同步副本，小马原文为真源。完整读取所有来源并成功更新后，才删除已不存在的同步副本；超时、缺行、正文缺失、解析失败都会让该工作区整轮失败并保留现有内容。工作区成员资格丢失、账号删除/封禁后清理其受管知识库。权限变更和删除在下一次成功扫描后生效，并非实时撤权；不应把独立 WeKnora 实例作为要求即时撤权的正式生产入口。
+来源以稳定 `channel` 标识，创建成功但响应丢失时可恢复，不重复创建。同一来源在成员之间去重；数据库的不同来源视图保留各自标识，避免私有视图遮蔽其他成员可访问的视图。标题、正文、目录变化覆盖副本，小马原文为真源。完整读取全部成员的来源并成功更新后，才清理已不存在的受管笔记；其他渠道导入的资料不参与该清理。成员退出或账号删除/封禁只影响其来源范围，不删除空间知识库；只有空间确实从未删除空间清单消失时才删除该知识库。没有有效成员时保留知识库并报告失败。共享存储不会扩大页面权限：检索时重新检查当前成员资格和页面可见性，随手记按所属用户过滤。内容更新及索引删除仍在下一次成功同步后生效。
 
-尚无 Embedding 配置时导入为 `draft`，可以打开正文，但不会进入检索或问答。为各用户租户中的知识库配置可用 Embedding 模型后，下轮自动将草稿发布，后续通过条目的 `parse_status` 判断处理是否完成；`pending`/`failed` 不代表可检索，失败会在后续轮次重试。对话模型需另行配置。管理员租户的模型不会自动复制给其他租户。
+新建知识库优先选择管理员租户的默认本地 Embedding 模型；没有默认但只有一个时使用该模型。每个空间创建独立的服务端模型绑定，经私有代理调用相同 Ollama 模型并记录实际 token，维度与截断参数保持原值。没有模型或多个模型未指定默认时导入为 `draft`，下轮有可用模型后再发布。已有非空空间知识库若尚未接入计量代理，会停止同步并保持未就绪，防止直接更换模型绑定破坏旧索引；需先备份并安排重建索引，程序不会自行删除资料。条目的 `parse_status=completed` 才表示处理完成，首次同步的 `ready` 仅表示来源已全部提交，`pending`/`failed` 不代表可检索。对话模型需另行配置。
+
+### 从用户副本迁移到工作空间知识库
+
+执行上面的 `--sync-notes` 即会同时更新同步、检索两个脚本；`--knowledge-search` 是同一操作的兼容别名。安装器先停同步任务，并将旧脚本保留为 `*.py.before-workspace-kbs`，再先启用新版检索权限检查、启动新版同步。首次修改旧状态前自动保存 `sync/state.before-workspace-kbs.json`（权限 600）。
+
+新知识库在服务端租户下重新扫描 Cloud 原文并建立索引，首次完整提交前返回 `awaiting_sync`。旧的 `users` 映射、个人租户及其知识库只作历史备份，不再被当前同步或聊天检索使用，也不会自动删除。直接在旧 WeKnora 个人知识库上传、且不属于 Cloud 原文的资料不会自动复制，需要另行导入目标空间知识库。迁移后的共享知识库仅经小马鉴权入口访问。
+
+需要回退时，停止同步和检索服务，恢复两个 `*.py.before-workspace-kbs` 脚本及 `state.before-workspace-kbs.json`，再启动检索服务和同步定时器；保留新版空间知识库，不删除数据卷。历史备份只在首次迁移时写入，不会在后续重试中覆盖。
 
 运维命令：
 
@@ -109,15 +117,47 @@ systemctl status ponynotes-weknora-sync.timer --no-pager
 systemctl disable --now ponynotes-weknora-sync.timer
 ```
 
-日志只输出用户/工作区 UUID、数量、状态和错误类型，不输出笔记正文、密码或令牌。`state.json` 缺失时不要直接重新运行创建账号：已有账号的随机密码无法从邮箱恢复；应恢复备份。临时网络失败会让服务返回非零并保留错误摘要，下一次定时运行继续重试。
+日志只输出工作区 UUID、成员数量、状态和错误类型，不输出笔记正文、密码或令牌。`coverage` 是各成员扫描数量之和，去重后的实际条目数量见 `parts`。`state.json` 缺失时应恢复备份，以保留同步摘要及旧映射。临时网络失败会让服务返回非零并保留错误摘要，下一次定时运行继续重试。
+
+2026-11-11 本地离线回归通过：同一空间两名成员共用一个知识库、新成员无需个人 WeKnora 账号、跨空间隔离、私有页和个人随手记过滤、成员撤权、转移所有者、重复同步、创建响应丢失恢复、成员扫描失败保留数据、旧副本保留及空间删除清理。同日已部署到测试服，工作空间同步完成且错误数为 0。
 
 2026-11-06 已部署并验收：3 位有效云端用户、3 个隔离知识库、14 篇文档、2 个数据库结构、10 条数据库记录，共 26 条草稿。定时器已启用，服务最近一次退出码 0、错误数 0、26 条均无变化。用临时源文档和随手记实际验证了新增、改名、追加正文、修改、删除与重复运行；普通网页登录令牌和租户 API Key 均无法跨用户读取，模拟来源超时不会清理副本。临时数据已清理，原有 Cloud/GoTrue/Java 健康检查均正常。离线回归检查另覆盖目录超过十层、随手记分页、长文拆分、创建响应丢失后的恢复及工作区撤权清理。真实模型索引/问答尚未验证。
 
 ## 小马聊天的知识库检索开关
 
+### 客户端知识库分类与权限
+
+侧栏「共享」下方新增独立「知识库」入口，可展开「私有知识库」「共享知识库」「最爱知识库」。分类对象为整个工作空间知识库，每个空间仍只有一个库。默认共享，仅该空间成员可见；空间所有者可将库设为私有（仅所有者可见）或恢复共享。收藏按当前用户保存，不授予额外访问权限。库级权限同时用于列表、内容预览和聊天检索；库内私有页面、个人随手记仍按原权限过滤。
+
+复用现有鉴权桥接服务，无新增数据库表。`POST /api/knowledge/bases` 列出可访问库，`visibility` 修改可见性，`favorite` 设置收藏，`documents` 列出授权内容，`document` 返回指定条目的文本预览（最多 200000 字符）。除列表外请求均包含 `workspace_id`，预览另传 `document_id`；身份与所有者权限由服务端实时读取 Cloud 数据确认，不接受客户端自报权限。
+
+点击侧栏「知识库」直接打开当前空间的知识库，中间栏保留「文件 / Wiki / 图谱」和库内搜索，右侧预览选中内容。文件列表包含授权的云端同步条目及库内上传、网页、手动条目；同步条目仍检查原页面或随手记权限。`sources` 返回当前库实际绑定的数据源名称、类型和同步状态，不返回连接凭据；`wiki` 分页读取已启用 Wiki 的库，仅返回当前账号可读取全部来源的页面及其可见连线，`wiki_page` 用 `slug` 获取正文并重新鉴权。未启用 Wiki 的库返回空列表。图谱复用客户端现有画布显示这些 Wiki 页面之间的引用。
+
+设置写入独立的 `/opt/ponynotes-weknora/library/settings.json`（目录 700，文件 600），避免与同步进程覆写 `sync/state.json`。单实例服务用线程锁和原子替换保存。安装器更新 Nginx `/api/knowledge/` 代理，并只为此目录开放 systemd 写权限。执行上文 `--sync-notes` 或 `--knowledge-search` 安装新版桥接，客户端需重新构建；服务端接口已在测试服部署。
+
+### 知识库管理员与主人计费
+
+知识库的默认管理员为 Cloud 中当前工作空间的主人。修改私有/共享权限时实时核对主人；转让空间后，新主人取得管理权限。知识库 ID 和已有资料不随转让改变。
+
+沿用现有套餐口径：问答模型接收请求后扣一次 `ai_chat`；纯检索、自动同步的向量化不额外扣问答次数。问答及向量化实际返回的 token 记录为主人的 `ai_tokens`，由现有订阅用量表保存，`GET /api/subscription/current` 的 `usage.ai_tokens_used_this_month` 返回当前计费月总量。问答剩余次数按主人的订阅汇总；主人的多个空间共用其额度，额度不足不会改扣成员账号。
+
+问答接口先验证空间存在且请求者为成员，再确定扣费主人。提供无效空间 UUID 返回 400，无权访问或已删除空间返回 403；均在调用模型和扣费之前拒绝。未提供空间的独立个人聊天保留个人计费。每项操作开始时确定当时的主人，转让只影响之后的操作，历史用量不重写。
+
+问答从 DeepSeek、通义千问和豆包的 SSE `usage` 读取实际 token；兼容拆包和重复累计 usage，不按字符数估算。向量化复用当前本地 Ollama，通过服务内的独立线程池监听私有 `18083`，读取 `/api/embed` 的 `prompt_eval_count`；缺失或非法 usage 会返回不可用，避免伪造统计。每个空间的随机服务密钥保存在 `sync/state.json`，客户端不能指定扣费用户、上游地址或其他模型。当前计量覆盖小马问答与本地向量化；若以后接入远程 Embedding、额外的 OCR/摘要/Wiki 生成模型，需先让对应调用接入计量，不能假定 WeKnora 原生模型自动归账。
+
+上线顺序：先部署支持 `ai_tokens` 的 Cloud，再通过 `deploy-weknora.py --sync-notes` 安装桥接，最后运行工作空间同步。安装器为 `18083` 仅放行 WeKnora 容器所在网桥/子网，并将宿主机网关 IP 加入 WeKnora 的 `SSRF_WHITELIST_EXTRA`，保留原有白名单；只有该配置改变时重建 WeKnora app，并等待健康检查后再同步。私有运行参数在 `library/runtime.json`，Compose 首次备份为 `compose.local.before-workspace-billing.json`。本次已按此顺序在测试服部署。
+
+```powershell
+python PonyNotes-Cloud-New/deploy/47.94.42.183/test-knowledge-billing.py
+```
+
+2026-11-11 测试服 Cloud/Worker 已更新为 `ponynotes/cloud:test-20261111-113726-17b84432`，包含当前工作区未提交的计费修改。发布记录与日志在 `/opt/ponynotes/releases/test-20261111-113726-17b84432/`，更新前配置和 PostgreSQL 备份在 `/opt/ponynotes/backups/test-20261111-113726-17b84432/`。Cloud 健康、真实登录/刷新、文件上传下载、WebSocket、现有验证码检查通过。随后更新桥接与 Nginx，迁移并同步 4 个空间知识库，错误数为 0；鉴权列表和文档接口返回 200，匿名列表返回 401，无效/无权空间的聊天请求分别返回 400/403。实际向量检索期间主人的 token 累计增加，问答次数保持不变。旧 Cloud 不支持 `ai_tokens`，回退时需一起恢复匹配的桥接脚本和同步状态。
+
+同轮在线验收确认 43 条资料均为 `completed`。修正已有服务 Key 缺少 `manage_datasources` 导致的数据源列表 403 后，数据源、Wiki 列表及文档预览均返回 200；服务器 `deployment.json` 的 `knowledge_bridge` 记录脚本 SHA256、空间数量、索引状态和验证时间。
+
 Flutter AI 欢迎页和聊天输入栏在「联网搜索」右侧增加「知识库检索」，默认关闭，点击后变为橙色。开启时先检索当前工作区中当前用户有权访问的已同步笔记，再将资料交给原有聊天模型回答；聊天记录保留原问题。没有相关资料时要求模型说明未找到相关笔记，检索失败时显示错误并可关闭开关重试。重新生成回答沿用原问题的检索开关，并重新检索。
 
-检索使用独立的 Python 标准库服务，通过现有 Nginx 暴露 `POST /api/knowledge/search`。请求使用小马登录令牌和 `workspace_id`、`query`；服务通过 GoTrue 验证身份，并通过 Cloud API 检查工作区成员资格和当前页面可见性，不接受客户端指定用户、租户或知识库。WeKnora 密钥保留在服务器。返回最多 5 条去重来源，总计不超过 16000 字符，笔记引用保留小马打开链接。
+检索使用独立的 Python 标准库服务，通过现有 Nginx 暴露 `POST /api/knowledge/search`。请求使用小马登录令牌和 `workspace_id`、`query`；服务通过 GoTrue 验证身份，并通过 Cloud API 检查当前工作区成员资格和页面可见性，再按工作区查找唯一知识库。成员无需个人 WeKnora 账号；不接受客户端指定用户、租户或知识库。WeKnora 密钥保留在服务器。返回最多 5 条去重来源，总计不超过 16000 字符，笔记引用保留小马打开链接。
 
 已有云端笔记同步部署后，执行：
 
@@ -126,7 +166,7 @@ python PonyNotes-Cloud-New/deploy/47.94.42.183/deploy-weknora.py --knowledge-sea
 python PonyNotes-Cloud-New/deploy/47.94.42.183/test-search-weknora.py
 ```
 
-安装器创建 `ponynotes-weknora-search.service`，仅监听小马 Docker 私有网关的 `18082`，并添加只允许对应 Docker 网桥/子网访问的 UFW 规则。公网通过原有 Cloud 端口访问，18082 不对公网开放。Nginx 修改前备份至 `/opt/ponynotes/nginx.conf.before-knowledge-search`，验证配置后重载。服务读取现有 `sync/state.json` 和 `sync-weknora.py`；同步定时器继续负责新增、修改及删除。
+安装器创建 `ponynotes-weknora-search.service`，在小马 Docker 私有网关监听检索 `18082` 和内部向量计量 `18083`，并添加只允许对应 Docker 网桥/子网访问的 UFW 规则。公网通过原有 Cloud 端口访问检索，两个私有端口均不对公网开放；内部计量路由不经 Nginx 暴露。Nginx 修改前备份至 `/opt/ponynotes/nginx.conf.before-knowledge-search`，验证配置后重载。服务读取现有 `sync/state.json` 和 `sync-weknora.py`；同步定时器继续负责新增、修改及删除。
 
 ```sh
 systemctl status ponynotes-weknora-search.service --no-pager
@@ -141,10 +181,12 @@ journalctl -u ponynotes-weknora-search.service -n 20 --no-pager
 
 | 用途 | 模型 | 服务地址 |
 | --- | --- | --- |
-| DeepSeek（默认） | `deepseek-v4-pro-260425` | `https://ark.cn-beijing.volces.com/api/v3` |
+| DeepSeek（默认） | `deepseek-v4-1-flash-261017` | `https://ark.cn-beijing.volces.com/api/v3` |
 | 通义千问 | `qwen3-vl-plus` | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
 | 通义联网搜索 | `qwen-plus` | 同上 |
 | 豆包 | `doubao-seed-2-1-pro-260628` | `https://ark.cn-beijing.volces.com/api/v3` |
+
+2026-11-10 按用户要求，仅将测试服 DeepSeek 从 `deepseek-v4-pro-260425` 切换为 DeepSeek V4.1 Flash 最新 1017 版 `deepseek-v4-1-flash-261017`（[火山方舟模型说明](https://www.volcengine.com/docs/82379/2687970)）。复用现有服务地址和 API Key，上游默认模式及显式启用深度思考的 SSE 请求均返回 HTTP 200、正确答案与目标模型 ID。`AI_CHAT_DEEPSEEK_REASONER_MODEL` 为空，深度思考沿用该新模型。配置修改前备份为 `/opt/ponynotes/config/cloud.env.before-deepseek-20261110T021718Z`（权限 `0600`）。仅更新 `AI_CHAT_DEEPSEEK_MODEL` 并重建 Cloud、Worker，已核对两个容器的全部 Compose 环境变量及其他容器 ID；公网 `/health` 和 `/api/ai/chat/models` 均返回 200。本轮未验证客户端实际对话；正式服未修改。
 
 DeepSeek 联网 Bot 字段沿用来源文件的空值，按 Cloud 现有逻辑回退至通义联网模型。配置中的行尾注释已移除，API Key 不写入本仓库、客户端或验收输出。目标配置权限为 `0600`；修改前的私密备份为 `/opt/ponynotes/config/cloud.env.before-ai-20261106T073850Z`。
 
@@ -166,6 +208,8 @@ docker compose up -d --no-deps --no-build --pull never --wait appflowy_cloud app
 ```powershell
 python PonyNotes-Cloud-New/deploy/47.94.42.183/deploy-test.py
 ```
+
+仅更新 Cloud 和同镜像的 Worker 时使用 `--cloud-only`。此模式只打包 Cloud 当前工作区，保留服务器现有 GoTrue/Java 镜像配置，不构建或重启这两个服务；仍执行数据库备份、Cloud 迁移和现有冒烟验证。知识库桥接脚本独立更新，随后执行 `deploy-weknora.py --knowledge-search`。
 
 脚本随 Cloud 仓库保存，三个项目目录应位于同一个 `nac` 工作区。当前本机原命令 `python deploy/47.94.42.183/deploy-test.py` 仍通过入口文件转发，其他电脑请使用上面的仓库内路径。
 
