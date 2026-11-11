@@ -47,7 +47,7 @@ class Target:
                 return {'success': True}
             if kb not in self.kbs:
                 raise m.APIError(404)
-            if method == 'PUT':
+            if method == 'PATCH':
                 self.kbs[kb].update(copy.deepcopy(payload))
             return {'data': self.kbs[kb]}
         if method == 'POST':
@@ -183,7 +183,8 @@ def check_workspaces():
             return notes, {'documents': 2, 'quick_notes': 1}
 
     def provision(state, persist):
-        state['service'] = {'api_key': 'server-only', 'embedding_model_id': 'embedding'}
+        state['service'] = {'api_key': 'server-only', 'embedding_model_id': 'embedding',
+            'summary_model_id': 'chat'}
         return state['service'], target
 
     persist = lambda: None
@@ -203,7 +204,20 @@ def check_workspaces():
         assert len(target.entries(kid)) == 5  # one shared doc + two private docs + two quick notes
         assert state['users'] == legacy
         assert target.kbs[kid]['embedding_model_id'] == 'embedding'
+        assert target.kbs[kid]['summary_model_id'] == 'chat'
         assert any('所属用户：b' in item['metadata']['content'] for item in target.entries(kid))
+
+        # Repair the missing LLM binding without changing any indexed notes or KB settings.
+        target.kbs[kid]['summary_model_id'] = ''
+        target.kbs[kid]['chunking_config'] = {'chunk_size': 777, 'chunk_overlap': 70}
+        before = copy.deepcopy(target.items[kid])
+        report = m.sync(state, persist, users, workspaces, 'unused')
+        assert not report['errors'] and target.kbs[kid]['summary_model_id'] == 'chat'
+        assert target.items[kid] == before
+        assert target.kbs[kid]['chunking_config'] == {'chunk_size': 777, 'chunk_overlap': 70}
+        target.kbs[kid]['summary_model_id'] = 'user-chosen-model'
+        report = m.sync(state, persist, users, workspaces, 'unused')
+        assert not report['errors'] and target.kbs[kid]['summary_model_id'] == 'user-chosen-model'
 
         # Drafts can receive their first model; populated indexed bases cannot silently switch.
         target.kbs[kid]['embedding_model_id'] = ''
@@ -290,6 +304,7 @@ def check_provision():
             state = {}
             record, client = m.provision(state, lambda: None)
             assert record['embedding_model_id'] == 'embedding' and client.headers['key'] == 'workspace-key'
+            assert record['summary_model_id'] == 'chat'
             m.provision({}, lambda: None)  # recover a key created before a lost state write
             assert len(keys) == 1
             keys[0]['capabilities'].remove('manage_datasources')
@@ -300,6 +315,13 @@ def check_provision():
             assert m.provision(state, lambda: None)[0]['embedding_model_id'] == ''
             models[-1]['is_default'] = True
             assert m.provision(state, lambda: None)[0]['embedding_model_id'] == 'second'
+            models.append({'id': 'disabled-chat', 'type': 'KnowledgeQA', 'status': 'inactive',
+                'is_default': True})
+            assert m.provision(state, lambda: None)[0]['summary_model_id'] == 'chat'
+            models.append({'id': 'other-chat', 'type': 'KnowledgeQA'})
+            assert m.provision(state, lambda: None)[0]['summary_model_id'] == ''
+            models[-1]['is_default'] = True
+            assert m.provision(state, lambda: None)[0]['summary_model_id'] == 'other-chat'
             assert all('users/create' not in path for _, path in calls)
             try:
                 m.provision({'service': {'tenant_id': 999}}, lambda: None)

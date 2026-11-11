@@ -319,6 +319,14 @@ class WeKnora:
             page += 1
 
 
+def preferred_model_id(models, model_type):
+    candidates = [model for model in models if model['type'] == model_type
+        and model.get('status', 'active') == 'active']
+    defaults = [model for model in candidates if model.get('is_default')]
+    choices = defaults or candidates
+    return choices[0]['id'] if len(choices) == 1 else ''
+
+
 def provision(state, persist):
     # Use the existing server-only administrator tenant. Never put a member's
     # private pages into another member's directly accessible personal tenant.
@@ -340,12 +348,14 @@ def provision(state, persist):
             or set(key.get('capabilities') or []) != set(scope['capabilities'])):
         key = client.call(path + '/' + str(key['id']), 'PUT', scope)['data']
     record['api_key'] = known_key or key.get('token') or key['api_key']
-    models = [model for model in client.call('models')['data'] or [] if model['type'] == 'Embedding'
-        and not model.get('description', '').startswith('PonyNotes workspace embedding ')]
-    default = next((model for model in models if model.get('is_default')), None)
+    models = client.call('models')['data'] or []
+    embedding_models = [model for model in models
+        if not model.get('description', '').startswith('PonyNotes workspace embedding ')]
     # An explicit default or a single embedding model is unambiguous. Existing
     # knowledge bases keep their own model bindings when this default changes.
-    record['embedding_model_id'] = (default or (models[0] if len(models) == 1 else {})).get('id', '')
+    record['embedding_model_id'] = preferred_model_id(embedding_models, 'Embedding')
+    # WeKnora sends card clicks to settings until both model bindings are present.
+    record['summary_model_id'] = preferred_model_id(models, 'KnowledgeQA')
     persist()
     return record, WeKnora(key=record['api_key'])
 
@@ -484,11 +494,18 @@ def sync(state, persist, users, workspaces, secret, scan_only=False):
                     kb = client.call('knowledge-bases', 'POST', {'id': mapping['id'],
                         'name': '小马笔记 · ' + (workspace.get('workspace_name') or wid),
                         'type': 'document', 'description': '工作空间知识库；小马云端笔记自动同步。',
-                        'embedding_model_id': embedding_id})['data']
-                elif kb.get('embedding_model_id', '') != embedding_id:
-                    if kb.get('embedding_model_id') and client.entries(kb['id']):
-                        raise ValueError('Existing workspace KB must be reindexed before switching its embedding model')
-                    kb = client.call(path, 'PUT', {**kb, 'embedding_model_id': embedding_id})['data']
+                        'embedding_model_id': embedding_id,
+                        'summary_model_id': service.get('summary_model_id', '')})['data']
+                else:
+                    updates = {}
+                    if kb.get('embedding_model_id', '') != embedding_id:
+                        if kb.get('embedding_model_id') and client.entries(kb['id']):
+                            raise ValueError('Existing workspace KB must be reindexed before switching its embedding model')
+                        updates['embedding_model_id'] = embedding_id
+                    if not kb.get('summary_model_id') and service.get('summary_model_id'):
+                        updates['summary_model_id'] = service['summary_model_id']
+                    if updates:
+                        kb = client.call(path, 'PATCH', updates)['data']
                 result['sync'] = reconcile(client, kb, desired, mapping['notes'], persist)
                 mapping['ready'] = True
                 persist()

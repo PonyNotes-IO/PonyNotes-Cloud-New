@@ -135,6 +135,8 @@ systemctl disable --now ponynotes-weknora-sync.timer
 
 设置写入独立的 `/opt/ponynotes-weknora/library/settings.json`（目录 700，文件 600），避免与同步进程覆写 `sync/state.json`。单实例服务用线程锁和原子替换保存。安装器更新 Nginx `/api/knowledge/` 代理，并只为此目录开放 systemd 写权限。执行上文 `--sync-notes` 或 `--knowledge-search` 安装新版桥接，客户端需重新构建；服务端接口已在测试服部署。
 
+2026-11-11 修复 WeKnora 点击卡片打开设置的问题：原生网页同时要求 `embedding_model_id` 和 `summary_model_id`，自动创建的库此前缺少后者。同步程序现优先选择启用的默认 `KnowledgeQA` 模型；没有默认但仅有一个启用模型时使用该模型，选择有歧义时保留未配置状态。默认空间库和小马新建独立库均携带该绑定，已有默认库只补缺失值，保留用户已有选择；部分更新通过 WeKnora `PATCH` 接口提交。测试服已为四个空间库及「神」库补上已有 `deepseek-flash`，原有 44 篇文档、向量模型、分块和索引配置逐项比对保持原值。浏览器实测点击 15 篇文档的卡片直接进入文档列表，显示 15 行且无设置弹窗。私密备份在 `backups/initialize-models-20261111-162052/`，服务端验收记录为 `library/initialization-verification.json`。
+
 ### 知识库管理员与主人计费
 
 知识库的默认管理员为 Cloud 中当前工作空间的主人。修改私有/共享权限时实时核对主人；转让空间后，新主人取得管理权限。知识库 ID 和已有资料不随转让改变。
