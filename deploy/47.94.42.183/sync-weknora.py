@@ -1,4 +1,4 @@
-"""Mirror authorized cloud notes into private per-user WeKnora tenants (stdlib only)."""
+"""Mirror authorized cloud notes into one WeKnora knowledge base per workspace."""
 import argparse
 import base64
 from collections import Counter, deque
@@ -37,7 +37,7 @@ def request(base, path, method='GET', payload=None, headers=None):
     except urllib.error.HTTPError as error:
         # Response bodies can contain private notes or credentials.
         raise APIError(error.code) from None
-    if result.get('success') is False or result.get('code', 0) != 0:
+    if isinstance(result, dict) and (result.get('success') is False or result.get('code', 0) != 0):
         raise APIError(200, result.get('code'))
     return result
 
@@ -65,6 +65,45 @@ def cloud_users():
     return sql("SELECT coalesce(json_agg(t),'[]') FROM (SELECT u.uuid,u.email,u.name "
         "FROM af_user u JOIN auth.users a ON a.id=u.uuid WHERE a.deleted_at IS NULL "
         "AND (a.banned_until IS NULL OR a.banned_until<now())) t;")
+
+
+def cloud_workspaces():
+    # Keep workspaces with no active members in this inventory: account removal
+    # must never be mistaken for deletion of a shared knowledge base.
+    return sql("SELECT coalesce(json_agg(t),'[]') FROM (SELECT w.workspace_id, "
+        "w.workspace_name, owner.uuid AS owner_uuid, "
+        "coalesce((SELECT json_agg(u.uuid ORDER BY u.uuid) FROM af_workspace_member m "
+        "JOIN af_user u ON u.uid=m.uid JOIN auth.users a ON a.id=u.uuid "
+        "WHERE m.workspace_id=w.workspace_id AND m.role_id<>3 AND a.deleted_at IS NULL "
+        "AND (a.banned_until IS NULL OR a.banned_until<now())), '[]') AS members "
+        "FROM af_workspace w LEFT JOIN af_user owner ON owner.uid=w.owner_uid "
+        "WHERE w.deleted_at IS NULL AND coalesce(w.is_initialized,true)) t;")
+
+
+def cloud_secret():
+    env = json.loads(subprocess.check_output(['docker', 'inspect', 'ponynotes-gotrue-1']))[0]['Config']['Env']
+    return next(x.split('=', 1)[1] for x in env if x.startswith('GOTRUE_JWT_SECRET='))
+
+
+def billing_authorization(wid):
+    wid = str(uuid.UUID(wid))
+    owners = sql("SELECT coalesce(json_agg(t),'[]') FROM (SELECT u.uuid,u.email FROM af_workspace w "
+        "JOIN af_user u ON u.uid=w.owner_uid JOIN auth.users a ON a.id=u.uuid "
+        f"WHERE w.workspace_id='{wid}'::uuid AND w.deleted_at IS NULL "
+        "AND coalesce(w.is_initialized,true) AND a.deleted_at IS NULL "
+        "AND (a.banned_until IS NULL OR a.banned_until<now())) t;")
+    if len(owners) != 1:
+        raise APIError(403)
+    # Capture the live owner before inference. Ownership transfer never rewrites past usage.
+    return 'Bearer ' + jwt(owners[0], cloud_secret())
+
+
+def record_tokens(authorization, tokens):
+    if type(tokens) is not int or not 0 <= tokens <= 2**63 - 1:
+        raise ValueError('Provider token usage missing or invalid')
+    if tokens:
+        request('http://127.0.0.1', '/api/subscription/usage/record', 'POST',
+            {'usage_type': 'ai_tokens', 'usage_count': tokens}, {'Authorization': authorization})
 
 
 def jwt(user, secret):
@@ -134,13 +173,17 @@ def quick_markdown(value):
     return text + ('\n' if value.get('type') else '')
 
 
-def note_parts(wid, kind, oid, title, body, location='', view_id=None):
+def note_parts(wid, kind, oid, title, body, location='', view_id=None, owner_id=None):
     title = str(title or '未命名笔记').strip()
     # WeKnora's title validator rejects HTML/control characters and long titles.
     title = re.sub(r'[<>\x00-\x1f]', '', title)[:180] or '未命名笔记'
     source = f'ponynotes://open?viewId={view_id or oid}&workspaceId={wid}'
     header = f'来源：小马笔记\n\n目录：{location}\n\n'
-    if kind != 'quick':
+    if kind == 'quick':
+        if not owner_id:
+            raise ValueError('Quick note owner is required')
+        header += f'所属用户：{owner_id}\n\n'
+    else:
         header += f'[在小马笔记中打开]({source})\n\n'
     # Reserve room for provenance; split by Unicode characters, never discard a tail.
     size = 190000 - len(header)
@@ -150,6 +193,10 @@ def note_parts(wid, kind, oid, title, body, location='', view_id=None):
     parts = {}
     for index, chunk in enumerate(chunks):
         identity = f'{wid}/{kind}/{oid}/{index}'
+        if view_id is not None:
+            # Linked database views can have different visibility. Retain each
+            # source anchor so one member's private view cannot hide another's.
+            identity += '/' + view_id
         channel = 'pn:' + hashlib.sha256(identity.encode()).hexdigest()[:40]
         label = title + (f'（{index + 1}/{len(chunks)}）' if len(chunks) > 1 else '')
         parts[channel] = {'title': label, 'content': header + chunk}
@@ -237,7 +284,8 @@ class Cloud:
                 body = quick_markdown(note['data'])
                 if not body.strip() and note['data']:
                     raise ValueError('Unsupported quick-note format')
-                notes.update(note_parts(wid, 'quick', note['id'], '随手记 ' + note['created_at'][:10], body, '随手记'))
+                notes.update(note_parts(wid, 'quick', note['id'], '随手记 ' + note['created_at'][:10],
+                    body, '随手记', owner_id=self.user['uuid']))
                 counts['quick_notes'] += 1
             if not page['has_more']:
                 break
@@ -271,41 +319,86 @@ class WeKnora:
             page += 1
 
 
-def provision(user, state, persist):
-    uid = user['uuid']
-    if uid not in state['users']:
-        state['users'][uid] = {'email': f'pn-{uid}@cloud.ponynotes.local',
-            'password': 'Pn!' + secrets.token_urlsafe(18) + '7aA', 'workspaces': {}}
-        # Save password before create so a lost HTTP response is safely recoverable.
-        persist()
-    record = state['users'][uid]
-    record['cloud_email'] = user.get('email')
-    if not record.get('user_id'):
-        credentials = json.loads((ROOT / 'admin-credentials.json').read_text())
-        login = WeKnora().call('auth/login', 'POST', credentials)
-        created = WeKnora(token=login['token']).call('system/admin/users/create', 'POST',
-            {'username': 'pn-' + uid, 'email': record['email'], 'password': record['password']})['user']
-        # Possession of our saved random password, not email equality, proves the mapping.
-        own = WeKnora().call('auth/login', 'POST', {'email': record['email'], 'password': record['password']})
-        if own['user']['id'] != created['id']:
-            raise ValueError('Provisioned identity mismatch')
-        record['user_id'] = created['id']
-        record['tenant_id'] = own['active_tenant']['id']
-        persist()
-    if not record.get('api_key'):
-        own = WeKnora().call('auth/login', 'POST', {'email': record['email'], 'password': record['password']})
-        if own['user']['id'] != record['user_id'] or own['active_tenant']['id'] != record['tenant_id']:
-            raise ValueError('Provisioned tenant mismatch')
-        client = WeKnora(token=own['token'])
-        path = f"tenants/{record['tenant_id']}/api-keys"
-        keys = client.call(path)['data'] or []
-        key = next((k for k in keys if k['name'] == 'PonyNotes sync'), None)
-        if key is None:
-            key = client.call(path, 'POST', {'name': 'PonyNotes sync', 'full_access': False,
-                'knowledge_base_ids': [], 'capabilities': ['retrieve', 'ingest', 'manage_kbs']})['data']
-        record['api_key'] = key.get('token') or key['api_key']
-        persist()
+def provision(state, persist):
+    # Use the existing server-only administrator tenant. Never put a member's
+    # private pages into another member's directly accessible personal tenant.
+    credentials = json.loads((ROOT / 'admin-credentials.json').read_text())
+    login = WeKnora().call('auth/login', 'POST', credentials)
+    record = state.setdefault('service', {'tenant_id': login['active_tenant']['id']})
+    if record['tenant_id'] != login['active_tenant']['id']:
+        raise ValueError('Workspace service tenant mismatch')
+    client = WeKnora(token=login['token'])
+    path = f"tenants/{record['tenant_id']}/api-keys"
+    keys = client.call(path)['data'] or []
+    key = next((k for k in keys if k['name'] == 'PonyNotes workspaces'), None)
+    known_key = record.get('api_key') if key else None
+    scope = {'name': 'PonyNotes workspaces', 'full_access': False, 'knowledge_base_ids': [],
+        'capabilities': ['retrieve', 'ingest', 'manage_kbs', 'manage_datasources']}
+    if key is None:
+        key = client.call(path, 'POST', scope)['data']
+    elif (key.get('full_access') or key.get('knowledge_base_ids')
+            or set(key.get('capabilities') or []) != set(scope['capabilities'])):
+        key = client.call(path + '/' + str(key['id']), 'PUT', scope)['data']
+    record['api_key'] = known_key or key.get('token') or key['api_key']
+    models = [model for model in client.call('models')['data'] or [] if model['type'] == 'Embedding'
+        and not model.get('description', '').startswith('PonyNotes workspace embedding ')]
+    default = next((model for model in models if model.get('is_default')), None)
+    # An explicit default or a single embedding model is unambiguous. Existing
+    # knowledge bases keep their own model bindings when this default changes.
+    record['embedding_model_id'] = (default or (models[0] if len(models) == 1 else {})).get('id', '')
+    persist()
     return record, WeKnora(key=record['api_key'])
+
+
+def workspace_embedding(state, wid, mapping, persist, source_id):
+    if not source_id:
+        return ''
+    proxy = mapping.get('embedding_proxy')
+    if proxy and proxy.get('ready'):
+        return proxy['id']
+    runtime = json.loads((ROOT / 'library/runtime.json').read_text())
+    credentials = json.loads((ROOT / 'admin-credentials.json').read_text())
+    login = WeKnora().call('auth/login', 'POST', credentials)
+    if login['active_tenant']['id'] != state['service']['tenant_id']:
+        raise ValueError('Workspace service tenant mismatch')
+    admin = WeKnora(token=login['token'])
+    if not proxy:
+        source = admin.call('models/' + source_id)['data']
+        if source['type'] != 'Embedding' or source['source'] != 'local':
+            raise ValueError('Workspace token accounting currently requires the configured local embedding model')
+        mapping['embedding_proxy'] = {'token': secrets.token_urlsafe(32), 'name': source['name'],
+            'parameters': source['parameters']['embedding_parameters'], 'source_id': source_id, 'ready': False}
+        persist()  # Keep the secret before creation so lost responses are recoverable.
+    proxy = mapping['embedding_proxy']
+    parameters = proxy['parameters']
+    description = 'PonyNotes workspace embedding ' + wid
+    models = [model for model in admin.call('models')['data'] or [] if model.get('description') == description]
+    if len(models) > 1:
+        raise ValueError('Duplicate workspace embedding models')
+    if models:
+        model = models[0]
+    else:
+        model = admin.call('models', 'POST', {'name': proxy['name'], 'type': 'Embedding',
+            'source': 'remote', 'description': description,
+            'parameters': {'base_url': runtime['embedding_url'] + '/' + wid + '/v1',
+                'api_key': proxy['token'], 'provider': 'generic', 'embedding_parameters': parameters}})['data']
+    if (model['parameters']['base_url'] != runtime['embedding_url'] + '/' + wid + '/v1'
+            or model['name'] != proxy['name'] or model['type'] != 'Embedding' or model['source'] != 'remote'
+            or model['parameters']['embedding_parameters'] != parameters):
+        raise ValueError('Workspace embedding configuration mismatch')
+    proxy.update(id=model['id'], ready=True)
+    persist()
+    return proxy['id']
+
+
+def workspace_mapping(state, workspace, persist):
+    wid = workspace['workspace_id']
+    mappings = state.setdefault('workspaces', {})
+    if wid not in mappings:
+        mappings[wid] = {'id': str(uuid.uuid5(uuid.NAMESPACE_URL, f'ponynotes:workspace:{wid}')),
+            'notes': {}, 'ready': False}
+        persist()
+    return mappings[wid]
 
 
 def reconcile(client, kb, desired, cache, persist):
@@ -349,52 +442,70 @@ def reconcile(client, kb, desired, cache, persist):
     return dict(counts)
 
 
-def sync(state, persist, users, secret, scan_only=False):
+def sync(state, persist, users, workspaces, secret, scan_only=False):
     report = {'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'users': len(users), 'workspaces': [], 'errors': []}
-    active = {u['uuid'] for u in users}
-    for user in users:
-        uid = user['uuid']
-        cloud = Cloud(user, secret)
+    active = {user['uuid']: user for user in users}
+    workspace_ids = {workspace['workspace_id'] for workspace in workspaces}
+    if len(workspace_ids) != len(workspaces):
+        raise ValueError('Duplicate workspace inventory')
+    service, client = None, None
+    for workspace in workspaces:
+        wid = workspace['workspace_id']
         try:
-            workspaces = cloud.get('workspace')
-            record, client = (None, None) if scan_only else provision(user, state, persist)
-            allowed = {w['workspace_id'] for w in workspaces}
-            if record:
-                for wid in list(record['workspaces']):
-                    if wid not in allowed:
-                        remove_workspace(client, record['workspaces'], wid, persist)
-            for workspace in workspaces:
-                wid = workspace['workspace_id']
+            members = sorted(set(workspace['members']), key=lambda uid: (uid != workspace['owner_uuid'], uid))
+            if not members:
+                raise ValueError('Workspace has no active members; preserving knowledge base')
+            desired, coverage = {}, Counter()
+            # A complete scan of every member must succeed before any pruning.
+            # ponytail: scan members serially; deduplicate reads if this outgrows the five-minute interval.
+            for uid in members:
+                notes, counts = Cloud(active[uid], secret).scan(wid)
+                for channel, content in notes.items():
+                    desired.setdefault(channel, content)
+                coverage.update(counts)
+            result = {'workspace': wid, 'members': len(members), 'parts': len(desired), 'coverage': dict(coverage)}
+            if not scan_only:
+                mapping = workspace_mapping(state, workspace, persist)
+                if client is None:
+                    service, client = provision(state, persist)
+                path = 'knowledge-bases/' + mapping['id']
                 try:
-                    desired, coverage = cloud.scan(wid)
-                    result = {'user': uid, 'workspace': wid, 'parts': len(desired), 'coverage': coverage}
-                    if not scan_only:
-                        mapping = record['workspaces'].setdefault(wid, {'id': str(uuid.uuid5(uuid.NAMESPACE_URL, f'ponynotes:{uid}:{wid}')), 'notes': {}})
-                        persist()
-                        path = 'knowledge-bases/' + mapping['id']
-                        try:
-                            kb = client.call(path)['data']
-                        except APIError as error:
-                            if error.status != 404:
-                                raise
-                            kb = client.call('knowledge-bases', 'POST', {'id': mapping['id'],
-                                'name': '小马笔记 · ' + (workspace.get('workspace_name') or workspace.get('name') or wid),
-                                'type': 'document', 'description': '小马云端笔记自动同步；请在小马笔记中编辑原文。'})['data']
-                        result['sync'] = reconcile(client, kb, desired, mapping['notes'], persist)
-                    report['workspaces'].append(result)
-                    print(json.dumps(result, ensure_ascii=False), flush=True)
-                except Exception as error:
-                    report['errors'].append({'user': uid, 'workspace': wid, 'error': safe_error(error)})
+                    kb = client.call(path)['data']
+                except APIError as error:
+                    if error.status != 404:
+                        raise
+                    kb = None
+                source_id = (kb or {}).get('embedding_model_id') or service.get('embedding_model_id', '')
+                if not mapping.get('embedding_proxy'):
+                    mapping['ready'] = False
+                    persist()
+                embedding_id = workspace_embedding(state, wid, mapping, persist, source_id)
+                if kb is None:
+                    kb = client.call('knowledge-bases', 'POST', {'id': mapping['id'],
+                        'name': '小马笔记 · ' + (workspace.get('workspace_name') or wid),
+                        'type': 'document', 'description': '工作空间知识库；小马云端笔记自动同步。',
+                        'embedding_model_id': embedding_id})['data']
+                elif kb.get('embedding_model_id', '') != embedding_id:
+                    if kb.get('embedding_model_id') and client.entries(kb['id']):
+                        raise ValueError('Existing workspace KB must be reindexed before switching its embedding model')
+                    kb = client.call(path, 'PUT', {**kb, 'embedding_model_id': embedding_id})['data']
+                result['sync'] = reconcile(client, kb, desired, mapping['notes'], persist)
+                mapping['ready'] = True
+                persist()
+            report['workspaces'].append(result)
+            print(json.dumps(result, ensure_ascii=False), flush=True)
         except Exception as error:
-            report['errors'].append({'user': uid, 'error': safe_error(error)})
+            report['errors'].append({'workspace': wid, 'error': safe_error(error)})
     if not scan_only:
-        for uid, record in state['users'].items():
-            if uid not in active and record.get('api_key'):
-                try:
-                    for wid in list(record['workspaces']):
-                        remove_workspace(WeKnora(key=record['api_key']), record['workspaces'], wid, persist)
-                except Exception as error:
-                    report['errors'].append({'user': uid, 'error': safe_error(error)})
+        for wid, mapping in list(state.get('workspaces', {}).items()):
+            if wid in workspace_ids:
+                continue
+            try:
+                if client is None:
+                    service, client = provision(state, persist)
+                remove_workspace(client, state['workspaces'], wid, persist)
+            except Exception as error:
+                report['errors'].append({'workspace': wid, 'error': safe_error(error)})
     return report
 
 
@@ -442,9 +553,13 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         path = directory / 'state.json'
         state = json.loads(path.read_text()) if path.exists() else {'users': {}}
-        env = json.loads(subprocess.check_output(['docker', 'inspect', 'ponynotes-gotrue-1']))[0]['Config']['Env']
-        secret = next(x.split('=', 1)[1] for x in env if x.startswith('GOTRUE_JWT_SECRET='))
-        report = sync(state, lambda: save(path, state), cloud_users(), secret, args.scan_only)
+        if not args.scan_only and 'workspaces' not in state:
+            backup = directory / 'state.before-workspace-kbs.json'
+            if path.exists() and not backup.exists():
+                save(backup, state)
+            state['workspaces'] = {}
+            save(path, state)
+        report = sync(state, lambda: save(path, state), cloud_users(), cloud_workspaces(), cloud_secret(), args.scan_only)
         save(directory / 'last-run.json', report)
         print(json.dumps({'errors': report['errors'], 'workspaces': len(report['workspaces'])}, ensure_ascii=False))
         if report['errors']:

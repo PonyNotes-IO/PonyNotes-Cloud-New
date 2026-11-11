@@ -229,8 +229,8 @@ def main():
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--tunnel", action="store_true", help="Keep an SSH tunnel open at http://127.0.0.1:18080")
-    parser.add_argument("--sync-notes", action="store_true", help="Install and run cloud-note synchronization on the existing instance")
-    parser.add_argument("--knowledge-search", action="store_true", help="Install the authenticated note search endpoint")
+    parser.add_argument("--sync-notes", "--knowledge-search", action="store_true",
+        help="Update workspace synchronization and authenticated search together")
     parser.add_argument("--on-server", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.self_test:
@@ -252,18 +252,20 @@ def main():
             serve_tunnel(client)
             return
         execute = existing["remote_run"]
-        if args.knowledge_search:
-            execute(client, f"test -f {REMOTE}/sync/state.json")
-            with client.open_sftp() as sftp:
-                sftp.put(str(Path(__file__).with_name("search-weknora.py")), REMOTE + "/search-weknora.py")
-                sftp.chmod(REMOTE + "/search-weknora.py", 0o600)
-            execute(client, f"python3 {REMOTE}/search-weknora.py --install")
-            return
         if args.sync_notes:
             execute(client, f"test -f {REMOTE}/admin-credentials.json")
+            # Both scripts share the workspace-state contract. Install the new
+            # authorization checks before the first shared index is populated.
+            execute(client, 'set -eu; for unit in ponynotes-weknora-sync.timer ponynotes-weknora-sync.service; do '
+                'if systemctl cat "$unit" >/dev/null 2>&1; then systemctl stop "$unit"; fi; done')
+            execute(client, f'set -eu; cd {REMOTE}; for name in sync-weknora.py search-weknora.py; do '
+                'if [ -f "$name" ] && [ ! -e "$name.before-workspace-kbs" ]; then '
+                'cp -p "$name" "$name.before-workspace-kbs"; fi; done')
             with client.open_sftp() as sftp:
-                sftp.put(str(Path(__file__).with_name("sync-weknora.py")), REMOTE + "/sync-weknora.py")
-                sftp.chmod(REMOTE + "/sync-weknora.py", 0o600)
+                for name in ("sync-weknora.py", "search-weknora.py"):
+                    sftp.put(str(Path(__file__).with_name(name)), REMOTE + "/" + name)
+                    sftp.chmod(REMOTE + "/" + name, 0o600)
+            execute(client, f"python3 {REMOTE}/search-weknora.py --install")
             execute(client, f"python3 {REMOTE}/sync-weknora.py --install && systemctl start ponynotes-weknora-sync.service && systemctl status ponynotes-weknora-sync.timer --no-pager")
             return
         execute(client, "set -eu; command -v python3; docker compose version; free -m; df -h /opt")
