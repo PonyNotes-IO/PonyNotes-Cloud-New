@@ -256,6 +256,9 @@ pub async fn record_usage(
   uid: i64,
   payload: UsageRecordRequest,
 ) -> Result<(), AppError> {
+  if payload.usage_count <= 0 {
+    return Err(AppError::InvalidRequest("Usage must be positive".to_string()));
+  }
   let usage_date = payload
     .usage_date
     .unwrap_or_else(|| Utc::now().date_naive());
@@ -307,6 +310,7 @@ async fn build_current_subscription_with_plan(
       .await?;
   let ai_chat_used = usage.iter().find(|u| u.usage_type == "ai_chat").map(|u| u.total).unwrap_or(0);
   let ai_image_used = usage.iter().find(|u| u.usage_type == "ai_image").map(|u| u.total).unwrap_or(0);
+  let ai_tokens_used = usage.iter().find(|u| u.usage_type == "ai_tokens").map(|u| u.total).unwrap_or(0);
   
   // Real Storage Usage
   let storage_used_bytes = get_user_total_usage_bytes(pg_pool, uid).await?; // 使用的字节 这个是对的，统计了所有的file_size  文件统计
@@ -320,6 +324,7 @@ async fn build_current_subscription_with_plan(
 
   let current_usage = SubscriptionCurrentUsage {
     ai_chat_used_this_month: ai_chat_used,
+    ai_tokens_used_this_month: ai_tokens_used,
     ai_chat_remaining_this_month: limits.ai_chat_limit.map(|l| (l - ai_chat_used).max(0)),
     ai_image_used_this_month: ai_image_used,
     ai_image_remaining_this_month: limits.ai_image_limit.map(|l| (l - ai_image_used).max(0)),
@@ -641,6 +646,7 @@ fn parse_addon_status(value: &str) -> Result<AddonStatus, AppError> {
 fn usage_type_to_str(usage_type: UsageType) -> &'static str {
   match usage_type {
     UsageType::AiChat => "ai_chat",
+    UsageType::AiTokens => "ai_tokens",
     UsageType::AiImage => "ai_image",
     UsageType::StorageBytes => "storage_bytes",
   }
