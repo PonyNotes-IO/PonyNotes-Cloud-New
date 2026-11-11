@@ -82,6 +82,7 @@ impl AddonStatus {
 #[serde(rename_all = "snake_case")]
 pub enum UsageType {
   AiChat,
+  AiTokens,
   AiImage,
   StorageBytes,
 }
@@ -202,6 +203,8 @@ pub struct SubscriptionCurrentResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SubscriptionCurrentUsage {
   pub ai_chat_used_this_month: i64,
+  #[serde(default)]
+  pub ai_tokens_used_this_month: i64,
   pub ai_chat_remaining_this_month: Option<i64>,
   pub ai_image_used_this_month: i64,
   pub ai_image_remaining_this_month: Option<i64>,

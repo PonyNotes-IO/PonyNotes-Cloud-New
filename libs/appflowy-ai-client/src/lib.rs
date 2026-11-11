@@ -5,6 +5,9 @@ pub mod client;
 pub mod chat_client;
 
 #[cfg(feature = "dto")]
+pub mod usage;
+
+#[cfg(feature = "dto")]
 pub mod dto;
 
 pub mod error;

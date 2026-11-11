@@ -184,6 +184,7 @@ impl ChatClient {
       "model": model_to_use,
       "messages": messages,
       "stream": true,
+      "stream_options": {"include_usage": true},
     });
 
     // 深度思考：使用 "thinking": {"type": "enabled"} 格式（DeepSeek-V3.2 火山引擎格式）
@@ -261,6 +262,7 @@ impl ChatClient {
       "model": self.deepseek_web_search_bot_model,
       "messages": messages,
       "stream": true,
+      "stream_options": {"include_usage": true},
     });
 
     info!("[DeepSeek Bot] 联网搜索请求URL: {}", url);
@@ -303,21 +305,7 @@ impl ChatClient {
       // Bot API 第一个 SSE chunk 包含巨大的 references 数组（搜索引用），
       // 会导致 Flutter SSE 客户端因 chunk 过大而无法解析，从而卡死。
       // 通过转换函数剥离 references/metadata，只保留标准 OpenAI 格式内容。
-      return Ok(Box::pin(
-        response
-          .bytes_stream()
-          .map(|result| {
-            result
-              .map(|bytes| {
-                let converted = Self::convert_deepseek_bot_to_openai(&bytes);
-                if !converted.is_empty() {
-                  debug!("[DeepSeek Bot] 转换后chunk: {} bytes", converted.len());
-                }
-                converted
-              })
-              .map_err(|e| anyhow!("Stream error: {}", e))
-          }),
-      ));
+      return Ok(Self::convert_stream(response.bytes_stream(), Self::convert_deepseek_bot_to_openai));
     }
 
     error!("[DeepSeek Bot] 重试 {} 次后仍失败：{}", max_retries, last_error);
@@ -420,6 +408,7 @@ impl ChatClient {
       "model": actual_model,
       "messages": messages,
       "stream": true,
+      "stream_options": {"include_usage": true},
     });
 
     // 通义千问：enable_search + search_options（dashscope API 格式）
@@ -518,6 +507,7 @@ impl ChatClient {
       "model": self.doubao_model,
       "messages": messages,
       "stream": true,
+      "stream_options": {"include_usage": true},
     });
 
     // 【修复豆包严重延迟 2026-07-30】豆包 Seed 系列是思考型模型，**默认先输出一大段
@@ -620,15 +610,7 @@ impl ChatClient {
     info!("✅ [豆包联网] 响应状态: {}", status);
 
     // Responses API 返回 SSE 格式需要转换为 OpenAI 标准格式
-    Ok(Box::pin(
-      response
-        .bytes_stream()
-        .map(|result| {
-          result
-            .map(|bytes| Self::convert_doubao_responses_to_openai(&bytes))
-            .map_err(|e| anyhow!("Stream error: {}", e))
-        }),
-    ))
+    Ok(Self::convert_stream(response.bytes_stream(), Self::convert_doubao_responses_to_openai))
   }
 
   /// 调用豆包多模态 API（使用 /responses 接口）
@@ -677,14 +659,35 @@ impl ChatClient {
     info!("✅ [豆包多模态] API响应成功: {}", status);
 
     // 将豆包 /responses 接口的响应格式转换为 OpenAI 标准格式
-    Ok(Box::pin(
-      response
-        .bytes_stream()
-        .map(|result| {
-          result
-            .map(|bytes| Self::convert_doubao_responses_to_openai(&bytes))
-            .map_err(|e| anyhow!("Stream error: {}", e))
-        }),
+    Ok(Self::convert_stream(response.bytes_stream(), Self::convert_doubao_responses_to_openai))
+  }
+
+  fn convert_stream(
+    source: impl Stream<Item = std::result::Result<Bytes, reqwest::Error>> + Send + 'static,
+    convert: fn(&Bytes) -> Bytes,
+  ) -> Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>> {
+    Box::pin(futures::stream::unfold(
+      (Box::pin(source), Vec::<u8>::new()),
+      move |(mut source, mut pending)| async move {
+        while let Some(result) = source.next().await {
+          match result {
+            Err(error) => return Some((Err(anyhow!(error)), (source, pending))),
+            Ok(bytes) => pending.extend_from_slice(&bytes),
+          }
+          if pending.len() > 1024 * 1024 {
+            return Some((Err(anyhow!("Provider SSE event too large")), (source, Vec::new())));
+          }
+          // Normalize only complete lines: HTTP chunks can split a UTF-8 character or usage JSON.
+          if let Some(end) = pending.iter().rposition(|byte| *byte == b'\n') {
+            let bytes = Bytes::from(pending.drain(..=end).collect::<Vec<_>>());
+            let converted = convert(&bytes);
+            if !converted.is_empty() {
+              return Some((Ok(converted), (source, pending)));
+            }
+          }
+        }
+        None
+      },
     ))
   }
 
@@ -739,6 +742,9 @@ impl ChatClient {
               }
               // 处理响应完成
               "response.done" | "response.completed" => {
+                if let Some(usage) = json_value.pointer("/response/usage").or_else(|| json_value.get("usage")) {
+                  output.push_str(&format!("data: {}\n\n", json!({"choices": [], "usage": usage})));
+                }
                 output.push_str("data: [DONE]\n\n");
                 info!("✅ [豆包多模态] 响应完成");
               }
@@ -966,6 +972,39 @@ impl ChatClient {
       models.push(AIModel::Doubao);
     }
     models
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::usage::ChatUsage;
+
+  #[test]
+  fn converted_streams_preserve_split_utf8_and_actual_usage() {
+    let cases: [(&str, fn(&Bytes) -> Bytes); 2] = [
+      (concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}],\"references\":[\"private-reference\"]}\r\n\r\n",
+        "data: {\"choices\":[],\"usage\":{\"total_tokens\":17}}\n\ndata: [DONE]\n\n"
+      ), ChatClient::convert_deepseek_bot_to_openai),
+      (concat!(
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"你好\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":5}}}\n\n"
+      ), ChatClient::convert_doubao_responses_to_openai),
+    ];
+    for (input, convert) in cases {
+      // A byte per HTTP chunk forces splits inside JSON fields and Chinese characters.
+      let chunks: Vec<_> = input.as_bytes().chunks(1)
+        .map(|chunk| Ok(Bytes::copy_from_slice(chunk))).collect();
+      let result = futures::executor::block_on(
+        ChatClient::convert_stream(futures::stream::iter(chunks), convert).collect::<Vec<_>>()
+      );
+      let bytes: Vec<u8> = result.into_iter().flat_map(|chunk| chunk.unwrap().to_vec()).collect();
+      let text = std::str::from_utf8(&bytes).unwrap();
+      assert!(text.contains("你好") && text.ends_with("data: [DONE]\n\n"));
+      assert!(!text.contains("private-reference"));
+      assert_eq!(ChatUsage::default().push(&bytes), 17);
+    }
   }
 }
 

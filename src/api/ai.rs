@@ -505,13 +505,14 @@ async fn stream_chat_handler(
   );
   
   // 1. 检查 AI 使用限额
-  if let Err(err) = check_ai_usage_limit(&state, &workspace_id).await {
-    error!("AI usage limit exceeded for workspace {}: {:?}", workspace_id, err);
+  let resource_owner_uid =
+    get_resource_owner_uid(&state, &user_uuid, Some(&workspace_id.to_string())).await?;
+  if check_ai_remaining_by_uid(&state, resource_owner_uid).await? < 1 {
     return Ok(
       HttpResponse::PaymentRequired()
         .json(serde_json::json!({
           "code": "AI_LIMIT_EXCEEDED",
-          "message": err.to_string(),
+          "message": "工作空间主人的 AI 调用次数已用完。",
         }))
     );
   }
@@ -607,14 +608,8 @@ async fn stream_chat_handler(
   // 5. 调用 ChatClient 进行流式聊天
   match state.chat_client.stream_chat(&params, model).await {
     Ok(stream) => {
-      // 6. 异步增加 AI 使用量
-      let pg_pool = state.pg_pool.clone();
-      let ws_id = workspace_id;
-      tokio::spawn(async move {
-        if let Err(e) = increment_ai_usage(&pg_pool, &ws_id).await {
-          error!("Failed to increment AI usage: {:?}", e);
-        }
-      });
+      record_ai_chat_usage_by_uid(&state, resource_owner_uid).await?;
+      let stream = account_chat_tokens(stream, state.pg_pool.clone(), resource_owner_uid);
       
       // 7. 返回流式响应
       Ok(
@@ -705,37 +700,56 @@ async fn check_ai_remaining_by_uid(
 }
 
 /// 根据workspace_id获取资源应消耗的目标用户uid
-/// 协作区场景：消耗workspace owner的资源配额
+/// A supplied workspace must be live and belong to the caller; never fall back to the caller's quota.
 async fn get_resource_owner_uid(
   state: &AppState,
   user_uuid: &UserUuid,
   workspace_id_str: Option<&str>,
-) -> Result<i64, AppError> {
-  if let Some(ws_id_str) = workspace_id_str {
-    // 解析workspace_id
-    if let Ok(ws_id) = Uuid::parse_str(ws_id_str) {
-      // 获取workspace信息，找到owner_uid
-      match database::workspace::select_workspace(&state.pg_pool, &ws_id).await {
-        Ok(workspace) => {
-          if let Some(owner_uid) = workspace.owner_uid {
-            info!(
-              "🔍 [资源归属] workspace_id: {}, owner_uid: {}, 协作区资源消耗归属workspace owner",
-              ws_id, owner_uid
-            );
-            return Ok(owner_uid);
-          }
-        },
-        Err(e) => {
-          warn!("⚠️ [资源归属] 查询workspace失败: {:?}, 回退为使用当前用户", e);
-        }
+) -> actix_web::Result<i64> {
+  let uid = state.user_cache.get_user_uid(user_uuid).await
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+  let Some(ws_id_str) = workspace_id_str else {
+    return Ok(uid);
+  };
+  let workspace_id = Uuid::parse_str(ws_id_str)
+    .map_err(|_| actix_web::error::ErrorBadRequest("Invalid workspace_id"))?;
+  sqlx::query_scalar::<_, i64>(
+    "SELECT w.owner_uid FROM af_workspace w JOIN af_workspace_member m USING (workspace_id) \
+     WHERE w.workspace_id = $1 AND m.uid = $2 AND w.deleted_at IS NULL \
+     AND COALESCE(w.is_initialized, true) = true AND w.owner_uid IS NOT NULL",
+  )
+  .bind(workspace_id)
+  .bind(uid)
+  .fetch_optional(&state.pg_pool)
+  .await
+  .map_err(actix_web::error::ErrorInternalServerError)?
+  .ok_or_else(|| actix_web::error::ErrorForbidden("No access to workspace"))
+}
+
+fn account_chat_tokens(
+  stream: Pin<Box<dyn Stream<Item = anyhow::Result<Bytes>> + Send>>,
+  pool: sqlx::PgPool,
+  owner_uid: i64,
+) -> impl Stream<Item = Result<Bytes, AppError>> {
+  let mut usage = appflowy_ai_client::usage::ChatUsage::default();
+  stream.then(move |result| {
+    let tokens = result.as_ref().map(|bytes| usage.push(bytes)).unwrap_or(0);
+    let pool = pool.clone();
+    async move {
+      if tokens > 0 {
+        record_usage(
+          &pool,
+          owner_uid,
+          UsageRecordRequest {
+            usage_type: UsageType::AiTokens,
+            usage_count: tokens,
+            usage_date: None,
+          },
+        ).await?;
       }
+      result.map_err(|error| AppError::AIServiceUnavailable(error.to_string()))
     }
-  }
-  
-  // 回退: 使用当前请求用户
-  let uid = state.user_cache.get_user_uid(user_uuid).await?;
-  info!("🔍 [资源归属] 未提供workspace_id或查询失败，使用当前用户 uid: {}", uid);
-  Ok(uid)
+  })
 }
 
 /// 记录AI聊天使用情况（按uid记录）
@@ -784,19 +798,11 @@ async fn public_chat_session_handler(
   );
   
   // 1. 确定资源消耗的目标用户（协作区场景：消耗workspace owner的配额）
-  let resource_owner_uid = match get_resource_owner_uid(
+  let resource_owner_uid = get_resource_owner_uid(
     &state,
     &user_uuid,
     params.workspace_id.as_deref(),
-  ).await {
-    Ok(uid) => uid,
-    Err(err) => {
-      error!("Failed to determine resource owner: {:?}", err);
-      // 回退为使用当前用户
-      state.user_cache.get_user_uid(&user_uuid).await
-        .map_err(|e| actix_web::error::ErrorInternalServerError(e))?
-    }
-  };
+  ).await?;
   
   info!(
     "🔍 [AI会话] 资源消耗归属 - resource_owner_uid: {}, calling_user: {}", 
@@ -950,14 +956,9 @@ async fn public_chat_session_handler(
   // 6. 调用 ChatClient 进行流式聊天
   match state.chat_client.stream_chat(&params, model).await {
     Ok(stream) => {
-      // 7. 异步记录使用情况（记录在workspace owner名下，不阻塞响应）
-      let state_clone = state.clone();
-      let resource_owner_uid_clone = resource_owner_uid;
-      tokio::spawn(async move {
-        if let Err(e) = record_ai_chat_usage_by_uid(&state_clone, resource_owner_uid_clone).await {
-          error!("Failed to record AI chat usage for resource owner uid {}: {:?}", resource_owner_uid_clone, e);
-        }
-      });
+      record_ai_chat_usage_by_uid(&state, resource_owner_uid).await
+        .map_err(actix_web::Error::from)?;
+      let stream = account_chat_tokens(stream, state.pg_pool.clone(), resource_owner_uid);
       
       // 8. 返回流式响应
       Ok(
