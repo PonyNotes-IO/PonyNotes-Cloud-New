@@ -24,7 +24,13 @@ settings_lock = threading.Lock()
 
 def settings():
     path = sync.ROOT / 'library/settings.json'
-    return json.loads(path.read_text()) if path.exists() else {}
+    return json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
+
+
+def save_settings(config):
+    path = sync.ROOT / 'library/settings.json'
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    sync.save(path, config)
 
 
 def session(authorization):
@@ -37,7 +43,7 @@ def session(authorization):
     profile = cloud.get('user/profile')
     if profile['uuid'] != user['id']:
         raise sync.APIError(401)
-    return user['id'], profile['uid'], cloud, cloud.get('workspace')
+    return user['id'], profile['uid'], cloud, cloud.get('workspace?include_role=true')
 
 
 def workspace_id(payload):
@@ -47,29 +53,78 @@ def workspace_id(payload):
         raise sync.APIError(400) from None
 
 
-def base_info(workspace, uid, owner_uid, config, state):
+def base_info(workspace, uid, owner_uid, config, state, bid=None):
     wid = workspace['workspace_id']
-    visibility = config.get('workspaces', {}).get(wid, {}).get('visibility', 'shared')
-    can_manage = workspace['owner_uid'] == owner_uid
+    bid = bid or wid
+    custom = bid != wid
+    record = config.get('bases', {}).get(bid, {}) if custom else config.get('workspaces', {}).get(wid, {})
+    if custom and record.get('workspace_id') != wid:
+        return None
+    visibility = record.get('visibility', 'shared')
+    can_manage = record.get('owner_uuid') == uid if custom else workspace['owner_uid'] == owner_uid
     if visibility != 'shared' and not can_manage:
         return None
-    return {'workspace_id': wid, 'name': workspace['workspace_name'],
+    return {'id': bid, 'workspace_id': wid, 'name': record['name'] if custom else workspace['workspace_name'],
         'visibility': visibility, 'can_manage': can_manage,
-        'is_favorite': wid in config.get('favorites', {}).get(uid, []),
-        'ready': bool(state.get('workspaces', {}).get(wid, {}).get('ready'))}
+        'is_favorite': bid in config.get('favorites', {}).get(uid, []),
+        'ready': bool(record.get('ready') if custom else state.get('workspaces', {}).get(wid, {}).get('ready'))}
 
 
-def accessible_base(wid, uid, owner_uid, workspaces):
+def accessible_base(wid, uid, owner_uid, workspaces, bid=None):
     workspace = next((w for w in workspaces if w['workspace_id'] == wid), None)
-    info = base_info(workspace, uid, owner_uid, settings(), {}) if workspace else None
+    info = base_info(workspace, uid, owner_uid, settings(), {}, bid) if workspace else None
     if info is None:
         raise sync.APIError(403)
     return info
 
 
+def create_base(uid, owner_uid, workspaces, payload):
+    wid = workspace_id(payload)
+    workspace = next((w for w in workspaces if w['workspace_id'] == wid), None)
+    if workspace is None or workspace.get('role') not in ('Owner', 'Member'):
+        raise sync.APIError(403)
+    name, visibility = payload.get('name'), payload.get('visibility')
+    if (not isinstance(name, str) or not 1 <= len(name.strip()) <= 100
+            or re.search(r'[\x00-\x1f\x7f]', name) or visibility not in ('private', 'shared')):
+        raise sync.APIError(400)
+    request_id = workspace_id({'workspace_id': payload.get('request_id')})
+    bid = str(uuid.uuid5(uuid.NAMESPACE_URL, f'ponynotes:base:{uid}:{wid}:{request_id}'))
+    with settings_lock:
+        config, state = settings(), sync_state()
+        record = config.get('bases', {}).get(bid)
+        expected = {'id': bid, 'workspace_id': wid, 'owner_uuid': uid,
+            'name': name.strip(), 'visibility': visibility}
+        if record and any(record.get(key) != value for key, value in expected.items()):
+            raise sync.APIError(400)
+        if record and record.get('ready'):
+            return {'base': base_info(workspace, uid, owner_uid, config, state, bid)}
+        proxy = state.get('workspaces', {}).get(wid, {}).get('embedding_proxy', {})
+        if not proxy.get('ready') or not state.get('service', {}).get('api_key'):
+            raise sync.APIError(503)
+        if record is None:
+            record = {**expected, 'ready': False}
+            config.setdefault('bases', {})[bid] = record
+            save_settings(config)  # Keep the ID before remote creation so retries recover lost responses.
+        client = sync.WeKnora(key=state['service']['api_key'])
+        try:
+            kb = client.call('knowledge-bases/' + bid)['data']
+        except sync.APIError as error:
+            if error.status != 404:
+                raise
+            kb = client.call('knowledge-bases', 'POST', {'id': bid, 'name': record['name'],
+                'type': 'document', 'embedding_model_id': proxy['id'],
+                'summary_model_id': state['service'].get('summary_model_id', ''),
+                'description': '小马笔记知识库'})['data']
+        if kb['id'] != bid or kb.get('embedding_model_id') != proxy['id']:
+            raise sync.APIError(503)
+        record['ready'] = True
+        save_settings(config)
+        return {'base': base_info(workspace, uid, owner_uid, config, state, bid)}
+
+
 def sync_state():
     path = sync.ROOT / 'sync/state.json'
-    return json.loads(path.read_text()) if path.exists() else {}
+    return json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
 
 
 def embedding(authorization, wid, payload):
@@ -158,9 +213,13 @@ def library(authorization, action, payload):
     if action == 'bases':
         config, state = settings(), sync_state()
         return {'bases': [info for workspace in workspaces
-            if (info := base_info(workspace, uid, owner_uid, config, state)) is not None]}
+            for bid in [workspace['workspace_id'], *config.get('bases', {})]
+            if (info := base_info(workspace, uid, owner_uid, config, state, bid)) is not None]}
+    if action == 'create':
+        return create_base(uid, owner_uid, workspaces, payload)
     wid = workspace_id(payload)
-    info = accessible_base(wid, uid, owner_uid, workspaces)
+    bid = workspace_id({'workspace_id': payload.get('base_id', wid)})
+    info = accessible_base(wid, uid, owner_uid, workspaces, bid)
     if action in ('visibility', 'favorite'):
         if action == 'visibility':
             if not info['can_manage']:
@@ -172,22 +231,21 @@ def library(authorization, action, payload):
         with settings_lock:
             config = settings()
             if action == 'visibility':
-                config.setdefault('workspaces', {}).setdefault(wid, {})['visibility'] = payload['visibility']
+                record = config['bases'][bid] if bid != wid else config.setdefault('workspaces', {}).setdefault(wid, {})
+                record['visibility'] = payload['visibility']
             else:
                 favorites = set(config.setdefault('favorites', {}).get(uid, []))
                 if payload['is_favorite']:
-                    favorites.add(wid)
+                    favorites.add(bid)
                 else:
-                    favorites.discard(wid)
+                    favorites.discard(bid)
                 config['favorites'][uid] = sorted(favorites)
-            path = sync.ROOT / 'library/settings.json'
-            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            sync.save(path, config)
+            save_settings(config)
         return {'updated': True}
     if action not in ('documents', 'document', 'sources', 'wiki', 'wiki_page'):
         raise sync.APIError(404)
     state = sync_state()
-    mapping = state.get('workspaces', {}).get(wid)
+    mapping = settings().get('bases', {}).get(bid) if bid != wid else state.get('workspaces', {}).get(wid)
     if not mapping or not mapping.get('ready'):
         return {'documents': [], 'sources': [], 'pages': [], 'status': 'awaiting_sync'}
     client = sync.WeKnora(key=state['service']['api_key'])
@@ -268,11 +326,12 @@ def search(authorization, payload):
     wid = workspace_id(payload)
     # Validate the actual login session, never trust a client-supplied user/tenant/KB ID.
     uid, owner_uid, cloud, workspaces = session(authorization)
-    accessible_base(wid, uid, owner_uid, workspaces)
+    bid = workspace_id({'workspace_id': payload.get('base_id', wid)})
+    accessible_base(wid, uid, owner_uid, workspaces, bid)
     # Recheck visibility at query time so removed private pages cannot be retrieved.
     visible = visible_views(cloud, wid)
     state = sync_state()
-    mapping = state.get('workspaces', {}).get(wid)
+    mapping = settings().get('bases', {}).get(bid) if bid != wid else state.get('workspaces', {}).get(wid)
     if not mapping or not mapping.get('ready'):
         return {'sources': [], 'status': 'awaiting_sync'}
     client = sync.WeKnora(key=state['service']['api_key'])
@@ -313,7 +372,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise sync.APIError(404)
             action = self.path.removeprefix('/api/knowledge/')
             if not internal and (self.path != '/api/knowledge/' + action or action not in (
-                    'search', 'bases', 'visibility', 'favorite', 'documents', 'document',
+                    'search', 'bases', 'create', 'visibility', 'favorite', 'documents', 'document',
                     'sources', 'wiki', 'wiki_page')):
                 raise sync.APIError(404)
             length = int(self.headers.get('Content-Length', '0'))

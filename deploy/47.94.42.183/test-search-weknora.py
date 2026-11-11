@@ -24,6 +24,8 @@ entries = {}
 hits = []
 used_keys = []
 wiki_enabled = True
+created = {}
+lost_creates = set()
 pages = [
     {'slug': 'shared', 'title': 'Shared Wiki', 'source_refs': ['shared|Shared note'],
         'out_links': ['private-b', 'mixed'], 'content': 'Shared Wiki content'},
@@ -64,6 +66,21 @@ class Client:
         used_keys.append(key)
 
     def call(self, path, method='GET', payload=None):
+        if path == 'knowledge-bases' and method == 'POST':
+            assert payload['embedding_model_id'] == 'workspace-embedding'
+            assert payload['summary_model_id'] == 'workspace-chat'
+            assert payload['type'] == 'document'
+            created[payload['id']] = payload
+            if payload['id'] in lost_creates:
+                lost_creates.remove(payload['id'])
+                raise m.sync.APIError(503)  # The server created it but the response was lost.
+            return {'data': payload}
+        if path.startswith('knowledge-bases/'):
+            bid = path.split('/')[1]
+            if bid != 'workspace-kb':
+                if bid not in created:
+                    raise m.sync.APIError(404)
+                return {'data': [] if path.endswith('/hybrid-search') else created[bid]}
         if path == 'knowledge-bases/workspace-kb':
             return {'data': {'id': 'workspace-kb', 'embedding_model_id': 'embedding',
                 'type': 'document', 'indexing_strategy': {'wiki_enabled': wiki_enabled}}}
@@ -95,8 +112,10 @@ def request(base, path, **kwargs):
         return {'id': uid}
     if path == 'user/profile':
         return {'data': {'uuid': uid, 'uid': {'user-a': 1, 'user-b': 2, 'new-member': 3}.get(uid, 4)}}
-    if path == 'workspace':
-        return {'data': [{'workspace_id': wid, 'workspace_name': 'Team', 'owner_uid': workspace_owner}] if uid in members else []}
+    if path == 'workspace?include_role=true':
+        return {'data': [{'workspace_id': wid, 'workspace_name': 'Team', 'owner_uid': workspace_owner,
+            'role': 'Owner' if uid == 'user-a' else 'Guest' if uid == 'new-member' else 'Member'}]
+            if uid in members else []}
     if '/folder?' in path:
         oid = path.split('root_view_id=')[1]
         visible = [own_view] + ([private_a] if uid == 'user-a' else [private_b] if uid == 'user-b' else [])
@@ -204,6 +223,57 @@ with tempfile.TemporaryDirectory() as directory:
     assert path.read_text() == before  # separate metadata cannot race the sync writer
     m.library(b, 'favorite', {'workspace_id': wid, 'is_favorite': False})
     assert m.library(b, 'bases', {})['bases'][0]['is_favorite'] is False
+    state['workspaces'][wid]['embedding_proxy'] = {'id': 'workspace-embedding', 'ready': True}
+    state['service']['summary_model_id'] = 'workspace-chat'
+    path.write_text(json.dumps(state))
+    immutable_state = path.read_text()
+    create = {'workspace_id': wid, 'name': '  项目资料  ', 'visibility': 'private',
+        'request_id': str(uuid.uuid4()), 'owner_uuid': 'user-b'}
+    private = m.library(a, 'create', create)['base']
+    assert private['name'] == '项目资料' and private['visibility'] == 'private'
+    assert private['workspace_id'] == wid and private['id'] != wid
+    assert private['can_manage'] and private['ready']
+    assert created[private['id']]['summary_model_id'] == 'workspace-chat'
+    assert m.library(a, 'create', create)['base'] == private and len(created) == 1
+    assert private['id'] not in {base['id'] for base in m.library(b, 'bases', {})['bases']}
+    for action, extra in [('documents', {}), ('favorite', {'is_favorite': True}),
+            ('search', {'query': 'test'}), ('visibility', {'visibility': 'shared'})]:
+        try:
+            payload = {'workspace_id': wid, 'base_id': private['id'], **extra}
+            m.search(b, payload) if action == 'search' else m.library(b, action, payload)
+            raise AssertionError('New private KB leaked: ' + action)
+        except m.sync.APIError as error:
+            assert error.status == 403
+    m.library(a, 'visibility', {'workspace_id': wid, 'base_id': private['id'], 'visibility': 'shared'})
+    shared = next(base for base in m.library(b, 'bases', {})['bases'] if base['id'] == private['id'])
+    assert shared['visibility'] == 'shared' and not shared['can_manage']
+    m.library(b, 'favorite', {'workspace_id': wid, 'base_id': shared['id'], 'is_favorite': True})
+    assert next(base for base in m.library(b, 'bases', {})['bases'] if base['id'] == shared['id'])['is_favorite']
+    assert not m.library(b, 'bases', {})['bases'][0]['is_favorite']  # Defaults remain independent.
+    assert m.library(a, 'documents', {'workspace_id': wid, 'base_id': shared['id']})['documents'] == []
+    assert m.library(a, 'wiki', {'workspace_id': wid, 'base_id': shared['id']})['pages'] == []
+    member_private = m.library(b, 'create', {**create, 'request_id': str(uuid.uuid4())})['base']
+    assert member_private['id'] not in {base['id'] for base in m.library(a, 'bases', {})['bases']}
+    lost = {**create, 'name': 'Recovered', 'visibility': 'shared', 'request_id': str(uuid.uuid4())}
+    lost_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"ponynotes:base:user-a:{wid}:{lost['request_id']}"))
+    lost_creates.add(lost_id)
+    try:
+        m.library(a, 'create', lost)
+        raise AssertionError('Expected a lost create response')
+    except m.sync.APIError as error:
+        assert error.status == 503
+    assert not m.settings()['bases'][lost_id]['ready']
+    assert m.library(a, 'create', lost)['base']['id'] == lost_id and len(created) == 3
+    for extra, authorization, status in [({'name': ''}, a, 400), ({'name': '  '}, a, 400),
+            ({'name': 'x' * 101}, a, 400), ({'name': 'line\nbreak'}, a, 400),
+            ({'visibility': 'public'}, a, 400), ({'request_id': 'invalid'}, a, 400),
+            ({'workspace_id': other}, a, 403), ({}, 'Bearer valid-new-member', 403)]:
+        try:
+            m.library(authorization, 'create', {**create, 'request_id': str(uuid.uuid4()), **extra})
+            raise AssertionError('Invalid/unauthorized create allowed')
+        except m.sync.APIError as error:
+            assert error.status == status
+    assert path.read_text() == immutable_state  # Custom libraries never overwrite sync/billing mappings.
     del entries[document_id]
     hits.pop()
     server = m.Server(('127.0.0.1', 0))
@@ -216,9 +286,10 @@ with tempfile.TemporaryDirectory() as directory:
         with urllib.request.urlopen(req, timeout=5) as response:
             assert response.headers['Cache-Control'] == 'no-store'
             assert json.load(response)['data']['bases'][0]['workspace_id'] == wid
-        for action in ('sources', 'wiki', 'wiki_page'):
+        for action in ('sources', 'wiki', 'wiki_page', 'create'):
             req = urllib.request.Request(endpoint + action,
-                data=json.dumps({'workspace_id': wid, 'slug': 'shared'}).encode(),
+                data=json.dumps({**create, 'workspace_id': wid, 'slug': 'shared',
+                    'request_id': str(uuid.uuid4())}).encode(),
                 headers={'Authorization': b, 'Content-Type': 'application/json'})
             with urllib.request.urlopen(req, timeout=5) as response:
                 assert json.load(response)['success'] is True
@@ -237,6 +308,11 @@ with tempfile.TemporaryDirectory() as directory:
         server.pool.shutdown()
     used_keys.clear()
     members.remove('user-b')
+    try:
+        m.library(b, 'documents', {'workspace_id': wid, 'base_id': member_private['id']})
+        raise AssertionError('Removed member retained their custom library')
+    except m.sync.APIError as error:
+        assert error.status == 403
     try:
         m.search('Bearer valid-user-b', {'query': 'test', 'workspace_id': wid})
         raise AssertionError('Removed member retained access')
@@ -262,4 +338,4 @@ with tempfile.TemporaryDirectory() as directory:
     del state['workspaces']
     path.write_text(json.dumps(state))
     assert m.search('Bearer valid-user-a', {'query': 'test', 'workspace_id': wid})['status'] == 'awaiting_sync'
-print('PASS: workspace KB, library visibility/favorites, file/source/Wiki APIs, Wiki source permissions and graph links, credential redaction, array responses, HTTP routes, membership revocation, private pages, quick notes, isolation, validation, migration readiness')
+print('PASS: workspace/custom KB creation and retry recovery, Chinese names, guest rejection, library visibility/favorites, file/source/Wiki APIs, Wiki source permissions and graph links, credential redaction, HTTP routes, membership revocation, private pages, quick notes, isolation, validation, migration readiness')
