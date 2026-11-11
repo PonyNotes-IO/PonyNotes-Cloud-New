@@ -36,4 +36,13 @@ with tempfile.TemporaryDirectory() as temporary:
         assert not any(name.startswith("web/xmbj-www-ui") for name in names)
         assert archive.extractfile("cloud/migrations/20260101_test.sql").read() == b"keep exact bytes\r\n"
         assert json.load(archive.extractfile("manifest.json"))["target"] == "47.94.42.183"
+    cloud_root = root / 'cloud-only'
+    (cloud_root / 'PonyNotes-Cloud-New').mkdir(parents=True)
+    (cloud_root / 'PonyNotes-Cloud-New/local.rs').write_text('local edit\n')
+    deploy.bundle(cloud_root, output, cloud_only=True)
+    with tarfile.open(output) as archive:
+        names = set(archive.getnames())
+        assert 'cloud/local.rs' in names
+        assert not any(name.split('/')[0] in {'gotrue', 'web'} for name in names)
+        assert set(json.load(archive.extractfile('manifest.json'))['sources']) == {'cloud'}
 print("PASS source snapshot includes local changes and SQLx files, excludes secrets/build output/UI")

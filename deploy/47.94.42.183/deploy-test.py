@@ -42,16 +42,17 @@ def include_source(info):
     return info
 
 
-def bundle(workspace, output):
+def bundle(workspace, output, cloud_only=False):
     manifest = {"target": HOST, "includes_local_worktree": True, "sources": {}}
-    for alias, folder in REPOS.items():
+    repositories = {"cloud": REPOS["cloud"]} if cloud_only else REPOS
+    for alias, folder in repositories.items():
         repo = workspace / folder
         if not repo.is_dir():
             raise FileNotFoundError(repo)
         revision = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True)
         manifest["sources"][alias] = {"repository": folder, "commit": revision.stdout.strip() if revision.returncode == 0 else "unknown"}
     with tarfile.open(output, "w:gz") as archive:
-        for alias, folder in REPOS.items():
+        for alias, folder in repositories.items():
             archive.add(workspace / folder, arcname=alias, filter=include_source)
         for name in TOOLS:
             archive.add(HERE / name, arcname="tools/" + name)
@@ -79,12 +80,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path, default=HERE.parents[2])
     parser.add_argument("--key", type=Path, help="SSH private key; otherwise prompt once for the root password")
+    parser.add_argument("--cloud-only", action="store_true", help="Update only Cloud and its Worker")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true", help="Only check SSH and server prerequisites")
     mode.add_argument("--bundle-only", type=Path, help="Create a source archive without connecting to the server")
     args = parser.parse_args()
     if args.bundle_only:
-        bundle(args.workspace.resolve(), args.bundle_only)
+        bundle(args.workspace.resolve(), args.bundle_only, args.cloud_only)
         print("Source archive:", args.bundle_only.resolve())
         return
 
@@ -98,7 +100,7 @@ def main():
         client.get_transport().set_keepalive(30)
         script = (HERE / "deploy-test.sh").read_bytes().replace(b"\r\n", b"\n")
         remote_run(client, "bash -n", script)
-        remote_run(client, "bash -s -- --check", script)
+        remote_run(client, "bash -s -- --check" + (" --cloud-only" if args.cloud_only else ""), script)
         if args.check:
             return
 
@@ -107,7 +109,7 @@ def main():
         with tempfile.TemporaryDirectory(prefix="ponynotes-deploy-") as temporary:
             archive = Path(temporary) / "source.tar.gz"
             print("Packaging local sources (including uncommitted changes)...", flush=True)
-            bundle(args.workspace.resolve(), archive)
+            bundle(args.workspace.resolve(), archive, args.cloud_only)
             with archive.open("rb") as source:
                 digest = hashlib.file_digest(source, "sha256").hexdigest()
             remote_run(client, shlex.join(["mkdir", "-p", "-m", "700", destination]))
@@ -121,7 +123,7 @@ def main():
 
             with client.open_sftp() as sftp:
                 sftp.put(str(archive), destination + "/source.tar.gz", callback=progress)
-            command = f"cd {shlex.quote(destination)} && echo '{digest}  source.tar.gz' | sha256sum -c - && tar -xzf source.tar.gz --no-same-owner && bash tools/deploy-test.sh {shlex.quote(release)}"
+            command = f"cd {shlex.quote(destination)} && echo '{digest}  source.tar.gz' | sha256sum -c - && tar -xzf source.tar.gz --no-same-owner && bash tools/deploy-test.sh {shlex.quote(release)}" + (" --cloud-only" if args.cloud_only else "")
             remote_run(client, command)
         print("Deployment complete: http://" + HOST, flush=True)
 
