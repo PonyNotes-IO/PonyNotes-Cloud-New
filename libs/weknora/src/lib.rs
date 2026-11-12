@@ -1,5 +1,6 @@
 //! Shared WeKnora integration used by the existing Cloud and Worker processes.
 pub mod agent;
+pub mod attachments;
 mod data_source;
 pub mod embedding;
 pub mod library;

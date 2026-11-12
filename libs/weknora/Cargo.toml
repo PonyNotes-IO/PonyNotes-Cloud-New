@@ -7,7 +7,7 @@ edition = "2021"
 anyhow.workspace = true
 serde_json.workspace = true
 serde.workspace = true
-reqwest = { workspace = true, features = ["json"] }
+reqwest = { workspace = true, features = ["json", "multipart"] }
 sqlx = { workspace = true, default-features = false, features = ["postgres", "runtime-tokio-rustls", "json", "uuid"] }
 tokio = { workspace = true, features = ["time", "fs", "macros", "rt-multi-thread"] }
 tracing.workspace = true

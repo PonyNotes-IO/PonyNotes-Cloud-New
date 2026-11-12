@@ -619,11 +619,17 @@ async fn smart_reasoning_uses_builtin_tuning_and_provisions_a_user_sandbox() {
     .await
     .unwrap();
   assert_eq!(cfg["sandbox_config_id"], "isolated-docker");
+  assert_eq!(cfg["vlm_model_id"], "own-model");
+  assert_eq!(cfg["attachment_image_understanding"], true);
+  assert_eq!(
+    cfg["supported_file_types"],
+    json!(crate::attachments::NATIVE_EXTENSIONS)
+  );
   assert_eq!(cfg["max_iterations"], 50);
   assert_eq!(cfg["max_completion_tokens"], 0);
   assert_eq!(
     cfg["allowed_tools"],
-    json!(["thinking", "search_knowledge"])
+    json!(["thinking", "search_knowledge", "ask_user"])
   );
   task.join().unwrap();
 }
@@ -760,10 +766,11 @@ fn mock_recorded(
         .unwrap_or(0);
       let mut body = vec![0u8; length];
       stream.read_exact(&mut body).unwrap();
-      captured
-        .lock()
-        .unwrap()
-        .push((header, serde_json::from_slice(&body).unwrap_or(Value::Null)));
+      captured.lock().unwrap().push((
+        header,
+        serde_json::from_slice(&body)
+          .unwrap_or_else(|_| json!({"raw_body":String::from_utf8_lossy(&body),"raw_bytes":body})),
+      ));
       let body = if status == 204 {
         String::new()
       } else {
@@ -777,6 +784,160 @@ fn mock_recorded(
     task,
     requests,
   )
+}
+
+#[tokio::test]
+async fn session_upload_keeps_original_bytes_and_checks_returned_session() {
+  let session = Uuid::new_v4().to_string();
+  let agent = Uuid::new_v4().to_string();
+  let id = Uuid::new_v4().to_string();
+  let (client, task, requests) = mock_recorded(vec![
+    (
+      format!("POST /api/v1/sessions/{session}/attachments "),
+      202,
+      json!({"success":true,"data":{"id":id,"session_id":session,"status":"uploaded"}}),
+    ),
+    (
+      format!("POST /api/v1/sessions/{session}/attachments "),
+      202,
+      json!({"success":true,"data":{"id":id,"session_id":Uuid::new_v4()}}),
+    ),
+  ]);
+  let pdf = b"%PDF-1.4\noriginal PDF bytes".to_vec();
+  assert_eq!(
+    client
+      .agent_upload("owner-token", &session, &agent, "scan.pdf", pdf.clone())
+      .await
+      .unwrap(),
+    id
+  );
+  assert!(client
+    .agent_upload("owner-token", &session, &agent, "scan.pdf", pdf)
+    .await
+    .is_err());
+  assert!(client
+    .agent_upload("owner-token", &session, &agent, "../private.pdf", vec![1])
+    .await
+    .is_err());
+  task.join().unwrap();
+  let requests = requests.lock().unwrap();
+  assert!(requests[0]
+    .0
+    .to_lowercase()
+    .contains("authorization: bearer owner-token"));
+  assert!(requests[0].0.contains("multipart/form-data; boundary="));
+  let body = requests[0].1["raw_body"].as_str().unwrap();
+  assert!(body.contains("filename=\"scan.pdf\""));
+  assert!(body.contains("name=\"agent_id\""));
+  assert!(body.contains(&agent));
+  assert!(body.contains("%PDF-1.4\noriginal PDF bytes"));
+}
+
+#[tokio::test]
+async fn history_exposes_parse_failure_and_expiry_without_storage_handles() {
+  let session = Uuid::new_v4().to_string();
+  let file = Uuid::new_v4().to_string();
+  let (client, task) = mock(vec![
+    (
+      format!("GET /api/v1/messages/{session}/load?"),
+      200,
+      json!({"data":[{"id":"question","created_at":"2026-11-12","attachments":[
+        {"id":file,"file_name":"scan.pdf"},{"id":Uuid::new_v4(),"file_name":"old.pdf"}]}]}),
+    ),
+    (
+      format!("GET /api/v1/sessions/{session}/attachments "),
+      200,
+      json!({"data":[{"id":file,"status":"failed","error_message":"parser unavailable","resource_ref":"private://original"}]}),
+    ),
+  ]);
+  let messages = client.agent_history("owner-token", &session).await.unwrap();
+  assert_eq!(messages[0]["attachments"][0]["status"], "failed");
+  assert_eq!(
+    messages[0]["attachments"][0]["error_message"],
+    "parser unavailable"
+  );
+  assert_eq!(messages[0]["attachments"][1]["status"], "expired");
+  assert!(!serde_json::to_string(&messages)
+    .unwrap()
+    .contains("private://"));
+  task.join().unwrap();
+}
+
+#[tokio::test]
+async fn mainstream_attachments_keep_bytes_mime_and_original_display_names() {
+  use crate::attachments::{
+    mime_type, restore_names, upload_name, CODE_EXTENSIONS, NATIVE_EXTENSIONS,
+  };
+  let session = Uuid::new_v4().to_string();
+  let agent = Uuid::new_v4().to_string();
+  let extensions = NATIVE_EXTENSIONS
+    .iter()
+    .chain(CODE_EXTENSIONS)
+    .copied()
+    .chain(["tif", "htm", "text"])
+    .collect::<Vec<_>>();
+  let ids = extensions
+    .iter()
+    .map(|_| Uuid::new_v4().to_string())
+    .collect::<Vec<_>>();
+  let responses = ids
+    .iter()
+    .map(|id| {
+      (
+        format!("POST /api/v1/sessions/{session}/attachments "),
+        202,
+        json!({"success":true,"data":{"id":id,"session_id":session}}),
+      )
+    })
+    .collect();
+  let (client, task, requests) = mock_recorded(responses);
+  let original = vec![0, 255, 128, 13, 10, 1, 42];
+  let mut names = json!({});
+  let mut message = json!({"attachments":[]});
+  for (ext, expected_id) in extensions.iter().zip(&ids) {
+    let name = format!("附件.{ext}");
+    let id = client
+      .agent_upload("owner-token", &session, &agent, &name, original.clone())
+      .await
+      .unwrap();
+    assert_eq!(&id, expected_id);
+    names[&id] = json!(name);
+    message["attachments"]
+      .as_array_mut()
+      .unwrap()
+      .push(json!({"id":id,"file_name":upload_name(&name).unwrap()}));
+  }
+  task.join().unwrap();
+  restore_names(&mut message, &names);
+  for ((ext, (header, body)), attachment) in extensions
+    .iter()
+    .zip(requests.lock().unwrap().iter())
+    .zip(message["attachments"].as_array().unwrap())
+  {
+    let name = format!("附件.{ext}");
+    let adapted = upload_name(&name).unwrap();
+    let raw = body["raw_bytes"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .map(|b| b.as_u64().unwrap() as u8)
+      .collect::<Vec<_>>();
+    assert!(raw.windows(original.len()).any(|part| part == original));
+    let multipart = body["raw_body"].as_str().unwrap();
+    assert!(multipart.contains(&format!("filename=\"{adapted}\"")));
+    assert!(multipart
+      .to_lowercase()
+      .contains(&format!("content-type: {}", mime_type(&adapted))));
+    assert!(header
+      .to_lowercase()
+      .contains("authorization: bearer owner-token"));
+    assert_eq!(attachment["file_name"], name);
+  }
+  assert_eq!(upload_name("PHOTO.JPG").unwrap(), "PHOTO.jpg");
+  assert_eq!(upload_name("source.tsx").unwrap(), "source.tsx.txt");
+  assert!(upload_name("program.exe").is_err());
+  assert!(upload_name("archive.zip").is_err());
+  assert!(upload_name("../private.txt").is_err());
 }
 
 #[test]
