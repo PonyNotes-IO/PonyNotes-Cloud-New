@@ -360,7 +360,7 @@ pub(crate) async fn read(
   let key = text(&state["service"], "api_key")?;
   let kb = text(mapping, "id")?;
   if matches!(action, "web_import_options" | "import_url") {
-    return web_import(client, key, kb, action, payload).await;
+    return crate::web_import::execute(client, key, kb, &state["service"], action, payload).await;
   }
   if action == "sources" {
     let mut url = reqwest::Url::parse("http://internal/datasource")?;
@@ -543,75 +543,6 @@ async fn search(
     }
   }
   Ok(json!({"status":if sources.is_empty(){"no_match"}else{"matched"},"sources":sources}))
-}
-
-pub(crate) async fn web_import(
-  client: &Client,
-  key: &str,
-  kb: &str,
-  action: &str,
-  payload: &Value,
-) -> Result<Value> {
-  let base = client
-    .weknora(key, &format!("knowledge-bases/{kb}"), Method::GET, None)
-    .await?;
-  let mut chunking = base["data"]["chunking_config"]
-    .as_object()
-    .cloned()
-    .unwrap_or_default();
-  if action == "web_import_options" {
-    return Ok(
-      json!({"chunk_size":chunking.get("chunk_size").and_then(Value::as_u64).filter(|n| *n>0).unwrap_or(512),
-      "chunk_overlap":chunking.get("chunk_overlap").and_then(Value::as_u64).unwrap_or(80),
-      "strategy":chunking.get("strategy").and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or("auto")}),
-    );
-  }
-  let url = payload["url"]
-    .as_str()
-    .ok_or_else(|| anyhow!(Rejected(400)))?
-    .trim();
-  require(
-    (1..=2048).contains(&url.chars().count())
-      && !url.chars().any(|c| c.is_whitespace() || c.is_control()),
-    400,
-  )?;
-  let parsed = reqwest::Url::parse(url).map_err(|_| anyhow!(Rejected(400)))?;
-  require(
-    matches!(parsed.scheme(), "http" | "https")
-      && parsed.host_str().is_some()
-      && parsed.username().is_empty()
-      && parsed.password().is_none(),
-    400,
-  )?;
-  let size = payload["chunk_size"]
-    .as_u64()
-    .ok_or_else(|| anyhow!(Rejected(400)))?;
-  let overlap = payload["chunk_overlap"]
-    .as_u64()
-    .ok_or_else(|| anyhow!(Rejected(400)))?;
-  require(
-    (100..=4000).contains(&size)
-      && overlap <= 500
-      && overlap < size
-      && matches!(
-        payload["strategy"].as_str(),
-        Some("auto" | "heading" | "heuristic" | "recursive" | "legacy")
-      ),
-    400,
-  )?;
-  for field in ["chunk_size", "chunk_overlap", "strategy"] {
-    chunking.insert(field.into(), payload[field].clone());
-  }
-  // WeKnora performs the fetch and its SSRF checks. Never fetch arbitrary URLs in Cloud.
-  let entry = client
-    .weknora(
-      key,
-      &format!("knowledge-bases/{kb}/knowledge/url"),
-      Method::POST,
-      Some(&json!({"url":url,"process_config":{"chunking_config":chunking}})),
-    )
-    .await?;
-  Ok(json!({"document_id":text(&entry["data"],"id")?}))
 }
 
 pub(crate) fn wiki_readable(

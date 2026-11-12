@@ -6,6 +6,299 @@ use std::net::TcpListener;
 use std::thread;
 
 #[tokio::test]
+async fn web_import_v2_preserves_explicit_choices_and_rejects_untrusted_settings() {
+  let base = json!({"summary_model_id":"summary","chunking_config":{"chunk_size":640,"chunk_overlap":80,"separators":["\n\n"],"enable_parent_child":true},
+    "vlm_config":{"enabled":true,"model_id":"vision"},"question_generation_config":{"enabled":true,"question_count":3}});
+  let service = json!({"parse_models":[{"id":"vision","name":"Vision","type":"VLLM","parameters":{"api_key":"never-return"}}],
+    "parse_engines":[{"id":"builtin","name":"Builtin","credentials":"never-return"}]});
+  let mut config = web_import::defaults(&base, &service);
+  config["summary_enabled"] = json!(false);
+  config["enable_multimodel"] = json!(false);
+  config["vlm_config"]["enabled"] = json!(false);
+  config["question_generation_config"]["enabled"] = json!(false);
+  config["chunking_config"]["chunk_overlap"] = json!(0);
+  config["chunking_config"]["enable_parent_child"] = json!(false);
+  config["parser_engine_rules"][0]["engine"] = json!("builtin");
+  let forwarded = web_import::validate(&config, &base, &service).unwrap();
+  assert_eq!(forwarded["chunking_config"]["separators"], json!(["\n\n"]));
+  for (pointer, value) in [
+    ("/vlm_config/model_id", json!("foreign-model")),
+    ("/vlm_config/api_key", json!("injected")),
+    ("/parser_engine_rules/0/engine", json!("foreign-engine")),
+    ("/chunking_config/chunk_size", json!(99)),
+    ("/chunking_config/chunk_overlap", json!(640)),
+  ] {
+    let mut bad = config.clone();
+    if pointer == "/vlm_config/api_key" {
+      bad["vlm_config"]["api_key"] = value;
+    } else {
+      *bad.pointer_mut(pointer).unwrap() = value;
+    }
+    assert_eq!(
+      library::status(&web_import::validate(&bad, &base, &service).unwrap_err()),
+      400
+    );
+  }
+  let base_response = json!({"data":base});
+  let tag_response = json!({"data":{"data":[{"id":"tag","name":"Learning"}],"total":1}});
+  let (client, task, requests) = mock_recorded(vec![
+    (
+      "GET /api/v1/knowledge-bases/kb ".into(),
+      200,
+      base_response.clone(),
+    ),
+    (
+      "GET /api/v1/knowledge-bases/kb/tags?page=1&page_size=100 ".into(),
+      200,
+      tag_response.clone(),
+    ),
+    (
+      "GET /api/v1/knowledge-bases/kb ".into(),
+      200,
+      base_response.clone(),
+    ),
+    (
+      "GET /api/v1/knowledge-bases/kb/tags?page=1&page_size=100 ".into(),
+      200,
+      tag_response.clone(),
+    ),
+    (
+      "POST /api/v1/knowledge-bases/kb/knowledge/url ".into(),
+      200,
+      json!({"data":{"id":"document"}}),
+    ),
+    ("GET /api/v1/knowledge-bases/kb ".into(), 200, base_response),
+    (
+      "GET /api/v1/knowledge-bases/kb/tags?page=1&page_size=100 ".into(),
+      200,
+      tag_response,
+    ),
+  ]);
+  let options = web_import::execute(
+    &client,
+    "key",
+    "kb",
+    &service,
+    "web_import_options",
+    &json!({}),
+  )
+  .await
+  .unwrap();
+  assert!(!options.to_string().contains("never-return"));
+  let mut payload = json!({"url":"https://example.test","tag_ids":["tag"],"process_config":config});
+  assert_eq!(
+    web_import::execute(&client, "key", "kb", &service, "import_url", &payload)
+      .await
+      .unwrap()["document_id"],
+    "document"
+  );
+  payload["tag_ids"] = json!(["foreign"]);
+  assert_eq!(
+    library::status(
+      &web_import::execute(&client, "key", "kb", &service, "import_url", &payload)
+        .await
+        .unwrap_err()
+    ),
+    403
+  );
+  task.join().unwrap();
+  let requests = requests.lock().unwrap();
+  assert_eq!(
+    requests[4].1,
+    json!({"url":"https://example.test","tag_ids":["tag"],"process_config":forwarded})
+  );
+  assert_eq!(
+    requests.iter().filter(|r| r.0.starts_with("POST")).count(),
+    1
+  );
+  assert_eq!(base["chunking_config"]["chunk_overlap"], 80);
+}
+
+#[tokio::test]
+async fn reference_catalog_keeps_uploaded_files_and_filters_hidden_synced_notes() {
+  let wid = Uuid::new_v4();
+  let current = Uuid::new_v4().to_string();
+  let other = Uuid::new_v4().to_string();
+  let private = Uuid::new_v4().to_string();
+  let shared = Uuid::new_v4().to_string();
+  let file = Uuid::new_v4().to_string();
+  let current_file = Uuid::new_v4().to_string();
+  let shared_file = Uuid::new_v4().to_string();
+  let hidden = Uuid::new_v4().to_string();
+  let note = Uuid::new_v4().to_string();
+  let (client, task) = mock(vec![
+    (
+      "GET /api/v1/knowledge-bases ".into(),
+      200,
+      json!({"data":[{"id":current,"name":"current"},{"id":other,"name":"hidden workspace"},{"id":private,"name":"private files"}]}),
+    ),
+    (
+      "GET /api/v1/shared-knowledge-bases ".into(),
+      200,
+      json!({"data":[{"knowledge_base":{"id":shared,"name":"shared files"}}]}),
+    ),
+    (
+      format!("GET /api/v1/knowledge-bases/{current}/knowledge?page=1&page_size=100"),
+      200,
+      json!({"total":1,"data":[{"id":current_file,"type":"file","file_name":"workspace.pdf"}]}),
+    ),
+    (
+      format!("GET /api/v1/knowledge-bases/{private}/knowledge?page=1&page_size=100"),
+      200,
+      json!({"total":2,"data":[{"id":file,"type":"file","file_name":"report.pdf"},{"id":hidden,"title":"hidden note","channel":format!("pn:{}","a".repeat(40))}]}),
+    ),
+    (
+      format!("GET /api/v1/knowledge-bases/{shared}/knowledge?page=1&page_size=100"),
+      200,
+      json!({"total":1,"data":[{"id":shared_file,"type":"file","file_name":"shared.pdf"}]}),
+    ),
+  ]);
+  let scope = agent::Scope {
+    token: "token".into(),
+    workspace_name: "notes".into(),
+    documents: std::collections::BTreeMap::new(),
+    notes: std::collections::BTreeMap::from([(
+      note.clone(),
+      json!({"title":"unsynced note","path":"Private","url":format!("ponynotes://open?viewId={note}&workspaceId={wid}")}),
+    )]),
+  };
+  let account = json!({"workspaces":{wid.to_string():{"id":current},"other":{"id":other}}});
+  let catalog = client
+    .reference_catalog(&account, wid, &scope)
+    .await
+    .unwrap();
+  assert!(!catalog.sources.contains_key(&hidden));
+  assert!(catalog
+    .items
+    .iter()
+    .any(|i| i["kind"] == "file" && i["id"] == current_file));
+  assert_eq!(
+    catalog
+      .items
+      .iter()
+      .filter(|i| i["kind"] == "base" && i["id"] == current)
+      .count(),
+    1
+  );
+  assert!(!catalog.items.iter().any(|i| i["id"] == other));
+  let selected = catalog
+    .resolve(
+      &[references::Reference {
+        kind: "base".into(),
+        id: shared,
+      }],
+      true,
+    )
+    .unwrap();
+  assert_eq!(
+    selected.keys().cloned().collect::<Vec<_>>(),
+    vec![shared_file]
+  );
+  let note_sources = catalog
+    .resolve(
+      &[references::Reference {
+        kind: "note".into(),
+        id: note.clone(),
+      }],
+      true,
+    )
+    .unwrap();
+  assert!(note_sources.contains_key(&format!("note:{note}")));
+  assert!(catalog
+    .resolve(
+      &[references::Reference {
+        kind: "file".into(),
+        id: hidden
+      }],
+      true
+    )
+    .is_err());
+  task.join().unwrap();
+}
+
+#[tokio::test]
+async fn independent_conversation_needs_workspace_access_but_no_note_document() {
+  let uid = Uuid::new_v4();
+  let wid = Uuid::new_v4();
+  let account = json!({"email":"test@example.test","password":"test-password","user_id":"user","tenant_id":7,"api_key":"sync-key","workspaces":{}});
+  let (client, task) = mock(vec![
+    ("GET /gotrue/user".into(), 200, json!({"id":uid})),
+    (
+      "GET /api/workspace ".into(),
+      200,
+      json!({"data":[{"workspace_id":wid}]}),
+    ),
+    (
+      format!("GET /api/workspace/{wid}/folder?depth=1&root_view_id={wid}"),
+      200,
+      json!({"data":{"view_id":wid,"name":"root","children":[]}}),
+    ),
+    (
+      "POST /api/v1/auth/login".into(),
+      200,
+      json!({"token":"independent-token","user":{"id":"user"},"active_tenant":{"id":7}}),
+    ),
+  ]);
+  let scope = client
+    .conversation_scope(&account, uid, "cloud-token", wid)
+    .await
+    .unwrap();
+  assert_eq!(scope.token, "independent-token");
+  assert!(scope.documents.is_empty());
+  task.join().unwrap();
+}
+
+#[tokio::test]
+async fn smart_reasoning_uses_builtin_tuning_and_provisions_a_user_sandbox() {
+  let (client, task) = mock(vec![
+    (
+      "GET /api/v1/agents/builtin-smart-reasoning".into(),
+      200,
+      json!({"data":{"config":{"agent_mode":"smart-reasoning","max_iterations":50,"max_completion_tokens":0,"allowed_tools":["thinking","search_knowledge","search_conversations"]}}}),
+    ),
+    (
+      "GET /api/v1/sandbox-configs".into(),
+      200,
+      json!({"data":[]}),
+    ),
+    (
+      "POST /api/v1/sandbox-configs".into(),
+      200,
+      json!({"data":{"id":"isolated-docker"}}),
+    ),
+  ]);
+  let cfg = client
+    .agent_config("token", "smart-reasoning", "own-model", true, false)
+    .await
+    .unwrap();
+  assert_eq!(cfg["sandbox_config_id"], "isolated-docker");
+  assert_eq!(cfg["max_iterations"], 50);
+  assert_eq!(cfg["max_completion_tokens"], 0);
+  assert_eq!(
+    cfg["allowed_tools"],
+    json!(["thinking", "search_knowledge"])
+  );
+  task.join().unwrap();
+}
+
+#[tokio::test]
+async fn quick_answer_keeps_rag_defaults_without_provisioning_a_sandbox() {
+  let (client, task) = mock(vec![(
+    "GET /api/v1/agents/builtin-quick-answer".into(),
+    200,
+    json!({"data":{"config":{"agent_mode":"quick-answer","enable_rewrite":true,"faq_score_boost":1.2,"sandbox_config_id":"must-not-execute"}}}),
+  )]);
+  let cfg = client
+    .agent_config("token", "quick-answer", "own-model", false, true)
+    .await
+    .unwrap();
+  assert_eq!(cfg["sandbox_config_id"], "");
+  assert_eq!(cfg["enable_rewrite"], true);
+  assert_eq!(cfg["faq_score_boost"], 1.2);
+  task.join().unwrap();
+}
+
+#[tokio::test]
 async fn agent_login_binds_identity_and_limits_knowledge_to_visible_pages() {
   let uid = Uuid::new_v4();
   let wid = Uuid::new_v4();
@@ -532,6 +825,11 @@ async fn native_library_permissions_import_and_connector_redaction() {
       base.clone(),
     ),
     (
+      format!("GET /api/v1/knowledge-bases/{bid}/tags?page=1&page_size=100 "),
+      200,
+      json!({"data":{"data":[],"total":0}}),
+    ),
+    (
       format!("GET /api/v1/knowledge-bases/{bid} "),
       200,
       base.clone(),
@@ -572,9 +870,11 @@ async fn native_library_permissions_import_and_connector_redaction() {
   .await
   .unwrap();
   assert_eq!(
-    options,
-    json!({"chunk_size":640,"chunk_overlap":80,"strategy":"auto"})
+    options["process_config"]["chunking_config"]["chunk_size"],
+    640
   );
+  assert_eq!(options["version"], 2);
+  assert_eq!(options["tags"], json!([]));
   assert_eq!(
     read(
       &client,
@@ -614,11 +914,11 @@ async fn native_library_permissions_import_and_connector_redaction() {
   task.join().unwrap();
   let requests = requests.lock().unwrap();
   assert_eq!(
-    requests[2].1,
+    requests[3].1,
     json!({"url":"https://example.test/article","process_config":{"chunking_config":{
     "chunk_size":800,"chunk_overlap":100,"strategy":"heading","separators":["\n\n"],"enable_multimodal":true}}})
   );
-  assert!(requests[2]
+  assert!(requests[3]
     .0
     .to_ascii_lowercase()
     .contains("x-api-key: server-secret"));
@@ -952,6 +1252,11 @@ async fn native_database_create_recovery_concurrent_settings_and_workspace_sync(
         "GET /api/v1/models ".into(),
         200,
         json!({"data":[remote(&legacy_url)]}),
+      ),
+      (
+        "GET /api/v1/system/parser-engines ".into(),
+        200,
+        json!({"data":[]}),
       ),
     ]
   };

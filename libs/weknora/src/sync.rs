@@ -209,6 +209,22 @@ async fn provision(
     .collect::<Vec<_>>();
   service["embedding_model_id"] = json!(preferred_model(&embedding, "Embedding"));
   service["summary_model_id"] = json!(preferred_model(&models, "KnowledgeQA"));
+  // Cloud receives only the selectable metadata, never the administrator's credentials.
+  service["parse_models"] = json!(models.iter()
+    .filter(|m| m["status"].as_str().unwrap_or("active") == "active")
+    .filter(|m| matches!(m["type"].as_str(), Some("VLLM" | "ASR")))
+    .map(|m| json!({"id":m["id"],"name":m["display_name"].as_str().filter(|s|!s.is_empty()).or_else(||m["name"].as_str()).unwrap_or(""),"type":m["type"]}))
+    .collect::<Vec<_>>());
+  if let Ok(response) = admin(client, &login, "system/parser-engines", Method::GET, None).await {
+    service["parse_engines"] = json!(array(&response["data"])?
+      .iter()
+      .filter(|e| e["Available"] == true
+        && e["FileTypes"]
+          .as_array()
+          .is_some_and(|types| types.iter().any(|t| t == "html")))
+      .map(|e| json!({"id":e["Name"],"name":e["Name"]}))
+      .collect::<Vec<_>>());
+  }
   persist(connection, "service", None, &service).await?;
   state["service"] = service;
   Ok(login)

@@ -296,7 +296,7 @@ async fn complete_upload_handler(
   Ok(AppResponse::Ok().into())
 }
 
-#[instrument(skip(state, payload), err)]
+#[instrument(skip(state, payload, req), err)]
 async fn put_blob_handler(
   user_uuid: UserUuid,
   state: Data<AppState>,
@@ -304,8 +304,10 @@ async fn put_blob_handler(
   content_type: web::Header<ContentType>,
   content_length: web::Header<ContentLength>,
   payload: Payload,
+  req: HttpRequest,
 ) -> Result<JsonAppResponse<()>> {
   let path = path.into_inner();
+  crate::api::agent::authorize_artifact_blob(&state, &req, path.workspace_id, &path.file_id).await?;
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
   let workspace_id = path.workspace_id;
   state
@@ -376,13 +378,15 @@ async fn put_blob_handler(
   Ok(AppResponse::Ok().into())
 }
 
-#[instrument(level = "debug", skip(state), err)]
+#[instrument(level = "debug", skip(state, req), err)]
 async fn delete_blob_handler(
   user_uuid: UserUuid,
   state: Data<AppState>,
   path: web::Path<BlobPathV0>,
+  req: HttpRequest,
 ) -> Result<JsonAppResponse<()>> {
   let path = path.into_inner();
+  crate::api::agent::authorize_artifact_blob(&state, &req, path.workspace_id, &path.file_id).await?;
   let workspace_id = path.workspace_id;
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
   state
@@ -405,7 +409,7 @@ async fn delete_blob_handler(
   Ok(AppResponse::Ok().into())
 }
 
-#[instrument(level = "debug", skip(state), err)]
+#[instrument(level = "debug", skip(state, req), err)]
 async fn get_blob_v1_handler(
   state: Data<AppState>,
   path: web::Path<BlobPathV1>,
@@ -415,13 +419,15 @@ async fn get_blob_v1_handler(
   get_blob_by_object_key(state, &path, req).await
 }
 
-#[instrument(level = "debug", skip(state), err)]
+#[instrument(level = "debug", skip(state, req), err)]
 async fn delete_blob_v1_handler(
   user_uuid: UserUuid,
   state: Data<AppState>,
   path: web::Path<BlobPathV1>,
+  req: HttpRequest,
 ) -> Result<JsonAppResponse<()>> {
   let path = path.into_inner();
+  crate::api::agent::authorize_artifact_blob(&state, &req, path.workspace_id, &path.file_id).await?;
   let workspace_id = path.workspace_id;
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
   state
@@ -448,6 +454,7 @@ async fn get_blob_by_object_key(
   key: &impl BlobKey,
   req: HttpRequest,
 ) -> Result<HttpResponse<BoxBody>> {
+  let protected = crate::api::agent::authorize_artifact_blob(&state, &req, *key.workspace_id(), key.e_tag()).await?;
   // Get the metadata
   let result = state
     .bucket_storage
@@ -535,7 +542,7 @@ async fn get_blob_by_object_key(
           .append_header((CONTENT_TYPE, metadata.file_type))
           .append_header((LAST_MODIFIED, metadata.modified_at.to_rfc2822()))
           .append_header((CONTENT_LENGTH, blob.len()))
-          .append_header((CACHE_CONTROL, "public, immutable, max-age=31536000"))
+          .append_header((CACHE_CONTROL, if protected { "private, no-store" } else { "public, immutable, max-age=31536000" }))
           .body(blob);
 
       Ok(response)
@@ -550,7 +557,7 @@ async fn get_blob_by_object_key(
   }
 }
 
-#[instrument(level = "debug", skip(state), err)]
+#[instrument(level = "debug", skip(state, req), err)]
 async fn get_blob_handler(
   state: Data<AppState>,
   path: web::Path<BlobPathV0>,
@@ -560,12 +567,14 @@ async fn get_blob_handler(
   get_blob_by_object_key(state, &blob_path, req).await
 }
 
-#[instrument(level = "debug", skip(state), err)]
+#[instrument(level = "debug", skip(state, req), err)]
 async fn get_blob_metadata_handler(
   state: Data<AppState>,
   path: web::Path<BlobPathV0>,
+  req: HttpRequest,
 ) -> Result<JsonAppResponse<BlobMetadata>> {
   let path = path.into_inner();
+  crate::api::agent::authorize_artifact_blob(&state, &req, path.workspace_id, &path.file_id).await?;
 
   // Get the metadata
   let metadata = state
@@ -584,12 +593,14 @@ async fn get_blob_metadata_handler(
   Ok(Json(AppResponse::Ok().with_data(metadata)))
 }
 
-#[instrument(level = "debug", skip(state), err)]
+#[instrument(level = "debug", skip(state, req), err)]
 async fn get_blob_metadata_v1_handler(
   state: Data<AppState>,
   path: web::Path<BlobPathV1>,
+  req: HttpRequest,
 ) -> Result<JsonAppResponse<BlobMetadata>> {
   let path = path.into_inner();
+  crate::api::agent::authorize_artifact_blob(&state, &req, path.workspace_id, &path.file_id).await?;
 
   // Get the metadata
   let metadata = state
@@ -632,6 +643,7 @@ async fn get_all_workspace_blob_metadata_handler(
     .await
     .map_err(AppResponseError::from)?
     .into_iter()
+    .filter(|meta| !meta.file_id.starts_with("pn-agent-v1-"))
     .map(|meta| BlobMetadata {
       workspace_id: meta.workspace_id,
       file_id: meta.file_id,

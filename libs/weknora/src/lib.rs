@@ -3,7 +3,9 @@ pub mod agent;
 pub mod embedding;
 pub mod library;
 mod notes;
+pub mod references;
 pub mod sync;
+mod web_import;
 
 use anyhow::{anyhow, ensure, Result};
 use reqwest::{Client as HttpClient, Method, StatusCode};
@@ -25,6 +27,19 @@ pub struct Client {
 }
 
 impl Client {
+  pub async fn agent_file(&self, token: &str, path: &str) -> Result<reqwest::Response> {
+    let response = self
+      .http
+      .get(self.base.clone() + path)
+      .bearer_auth(token)
+      .timeout(Duration::from_secs(600))
+      .send()
+      .await
+      .map_err(|_| anyhow!("knowledge upstream unavailable"))?;
+    ensure!(response.status().is_success(), "artifact unavailable");
+    Ok(response)
+  }
+
   /// Authenticated JSON calls stay on the configured internal WeKnora origin.
   pub async fn agent_request(
     &self,

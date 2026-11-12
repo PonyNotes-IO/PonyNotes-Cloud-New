@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use crate::{biz::authentication::jwt::UserUuid, state::AppState};
 
 mod conversations;
+pub(crate) use conversations::authorize_artifact_blob;
 mod note_tools;
 mod provisioning;
 
@@ -176,7 +177,16 @@ pub fn agent_scope() -> Scope {
         .app_data(web::JsonConfig::default().limit(1024 * 1024))
         .route(web::post().to(note_tools::rpc)),
     )
+    .route(
+      "/conversations/{workspace_id}/references",
+      web::get().to(conversations::reference_catalog),
+    )
+    .route(
+      "/conversations/{workspace_id}/references/{knowledge_id}",
+      web::get().to(conversations::reference_file),
+    )
     .service(conversations::scope())
+    .service(conversations::collection_scope())
     .route("/models", web::get().to(models))
     .route("/usage", web::get().to(usage))
     .route("/session", web::post().to(create_session))
