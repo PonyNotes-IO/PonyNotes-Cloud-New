@@ -125,6 +125,10 @@ def main():
     assert writable, 'No writable workspace available'
     uid, account, wid, mapping = writable[0]
     auth = {'Authorization': 'Bearer ' + token(uid, secret)}
+    agent_account = state.get('users', {}).get(uid, {})
+    agent_kb = agent_account.get('workspaces', {}).get(wid, {}).get('id')
+    assert agent_kb, 'Existing Agent tenant mapping missing'
+    agent_before = {e['id'] for e in entries(agent_account['api_key'], agent_kb) if e['parse_status'] != 'deleting'}
     marker = 'native-sync-check-' + uuid.uuid4().hex
     path = f'/api/workspace/{wid}/quick-note'
     data = lambda text: [{'type': 'paragraph', 'attributes': {'delta': [{'insert': text}]}}]
@@ -132,15 +136,21 @@ def main():
     oid = note['id']
     channel = 'pn:' + hashlib.sha256(f'{wid}/quick/{oid}/0'.encode()).hexdigest()[:40]
     find = lambda: [e for e in entries(account['api_key'], mapping['id']) if e.get('channel') == channel and e['parse_status'] != 'deleting']
+    find_agent = lambda: [e for e in entries(agent_account['api_key'], agent_kb) if e.get('channel') == channel and e['parse_status'] != 'deleting']
     try:
         sync_once()
         found = find()
         assert len(found) == 1 and marker in found[0]['metadata']['content']
+        agent_found = find_agent()
+        assert len(agent_found) == 1 and marker in agent_found[0]['metadata']['content']
+        agent_id = agent_found[0]['id']
         kid = found[0]['id']
         http('http://127.0.0.1', path + '/' + oid, 'PUT', {'data': data(marker + '-updated')}, auth)
         sync_once()
         found = find()
         assert len(found) == 1 and found[0]['id'] == kid and marker + '-updated' in found[0]['metadata']['content']
+        agent_found = find_agent()
+        assert len(agent_found) == 1 and agent_found[0]['id'] == agent_id and marker + '-updated' in agent_found[0]['metadata']['content']
         sync_once()
         assert len(find()) == 1 and find()[0]['id'] == kid
     finally:
@@ -148,16 +158,62 @@ def main():
         sync_once()
     # WeKnora accepts deletion before its background cleanup removes the entry.
     for _ in range(60):
-        if not find():
+        if not find() and not find_agent():
             break
         time.sleep(1)
     assert not find(), 'Temporary knowledge was not removed'
+    assert not find_agent(), 'Temporary Agent knowledge was not removed'
+    assert agent_before == {e['id'] for e in entries(agent_account['api_key'], agent_kb) if e['parse_status'] != 'deleting'}, 'Existing Agent knowledge IDs changed'
     after_ids = {(uid, wid): {e['id'] for e in entries(a['api_key'], m['id']) if e['parse_status'] != 'deleting'}
         for uid, a in accounts for wid, m in a['workspaces'].items()}
     assert after_ids == before_ids, 'Preexisting knowledge IDs changed'
     after_custom = {bid: {item['id'] for item in entries(state['service']['api_key'], bid)} for bid in before_custom}
     assert before_custom == after_custom, 'Custom knowledge IDs changed'
     print('PASS native create/update/delete, idempotency, and preservation of existing knowledge IDs', flush=True)
+
+    proxy = mapping['embedding_proxy']
+    owner = int(command('docker', 'compose', 'exec', '-T', 'postgres', 'psql', '-U', 'postgres', '-d', 'ponynotes', '-Atc',
+        f"SELECT owner_uid FROM af_workspace WHERE workspace_id='{wid}'::uuid;").strip())
+    usage = lambda: int(command('docker', 'compose', 'exec', '-T', 'postgres', 'psql', '-U', 'postgres', '-d', 'ponynotes', '-Atc',
+        f"SELECT coalesce(sum(usage_count),0) FROM af_user_subscription_usage WHERE uid={owner} AND usage_type='ai_tokens';").strip())
+    internal = 'http://' + container['NetworkSettings']['Networks']['ponynotes-knowledge']['IPAddress'] + ':8000'
+    embedding_path = f'/internal/knowledge/{wid}/v1/embeddings'
+    before_usage = usage()
+    result = http(internal, embedding_path, 'POST', {'model': proxy['name'], 'input': 'Rust knowledge deployment check'},
+        {'Authorization': 'Bearer ' + proxy['token']})
+    assert len(result['data'][0]['embedding']) == proxy['parameters']['dimension']
+    assert result['usage']['total_tokens'] > 0 and usage() - before_usage >= result['usage']['total_tokens']
+    for base, expected in [(internal, 401), ('http://127.0.0.1', 404)]:
+        try:
+            http(base, embedding_path, 'POST', {'model': proxy['name'], 'input': 'test'})
+            raise AssertionError('Unauthenticated embedding request accepted')
+        except urllib.error.HTTPError as error:
+            assert error.code == expected
+    print('PASS real embedding dimensions, workspace owner accounting and private endpoint isolation', flush=True)
+
+    options = http('http://127.0.0.1', '/api/knowledge/web_import_options', 'POST',
+        {'workspace_id': wid, 'base_id': wid}, auth)['data']
+    payload = {'workspace_id': wid, 'base_id': wid, 'url': 'https://example.com/?ponynotes_native_check=' + uuid.uuid4().hex, **options}
+    imported = http('http://127.0.0.1', '/api/knowledge/import_url', 'POST', payload, auth)['data']['document_id']
+    try:
+        try:
+            http('http://127.0.0.1', '/api/knowledge/import_url', 'POST', payload, auth)
+            raise AssertionError('Duplicate URL accepted')
+        except urllib.error.HTTPError as error:
+            assert error.code == 409
+        for _ in range(120):
+            entry = http('http://127.0.0.1:18081/api/v1/', 'knowledge/' + imported,
+                headers={'X-API-Key': account['api_key']})['data']
+            assert entry['parse_status'] != 'failed', 'Web import parsing failed'
+            if entry['parse_status'] == 'completed':
+                break
+            time.sleep(2)
+        else:
+            raise AssertionError('Web import did not complete')
+    finally:
+        http('http://127.0.0.1:18081/api/v1/', 'knowledge/' + imported, 'DELETE',
+            headers={'X-API-Key': account['api_key']})
+    print('PASS real webpage import, parsing and duplicate URL rejection; temporary content removed', flush=True)
     for unit in ['ponynotes-weknora-sync.timer', 'ponynotes-weknora-sync.service', 'ponynotes-weknora-search.service']:
         assert subprocess.run(['systemctl', 'is-active', '--quiet', unit]).returncode != 0
     print('PASS all legacy Python runtime units inactive', flush=True)

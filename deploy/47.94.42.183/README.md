@@ -84,7 +84,7 @@ curl -fsS http://127.0.0.1:11434/api/version
 
 同步覆盖云端文档、数据库结构／记录／记录正文和随手记，保留附件引用；AI 会话不在同步范围。Worker 使用普通成员的短期令牌逐个读取，排除 Guest，任一成员扫描失败均不清理旧索引。全部扫描和写入成功后只清理 `pn:` 受管来源，网页、手动资料和连接器资料保留。数据库来源按可见视图保留标识，随手记写入所属用户；多个 Worker 用 PostgreSQL advisory lock 防止重复运行。
 
-`af_weknora_sync_state.state` 保存共享库映射、服务端凭据和向量代理，`settings` 保存自建库、可见性、收藏和待完成创建。修改设置使用数据库行锁，Worker 只更新自己的状态字段。稳定 UUID 与先保存后创建的流程支持远端响应丢失后的重试。旧 `state.users` 仅保留作回退资料，不再参与运行；新迁移不修改已应用 SQL 文件。
+`af_weknora_sync_state.state` 保存共享库映射、服务端凭据和向量代理，`settings` 保存自建库、可见性、收藏和待完成创建。修改设置使用数据库行锁，Worker 只更新自己的状态字段。稳定 UUID 与先保存后创建的流程支持远端响应丢失后的重试。`state.users` 保留已部署 Agent 的独立租户及会话索引，沿用 Rust 同步；公共知识库不使用这些用户索引。Agent 同步与公共库同步共用锁并分开保存报告，保留已有会话和文档 ID。新迁移不修改已应用 SQL 文件。
 
 网页导入先通过 `web_import_options` 读取当前库参数，再用 `import_url` 提交 URL、拆分策略、分块大小与重叠。其余拆分配置保留，由 WeKnora 抓取 URL；重复 URL 返回 409。协议与 `feat/mcp-agent-access` 客户端兼容。
 

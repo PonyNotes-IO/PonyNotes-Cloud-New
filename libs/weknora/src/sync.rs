@@ -1,3 +1,6 @@
+#[path = "agent_sync.rs"]
+mod agent_sync;
+
 use crate::notes::Notes;
 use crate::{array, managed, not_found, optional_array, text, Client};
 use anyhow::{anyhow, ensure, Context, Result};
@@ -511,7 +514,7 @@ async fn cycle(connection: &mut PgConnection, client: &Client) -> Result<Value> 
         .push(json!({"workspace":wid,"error":"sync_failed"})),
     }
   }
-  // The old per-user mappings remain as rollback data, never as live search/sync targets.
+  // Public library indexes are shared; isolated Agent indexes retain their existing identities.
   for (wid, mapping) in state["workspaces"]
     .as_object()
     .ok_or_else(|| anyhow!("invalid mappings"))?
@@ -536,6 +539,22 @@ async fn cycle(connection: &mut PgConnection, client: &Client) -> Result<Value> 
         .unwrap()
         .push(json!({"workspace":wid,"error":"cleanup_failed"}));
     }
+  }
+  // Reuse the deployed Rust Agent sync under this same advisory lock.
+  match agent_sync::run(connection, client).await {
+    Ok(agent) => {
+      if let Some(errors) = agent["errors"].as_array() {
+        report["errors"]
+          .as_array_mut()
+          .unwrap()
+          .extend(errors.iter().cloned());
+      }
+      report["agent"] = agent;
+    },
+    Err(_) => report["errors"]
+      .as_array_mut()
+      .unwrap()
+      .push(json!({"error":"agent_sync_failed"})),
   }
   sqlx::query("UPDATE af_weknora_sync_state SET last_run=$1,updated_at=now() WHERE singleton")
     .bind(&report)
