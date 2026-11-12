@@ -242,13 +242,43 @@ def library(authorization, action, payload):
                 config['favorites'][uid] = sorted(favorites)
             save_settings(config)
         return {'updated': True}
-    if action not in ('documents', 'document', 'sources', 'wiki', 'wiki_page'):
+    if action not in ('documents', 'document', 'sources', 'wiki', 'wiki_page',
+            'web_import_options', 'import_url'):
         raise sync.APIError(404)
     state = sync_state()
     mapping = settings().get('bases', {}).get(bid) if bid != wid else state.get('workspaces', {}).get(wid)
     if not mapping or not mapping.get('ready'):
+        if action in ('web_import_options', 'import_url'):
+            raise sync.APIError(503)
         return {'documents': [], 'sources': [], 'pages': [], 'status': 'awaiting_sync'}
     client = sync.WeKnora(key=state['service']['api_key'])
+    if action in ('web_import_options', 'import_url'):
+        workspace = next(w for w in workspaces if w['workspace_id'] == wid)
+        if workspace.get('role') not in ('Owner', 'Member'):
+            raise sync.APIError(403)
+        kb = client.call('knowledge-bases/' + mapping['id'])['data']
+        chunking = kb.get('chunking_config') or {}
+        if action == 'web_import_options':
+            return {'chunk_size': chunking.get('chunk_size') or 512,
+                'chunk_overlap': chunking.get('chunk_overlap', 80),
+                'strategy': chunking.get('strategy') or 'auto'}
+        url = payload.get('url')
+        if not isinstance(url, str) or not 1 <= len(url.strip()) <= 2048 or re.search(r'\s', url.strip()):
+            raise sync.APIError(400)
+        url = url.strip()
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password:
+            raise sync.APIError(400)
+        size, overlap, strategy = payload.get('chunk_size'), payload.get('chunk_overlap'), payload.get('strategy')
+        if (type(size) is not int or not 100 <= size <= 4000 or type(overlap) is not int
+                or not 0 <= overlap <= 500 or overlap >= size
+                or strategy not in ('auto', 'heading', 'heuristic', 'recursive', 'legacy')):
+            raise sync.APIError(400)
+        # WeKnora owns URL fetching and SSRF checks; preserve all other base settings.
+        entry = client.call('knowledge-bases/' + mapping['id'] + '/knowledge/url', 'POST', {
+            'url': url, 'process_config': {'chunking_config': {
+                **chunking, 'chunk_size': size, 'chunk_overlap': overlap, 'strategy': strategy}}})['data']
+        return {'document_id': entry['id']}
     if action == 'sources':
         sources = client.call('datasource?' + urllib.parse.urlencode({'kb_id': mapping['id']})) or []
         # Never forward connector credentials, settings, cursors or raw sync logs.
@@ -373,7 +403,7 @@ class Handler(BaseHTTPRequestHandler):
             action = self.path.removeprefix('/api/knowledge/')
             if not internal and (self.path != '/api/knowledge/' + action or action not in (
                     'search', 'bases', 'create', 'visibility', 'favorite', 'documents', 'document',
-                    'sources', 'wiki', 'wiki_page')):
+                    'sources', 'wiki', 'wiki_page', 'web_import_options', 'import_url')):
                 raise sync.APIError(404)
             length = int(self.headers.get('Content-Length', '0'))
             if not 0 < length <= (8000000 if internal else 16384):
@@ -389,9 +419,9 @@ class Handler(BaseHTTPRequestHandler):
                 result = search(authorization, payload) if action == 'search' else library(authorization, action, payload)
                 self.respond(200, {'success': True, 'data': result})
         except sync.APIError as error:
-            status = error.status if error.status in (400, 401, 403, 404) else 503
+            status = error.status if error.status in (400, 401, 403, 404, 409) else 503
             messages = {400: '知识库参数错误。', 401: '登录已过期，请重新登录。',
-                403: '你没有此知识库的访问或管理权限。', 404: '知识库接口不存在。'}
+                403: '你没有此知识库的访问或管理权限。', 404: '知识库接口不存在。', 409: '该网页已存在于知识库中。'}
             self.respond(status, {'success': False, 'message': messages.get(status, '知识库暂时不可用，请稍后重试。')})
         except (ValueError, TypeError):
             self.respond(400, {'success': False, 'message': '检索参数错误。'})

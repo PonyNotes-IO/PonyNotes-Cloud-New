@@ -23,6 +23,7 @@ workspace_owner = 1
 entries = {}
 hits = []
 used_keys = []
+url_imports = []
 wiki_enabled = True
 created = {}
 lost_creates = set()
@@ -66,6 +67,12 @@ class Client:
         used_keys.append(key)
 
     def call(self, path, method='GET', payload=None):
+        if path.endswith('/knowledge/url'):
+            assert method == 'POST'
+            url_imports.append((path, payload))
+            if payload['url'].endswith('/duplicate'):
+                raise m.sync.APIError(409)
+            return {'data': {'id': 'imported-url'}}
         if path == 'knowledge-bases' and method == 'POST':
             assert payload['embedding_model_id'] == 'workspace-embedding'
             assert payload['summary_model_id'] == 'workspace-chat'
@@ -83,6 +90,8 @@ class Client:
                 return {'data': [] if path.endswith('/hybrid-search') else created[bid]}
         if path == 'knowledge-bases/workspace-kb':
             return {'data': {'id': 'workspace-kb', 'embedding_model_id': 'embedding',
+                'chunking_config': {'chunk_size': 640, 'chunk_overlap': 80,
+                    'strategy': 'heading', 'separators': ['\n\n'], 'enable_parent_child': True},
                 'type': 'document', 'indexing_strategy': {'wiki_enabled': wiki_enabled}}}
         if path.startswith('datasource?'):
             assert path == 'datasource?kb_id=workspace-kb'
@@ -155,6 +164,31 @@ with tempfile.TemporaryDirectory() as directory:
         entries[kid]['type'] = kind
     assert set(uploads) <= {d['id'] for d in m.library(b, 'documents', {'workspace_id': wid})['documents']}
     assert m.library(b, 'document', {'workspace_id': wid, 'document_id': uploads[0]})['content'] == 'Workspace upload content'
+    options = m.library(b, 'web_import_options', {'workspace_id': wid})
+    assert options == {'chunk_size': 640, 'chunk_overlap': 80, 'strategy': 'heading'}
+    web_import = {'workspace_id': wid, 'url': '  https://example.com/article  ',
+        'chunk_size': 800, 'chunk_overlap': 100, 'strategy': 'auto',
+        'process_config': {'embedding_model_id': 'must-not-use'}, 'kb_id': 'wrong-kb'}
+    assert m.library(b, 'import_url', web_import) == {'document_id': 'imported-url'}
+    assert url_imports == [('knowledge-bases/workspace-kb/knowledge/url', {
+        'url': 'https://example.com/article', 'process_config': {'chunking_config': {
+            'chunk_size': 800, 'chunk_overlap': 100, 'strategy': 'auto',
+            'separators': ['\n\n'], 'enable_parent_child': True}}})]
+    for extra, authorization, status in [({'url': ''}, b, 400),
+            ({'url': 'ftp://example.com'}, b, 400), ({'url': 'https://'}, b, 400),
+            ({'url': 'https://user:password@example.com'}, b, 400),
+            ({'url': 'https://example.com/a b'}, b, 400),
+            ({'url': 'https://example.com/' + 'a' * 2048}, b, 400),
+            ({'chunk_size': True}, b, 400), ({'chunk_size': 99}, b, 400),
+            ({'chunk_overlap': 501}, b, 400), ({'chunk_size': 100}, b, 400),
+            ({'strategy': 'invalid'}, b, 400), ({'workspace_id': other}, b, 403),
+            ({}, 'Bearer valid-new-member', 403), ({'url': 'https://example.com/duplicate'}, b, 409)]:
+        try:
+            m.library(authorization, 'import_url', {**web_import, **extra})
+            raise AssertionError('Invalid/unauthorized web import allowed')
+        except m.sync.APIError as error:
+            assert error.status == status
+    assert len(url_imports) == 2  # Only the valid and duplicate URLs reached WeKnora.
     changed_channel = str(uuid.uuid4())
     add(changed_channel, 'private quick note',
         '来源：小马笔记\n\n目录：随手记\n\n所属用户：user-a\n\nMust not leak', source_channel='web')
@@ -286,13 +320,21 @@ with tempfile.TemporaryDirectory() as directory:
         with urllib.request.urlopen(req, timeout=5) as response:
             assert response.headers['Cache-Control'] == 'no-store'
             assert json.load(response)['data']['bases'][0]['workspace_id'] == wid
-        for action in ('sources', 'wiki', 'wiki_page', 'create'):
+        for action in ('sources', 'wiki', 'wiki_page', 'create', 'web_import_options', 'import_url'):
             req = urllib.request.Request(endpoint + action,
-                data=json.dumps({**create, 'workspace_id': wid, 'slug': 'shared',
+                data=json.dumps({**create, **web_import, 'workspace_id': wid, 'slug': 'shared',
                     'request_id': str(uuid.uuid4())}).encode(),
                 headers={'Authorization': b, 'Content-Type': 'application/json'})
             with urllib.request.urlopen(req, timeout=5) as response:
                 assert json.load(response)['success'] is True
+        duplicate = urllib.request.Request(endpoint + 'import_url',
+            data=json.dumps({**web_import, 'url': 'https://example.com/duplicate'}).encode(),
+            headers={'Authorization': b, 'Content-Type': 'application/json'})
+        try:
+            urllib.request.urlopen(duplicate, timeout=5)
+            raise AssertionError('Duplicate URL should return 409')
+        except urllib.error.HTTPError as error:
+            assert error.code == 409
         for action, data, expected in [('bases', b'{}', 401),
                 ('unknown', b'{}', 404), ('bases', b'[]', 400)]:
             req = urllib.request.Request(endpoint + action, data=data)
