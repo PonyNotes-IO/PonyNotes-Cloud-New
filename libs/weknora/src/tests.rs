@@ -5,6 +5,78 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
 
+#[tokio::test]
+async fn agent_login_binds_identity_and_limits_knowledge_to_visible_pages() {
+  let uid = Uuid::new_v4();
+  let wid = Uuid::new_v4();
+  let page = Uuid::new_v4();
+  let hidden = Uuid::new_v4();
+  let entry = |id: Uuid| json!({"id":id,"knowledge_base_id":"kb","title":"笔记","channel":format!("pn:{}","a".repeat(40)),"metadata":{"content":format!("ponynotes://open?viewId={id}&workspaceId={wid}")}});
+  let account = json!({"email":"test@example.test","password":"test-password","user_id":"user","tenant_id":7,"api_key":"sync-key","workspaces":{wid.to_string():{"id":"kb"}}});
+  let (client, task) = mock(vec![
+    ("GET /gotrue/user".into(), 200, json!({"id":uid})),
+    (
+      "GET /api/workspace ".into(),
+      200,
+      json!({"data":[{"workspace_id":wid}]}),
+    ),
+    (
+      format!("GET /api/workspace/{wid}/folder?depth=1&root_view_id={wid}"),
+      200,
+      json!({"data":{"view_id":wid,"name":"root","children":[{"view_id":page}]}}),
+    ),
+    (
+      format!("GET /api/workspace/{wid}/folder?depth=1&root_view_id={page}"),
+      200,
+      json!({"data":{"view_id":page,"name":"note","children":[]}}),
+    ),
+    (
+      "POST /api/v1/auth/login".into(),
+      200,
+      json!({"token":"agent-token","user":{"id":"user"},"active_tenant":{"id":7}}),
+    ),
+    (
+      "GET /api/v1/knowledge-bases/kb/knowledge?".into(),
+      200,
+      json!({"data":[entry(page),entry(hidden)],"total":2}),
+    ),
+  ]);
+  let scope = client
+    .agent_scope(&account, uid, "cloud-token", wid, page)
+    .await
+    .unwrap();
+  assert_eq!(scope.token, "agent-token");
+  assert_eq!(scope.documents.len(), 1);
+  assert!(scope.documents.contains_key(&page.to_string()));
+  task.join().unwrap();
+}
+
+#[tokio::test]
+async fn agent_history_reads_all_pages_in_order() {
+  let session = Uuid::new_v4();
+  let page:Vec<Value>=(1..=100).rev().map(|i|json!({"id":format!("{i:03}"),"created_at":format!("2026-11-11T00:00:00.{i:03}Z"),"role":"assistant","is_completed":true})).collect();
+  let (client, task) = mock(vec![
+    (
+      format!("GET /api/v1/messages/{session}/load?limit=100 "),
+      200,
+      json!({"data":page}),
+    ),
+    (
+      format!("GET /api/v1/messages/{session}/load?limit=100&before_time="),
+      200,
+      json!({"data":[{"id":"000","created_at":"2026-11-11T00:00:00.000Z","role":"user"}]}),
+    ),
+  ]);
+  let history = client
+    .agent_history("agent-token", &session.to_string())
+    .await
+    .unwrap();
+  assert_eq!(history.len(), 101);
+  assert_eq!(history[0]["id"], "000");
+  assert_eq!(history[100]["id"], "100");
+  task.join().unwrap();
+}
+
 /// Tiny local HTTP server; exercises real requests without credentials or external services.
 fn mock(responses: Vec<(String, u16, Value)>) -> (Client, thread::JoinHandle<()>) {
   let (client, task, _) = mock_recorded(responses);

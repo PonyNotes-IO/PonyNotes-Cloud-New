@@ -1,4 +1,5 @@
 //! Shared WeKnora integration used by the existing Cloud and Worker processes.
+pub mod agent;
 pub mod embedding;
 pub mod library;
 mod notes;
@@ -24,6 +25,59 @@ pub struct Client {
 }
 
 impl Client {
+  /// Authenticated JSON calls stay on the configured internal WeKnora origin.
+  pub async fn agent_request(
+    &self,
+    token: &str,
+    path: &str,
+    method: Method,
+    payload: Option<&Value>,
+  ) -> Result<Value> {
+    self
+      .request(
+        &(self.base.clone() + path),
+        method,
+        Some(("Authorization", &format!("Bearer {token}"))),
+        payload,
+      )
+      .await
+  }
+
+  pub async fn agent_stream(
+    &self,
+    token: &str,
+    path: &str,
+    method: Method,
+    payload: Option<&Value>,
+  ) -> Result<reqwest::Response> {
+    let mut request = self
+      .http
+      .request(method, self.base.clone() + path)
+      .bearer_auth(token)
+      .timeout(Duration::from_secs(600));
+    if let Some(payload) = payload {
+      request = request.json(payload);
+    }
+    let response = request
+      .send()
+      .await
+      .map_err(|_| anyhow!("knowledge upstream unavailable"))?;
+    ensure!(response.status().is_success(), "agent request rejected");
+    ensure!(
+      response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|s| s.starts_with("text/event-stream")),
+      "invalid agent stream"
+    );
+    Ok(response)
+  }
+
+  pub fn model_base_url(&self) -> String {
+    std::env::var("PONYNOTES_WEKNORA_MODEL_BASE_URL")
+      .unwrap_or_else(|_| format!("{}/api/ai/agent", self.cloud))
+  }
   pub fn from_env() -> Result<Self> {
     let mut client = Self::new(
       std::env::var("PONYNOTES_WEKNORA_URL")

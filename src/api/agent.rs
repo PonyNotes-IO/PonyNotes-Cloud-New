@@ -10,6 +10,8 @@ use serde_json::{json, Value};
 
 use crate::{biz::authentication::jwt::UserUuid, state::AppState};
 
+mod conversations;
+mod note_tools;
 mod provisioning;
 
 const SESSION_SECONDS: u64 = 86400;
@@ -169,6 +171,12 @@ fn gateway(state: &AppState) -> actix_web::Result<&Sub2ApiGateway> {
 
 pub fn agent_scope() -> Scope {
   web::scope("/agent")
+    .service(
+      web::resource("/note-tools")
+        .app_data(web::JsonConfig::default().limit(1024 * 1024))
+        .route(web::post().to(note_tools::rpc)),
+    )
+    .service(conversations::scope())
     .route("/models", web::get().to(models))
     .route("/usage", web::get().to(usage))
     .route("/session", web::post().to(create_session))
@@ -315,17 +323,47 @@ async fn create_session(
 ) -> actix_web::Result<HttpResponse> {
   let uid = user_uid(&user, &state).await?;
   gateway(&state)?.key_for_user(&state, uid).await?;
+  let token = issue_session_token(&state, uid).await?;
+  Ok(
+    HttpResponse::Ok()
+      .insert_header(("Cache-Control", "no-store"))
+      .json(json!({"token": token, "expires_in": SESSION_SECONDS})),
+  )
+}
+
+async fn issue_session_token(state: &AppState, uid: i64) -> actix_web::Result<String> {
   let token = format!("pn-agent-{}", nanoid::nanoid!(48));
   let mut redis = state.redis_connection_manager.clone();
   let _: () = redis
     .set_ex(format!("agent:session:{token}"), uid, SESSION_SECONDS)
     .await
     .map_err(|_| error::ErrorServiceUnavailable("内部模型会话创建失败"))?;
-  Ok(
-    HttpResponse::Ok()
-      .insert_header(("Cache-Control", "no-store"))
-      .json(json!({"token": token, "expires_in": SESSION_SECONDS})),
-  )
+  Ok(token)
+}
+
+fn conversation_model_key(uid: i64, workspace: uuid::Uuid, document: uuid::Uuid) -> String {
+  format!("agent:conversation:model:{uid}:{workspace}:{document}")
+}
+
+async fn revoke_conversation_model(
+  state: &AppState,
+  uid: i64,
+  workspace: uuid::Uuid,
+  document: uuid::Uuid,
+) -> actix_web::Result<()> {
+  let mut redis = state.redis_connection_manager.clone();
+  let token: Option<String> = redis::cmd("GETDEL")
+    .arg(conversation_model_key(uid, workspace, document))
+    .query_async(&mut redis)
+    .await
+    .map_err(|_| error::ErrorServiceUnavailable("模型会话撤销失败"))?;
+  if let Some(token) = token {
+    let _: usize = redis
+      .del(format!("agent:session:{token}"))
+      .await
+      .map_err(|_| error::ErrorServiceUnavailable("模型会话撤销失败"))?;
+  }
+  Ok(())
 }
 
 fn session_token(req: &HttpRequest) -> actix_web::Result<&str> {

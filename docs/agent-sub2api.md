@@ -1,6 +1,6 @@
 # Agent 内部模型接入 sub2api
 
-用户首次进入 Agent 时，cloud 自动为该小马用户创建独立 sub2api 账户和专属 API Key，并保存一对一绑定。用户在模型菜单中直接选择「内部模型」，实际请求使用其自己的 sub2api Key 计费。原有自定义模型仍可独立使用。
+用户首次进入 Agent 时，cloud 自动为该小马用户创建独立 sub2api 账户和专属 API Key，并保存一对一绑定。用户在模型菜单中直接选择「内部模型」，实际请求使用其自己的 sub2api Key 计费。自定义模型继续按自己的服务结算；Agent 改为服务端执行后，需要登录 Cloud 并提供服务端可访问的模型地址。执行链路和发布配置见 [服务端 Agent 接入](agent-weknora.md)。
 
 ## 配置服务端自动开通
 
@@ -42,9 +42,9 @@
 
 ## 请求与积分
 
-- 登录凭证只用于 cloud 的 `GET /api/ai/agent/models`、`GET /api/ai/agent/usage`、`POST /api/ai/agent/session`。
+- 登录凭证用于 cloud 的模型、积分和 `/api/ai/agent/conversations/...` 会话及笔记操作接口；不转交给模型提供方。
 - 模型从绑定 Key 的 sub2api `GET /v1/models` 动态读取，不复用旧 Chat 的固定模型列表。
-- 执行器仅收到 cloud 签发的随机 Agent 会话凭证，通过 `/api/ai/agent/chat/completions` 请求。它既不持有登录 JWT，也不持有 sub2api Key。会话有效期 24 小时，后续任务开始前会在临近到期时刷新；切换模型、断开和退出账号时撤销。撤销失败会显示提示，服务端到期兜底。单个连续运行超过 24 小时的任务需要重新连接。
+- WeKnora 模型配置仅收到 cloud 签发的随机 Agent 模型凭证，通过 `/api/ai/agent/chat/completions` 请求，不持有小马登录 JWT 或 sub2api Key。凭证有效期 24 小时，每轮提交时轮换；停止、客户端断开或退出时撤销。网络中断导致撤销请求无法送达时，客户端停止笔记操作，凭证由到期兜底；单个连续运行超过 24 小时的任务需要重新连接。
 - cloud 按已认证用户查找绑定，覆盖请求中的 `user` 为小马 uid，只转发模型请求。工具调用产生的后续轮次、重试和上下文压缩仍经过相同代理。
 - **sub2api 是唯一计费账本。** 每轮请求的实际费用、模型倍率、余额/套餐/Key 限额都由 sub2api 结算，cloud 不重复扣减旧 Chat 次数。用量明细在 sub2api 对应用户和 Key 的使用记录中查看。
 - 标准余额分组在 Key 有额度或速率限制时，从管理接口读取最新钱包余额；有 Key 总额度时取钱包余额与 Key 剩余额度的较小值。其他模式沿用上游返回的可用额度，`remaining = -1` 显示「积分不限额」。积分按 `PONYNOTES_CREDITS_PER_USD` 换算，调整比例不改变 sub2api 的 USD 账本。
