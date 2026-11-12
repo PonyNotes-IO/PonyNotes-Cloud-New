@@ -139,6 +139,9 @@ impl Client {
     if !status.is_success() {
       return Err(anyhow!(UpstreamStatus(status)));
     }
+    if status == StatusCode::NO_CONTENT {
+      return Ok(Value::Null);
+    }
     let result: Value = response
       .json()
       .await

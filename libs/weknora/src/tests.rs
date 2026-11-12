@@ -417,7 +417,11 @@ fn mock_recorded(
         .lock()
         .unwrap()
         .push((header, serde_json::from_slice(&body).unwrap_or(Value::Null)));
-      let body = payload.to_string();
+      let body = if status == 204 {
+        String::new()
+      } else {
+        payload.to_string()
+      };
       write!(stream,"HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
     }
   });
