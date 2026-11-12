@@ -184,6 +184,8 @@ systemctl disable --now ponynotes-weknora-sync.timer
 
 点击侧栏「知识库」直接打开当前空间的知识库，中间栏保留「文件 / Wiki / 图谱」和库内搜索，右侧预览选中内容。文件列表包含授权的云端同步条目及库内上传、网页、手动条目；同步条目仍检查原页面或随手记权限。`sources` 返回当前库实际绑定的数据源名称、类型和同步状态，不返回连接凭据；`wiki` 分页读取已启用 Wiki 的库，仅返回当前账号可读取全部来源的页面及其可见连线，`wiki_page` 用 `slug` 获取正文并重新鉴权。未启用 Wiki 的库返回空列表。图谱复用客户端现有画布显示这些 Wiki 页面之间的引用。
 
+网页导入需更新客户端和桥接脚本：点击具体知识库的「＋ → 导入网页」，输入 HTTP/HTTPS 地址后进入解析确认页。`web_import_options` 读取当前库的拆分策略、分块大小和重叠；`import_url` 校验空间成员写权限并调用 WeKnora 原生 `knowledge-bases/{id}/knowledge/url`，仅覆盖本次导入的拆分参数，其余处理设置沿用当前库。URL 抓取及 SSRF 防护由 WeKnora 负责，重复地址返回 409，服务凭据不返回客户端。Flutter 弹窗参照上游 `v0.9.0` 的 `frontend/src/views/knowledge/components/KbUploadSourceDropdown.vue`；没有新增解析器或依赖。
+
 设置写入独立的 `/opt/ponynotes-weknora/library/settings.json`（目录 700，文件 600），避免与同步进程覆写 `sync/state.json`。单实例服务用线程锁和原子替换保存。安装器更新 Nginx `/api/knowledge/` 代理，并只为此目录开放 systemd 写权限。执行上文 `--sync-notes` 或 `--knowledge-search` 安装新版桥接，客户端需重新构建；服务端接口已在测试服部署。
 
 独立库记录及创建恢复状态也保存在 `library/settings.json`，不参与默认库的云端镜像同步。侧栏展开和加号创建需要一并更新客户端及桥接脚本；此新增创建接口的本地离线回归覆盖中文名称、私有隔离、共享与收藏、访客拒绝、成员撤权、创建重试恢复及默认同步状态保持。
