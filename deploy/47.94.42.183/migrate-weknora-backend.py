@@ -226,6 +226,7 @@ def migrate(image):
             report = sql("SELECT coalesce(last_run,'null'::jsonb) FROM af_weknora_sync_state WHERE singleton;").strip()
             if report and report != 'null':
                 report = json.loads(report)
+                atomic(backup / 'first-sync-report.json', json.dumps(report, ensure_ascii=False, indent=2))
                 assert not report['errors'], 'Native sync reported errors'
                 assert report['workspaces'], 'Native sync covered no workspaces'
                 break
@@ -246,6 +247,8 @@ def migrate(image):
         print(json.dumps({'workspaces': len(report['workspaces']), 'errors': len(report['errors'])}), flush=True)
     except BaseException:
         run('docker', 'compose', 'stop', 'appflowy_worker', 'appflowy_cloud')
+        # Pending IDs remain recoverable, but no native writer may run against legacy callbacks.
+        sql("UPDATE af_weknora_sync_state SET state=jsonb_set(state,'{native_library_version}','-1'::jsonb) WHERE singleton;")
         # Restore callback URLs with the same model IDs; PUT preserves stored credentials.
         if admin_token:
             for model in model_backup:

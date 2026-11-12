@@ -21,10 +21,18 @@ async fn provision(
   record: &mut Value,
 ) -> Result<()> {
   if record.is_null() {
-    *record = json!({"email":format!("pn-{uid}@cloud.ponynotes.local"),"password":format!("Pn!{}7aA",Uuid::new_v4().simple()),"workspaces":{}});
+    *record = json!({"email":format!("pn-{uid}@cloud.ponynotes.local"),"password":format!("Pn!{}7aA",&Uuid::new_v4().simple().to_string()[..24]),"workspaces":{}});
     persist(connection, uid, record).await?;
   }
   if record["user_id"].is_null() {
+    // Older provisioning generated 38 characters; WeKnora rejects passwords over 32.
+    if record["password"].as_str().is_some_and(|p| p.len() > 32) {
+      record["password"] = json!(format!(
+        "Pn!{}7aA",
+        &Uuid::new_v4().simple().to_string()[..24]
+      ));
+      persist(connection, uid, record).await?;
+    }
     let admin_path = std::env::var("PONYNOTES_WEKNORA_ADMIN_FILE")
       .context("missing WeKnora administrator file")?;
     let credentials: Value = serde_json::from_slice(&tokio::fs::read(admin_path).await?)?;
