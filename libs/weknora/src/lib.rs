@@ -1,4 +1,6 @@
 //! Shared WeKnora integration used by the existing Cloud and Worker processes.
+pub mod embedding;
+pub mod library;
 mod notes;
 pub mod sync;
 
@@ -18,15 +20,19 @@ pub struct Client {
   http: HttpClient,
   base: String,
   cloud: String,
+  ollama: String,
 }
 
 impl Client {
   pub fn from_env() -> Result<Self> {
-    Self::new(
+    let mut client = Self::new(
       std::env::var("PONYNOTES_WEKNORA_URL")
         .unwrap_or_else(|_| "http://ponynotes-weknora-api:8080/api/v1/".into()),
       std::env::var("PONYNOTES_WEKNORA_CLOUD_URL").unwrap_or_else(|_| "http://nginx".into()),
-    )
+    )?;
+    client.ollama = std::env::var("PONYNOTES_WEKNORA_OLLAMA_URL")
+      .unwrap_or_else(|_| "http://host.docker.internal:11434".into());
+    Ok(client)
   }
 
   pub fn new(base: String, cloud: String) -> Result<Self> {
@@ -37,6 +43,7 @@ impl Client {
         .build()?,
       base: base.trim_end_matches('/').to_owned() + "/",
       cloud: cloud.trim_end_matches('/').to_owned(),
+      ollama: "http://host.docker.internal:11434".into(),
     })
   }
 
@@ -67,7 +74,10 @@ impl Client {
       .json()
       .await
       .map_err(|_| anyhow!("invalid upstream response"))?;
-    ensure!(result.is_object(), "invalid upstream response");
+    ensure!(
+      result.is_object() || result.is_array(),
+      "invalid upstream response"
+    );
     ensure!(
       result.get("success") != Some(&json!(false)) && result.get("code").is_none_or(|v| v == 0),
       "upstream rejected request"
@@ -88,17 +98,6 @@ impl Client {
         method,
         Some(("X-API-Key", key)),
         payload,
-      )
-      .await
-  }
-
-  async fn bearer(&self, token: &str, path: &str, payload: &Value) -> Result<Value> {
-    self
-      .request(
-        &(self.base.clone() + path),
-        Method::POST,
-        Some(("Authorization", &format!("Bearer {token}"))),
-        Some(payload),
       )
       .await
   }
@@ -182,7 +181,7 @@ impl Client {
 }
 
 #[derive(Debug)]
-struct UpstreamStatus(StatusCode);
+pub struct UpstreamStatus(pub StatusCode);
 impl std::fmt::Display for UpstreamStatus {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     write!(f, "upstream status {}", self.0.as_u16())
@@ -217,105 +216,6 @@ fn managed(channel: &str) -> bool {
     && channel[3..]
       .bytes()
       .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
-}
-
-/// The caller supplies the authenticated identity and only that user's DB mapping.
-pub async fn search(
-  client: &Client,
-  account: Option<&Value>,
-  uid: Uuid,
-  token: &str,
-  wid: Uuid,
-  query: &str,
-) -> Result<Value> {
-  ensure!(
-    (1..=2000).contains(&query.trim().chars().count()),
-    "invalid search query"
-  );
-  let session = client
-    .request(
-      &format!("{}/gotrue/user", client.cloud),
-      Method::GET,
-      Some(("Authorization", &format!("Bearer {token}"))),
-      None,
-    )
-    .await?;
-  ensure!(
-    text(&session, "id")? == uid.to_string(),
-    "login identity mismatch"
-  );
-  let wid = wid.to_string();
-  let workspaces = client.cloud(token, "workspace").await?;
-  ensure!(
-    array(&workspaces)?.iter().any(|w| w["workspace_id"] == wid),
-    "workspace access denied"
-  );
-  let visible: HashSet<String> = client
-    .views(token, &wid)
-    .await?
-    .iter()
-    .map(|(node, _)| text(node, "view_id").map(str::to_owned))
-    .collect::<Result<_>>()?;
-  let Some(account) = account else {
-    return Ok(json!({"sources":[], "status":"awaiting_sync"}));
-  };
-  let mapping = &account["workspaces"][&wid];
-  if mapping.is_null() {
-    return Ok(json!({"sources":[], "status":"awaiting_sync"}));
-  }
-  let key = text(account, "api_key")?;
-  let kb = text(mapping, "id")?;
-  let knowledge_base = client
-    .weknora(key, &format!("knowledge-bases/{kb}"), Method::GET, None)
-    .await?;
-  ensure!(
-    knowledge_base["data"]["embedding_model_id"]
-      .as_str()
-      .is_some_and(|s| !s.is_empty()),
-    "embedding not configured"
-  );
-  let hits = client
-    .weknora(
-      key,
-      &format!("knowledge-bases/{kb}/hybrid-search"),
-      Method::POST,
-      Some(&json!({"query_text":query.trim(),"match_count":12,"vector_threshold":0.35})),
-    )
-    .await?;
-  let mut sources = Vec::new();
-  let mut seen = HashSet::new();
-  let mut budget = 16000;
-  for hit in optional_array(&hits["data"])? {
-    let Some(kid) = hit["knowledge_id"].as_str() else {
-      continue;
-    };
-    if seen.contains(kid) {
-      continue;
-    }
-    let response = client
-      .weknora(key, &format!("knowledge/{kid}"), Method::GET, None)
-      .await?;
-    let entry = &response["data"];
-    if entry["knowledge_base_id"] != kb || !managed(entry["channel"].as_str().unwrap_or("")) {
-      continue;
-    }
-    let content = entry["metadata"]["content"].as_str().unwrap_or("");
-    let Some(url) = source_url(content, &wid, &visible) else {
-      continue;
-    };
-    let chunk = hit["content"].as_str().unwrap_or("");
-    if chunk.trim().is_empty() {
-      continue;
-    }
-    let chunk: String = chunk.chars().take(3500.min(budget)).collect();
-    budget -= chunk.chars().count();
-    sources.push(json!({"title":text(entry,"title")?,"url":url,"content":chunk}));
-    seen.insert(kid.to_owned());
-    if sources.len() == 5 || budget == 0 {
-      break;
-    }
-  }
-  Ok(json!({"status":if sources.is_empty(){"no_match"}else{"matched"},"sources":sources}))
 }
 
 fn source_url(content: &str, wid: &str, visible: &HashSet<String>) -> Option<String> {

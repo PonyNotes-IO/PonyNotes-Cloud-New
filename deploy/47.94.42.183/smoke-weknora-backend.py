@@ -65,7 +65,26 @@ def main():
     state = json.loads(command('docker', 'compose', 'exec', '-T', 'postgres', 'psql', '-U', 'postgres', '-d', 'ponynotes', '-Atc', 'SELECT state FROM af_weknora_sync_state WHERE singleton;'))
     container = json.loads(command('docker', 'inspect', 'ponynotes-appflowy_cloud-1'))[0]
     secret = next(v.split('=', 1)[1] for v in container['Config']['Env'] if v.startswith('APPFLOWY_GOTRUE_JWT_SECRET='))
-    accounts = [(uid, account) for uid, account in state['users'].items() if account['workspaces']]
+    assert state.get('native_library_version') == 1, 'Native cutover not completed'
+    config = json.loads(command('docker', 'compose', 'exec', '-T', 'postgres', 'psql', '-U', 'postgres', '-d', 'ponynotes', '-Atc', 'SELECT settings FROM af_weknora_sync_state WHERE singleton;'))
+    users = json.loads(command('docker', 'compose', 'exec', '-T', 'postgres', 'psql', '-U', 'postgres', '-d', 'ponynotes', '-Atc',
+        "SELECT coalesce(json_agg(u.uuid),'[]') FROM af_user u JOIN auth.users a ON a.id=u.uuid WHERE a.deleted_at IS NULL AND (a.banned_until IS NULL OR a.banned_until<now());"))
+    accounts = []
+    for uid in users:
+        auth = {'Authorization': 'Bearer ' + token(uid, secret)}
+        visible = http('http://127.0.0.1', '/api/knowledge/bases', 'POST', {}, auth)['data']['bases']
+        defaults = {base['workspace_id']: state['workspaces'][base['workspace_id']]
+            for base in visible if base['id'] == base['workspace_id'] and base.get('ready')}
+        if defaults:
+            accounts.append((uid, {'api_key': state['service']['api_key'], 'workspaces': defaults}))
+        roles = {w['workspace_id']: w['role'] for w in http('http://127.0.0.1/api/', 'workspace?include_role=true', headers=auth)['data']}
+        for base in visible:
+            if base.get('ready') and roles.get(base['workspace_id']) in ('Owner', 'Member'):
+                options = http('http://127.0.0.1', '/api/knowledge/web_import_options', 'POST',
+                    {'workspace_id': base['workspace_id'], 'base_id': base['id']}, auth)
+                assert set(options['data']) == {'chunk_size', 'chunk_overlap', 'strategy'}
+    before_custom = {bid: {item['id'] for item in entries(state['service']['api_key'], bid)}
+        for bid, base in config.get('bases', {}).items() if base.get('ready')}
     assert accounts
     before_ids = {(uid, wid): {e['id'] for e in entries(account['api_key'], mapping['id']) if e['parse_status'] != 'deleting'}
         for uid, account in accounts for wid, mapping in account['workspaces'].items()}
@@ -96,8 +115,15 @@ def main():
         assert error.code == 401
     print('PASS authenticated retrieval, forged mapping rejection and tenant isolation:', checked, flush=True)
 
-    uid, account = accounts[0]
-    wid, mapping = next(iter(account['workspaces'].items()))
+    writable = []
+    for uid, account in accounts:
+        workspaces = http('http://127.0.0.1/api/', 'workspace?include_role=true', headers={'Authorization': 'Bearer ' + token(uid, secret)})['data']
+        for workspace in workspaces:
+            wid = workspace['workspace_id']
+            if wid in account['workspaces'] and workspace['role'] in ('Owner', 'Member'):
+                writable.append((uid, account, wid, account['workspaces'][wid]))
+    assert writable, 'No writable workspace available'
+    uid, account, wid, mapping = writable[0]
     auth = {'Authorization': 'Bearer ' + token(uid, secret)}
     marker = 'native-sync-check-' + uuid.uuid4().hex
     path = f'/api/workspace/{wid}/quick-note'
@@ -129,6 +155,8 @@ def main():
     after_ids = {(uid, wid): {e['id'] for e in entries(a['api_key'], m['id']) if e['parse_status'] != 'deleting'}
         for uid, a in accounts for wid, m in a['workspaces'].items()}
     assert after_ids == before_ids, 'Preexisting knowledge IDs changed'
+    after_custom = {bid: {item['id'] for item in entries(state['service']['api_key'], bid)} for bid in before_custom}
+    assert before_custom == after_custom, 'Custom knowledge IDs changed'
     print('PASS native create/update/delete, idempotency, and preservation of existing knowledge IDs', flush=True)
     for unit in ['ponynotes-weknora-sync.timer', 'ponynotes-weknora-sync.service', 'ponynotes-weknora-search.service']:
         assert subprocess.run(['systemctl', 'is-active', '--quiet', unit]).returncode != 0

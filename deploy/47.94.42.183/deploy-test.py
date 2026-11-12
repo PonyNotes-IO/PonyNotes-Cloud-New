@@ -23,7 +23,7 @@ HOST_KEY = "AAAAC3NzaC1lZDI1NTE5AAAAINg4eb9hNVV8BEJcwMo+r/QgRxYbnZ8fPeftEVJvf7y0
 HERE = Path(__file__).resolve().parent
 REPOS = {"cloud": "PonyNotes-Cloud-New", "gotrue": "PonyNotes-gotrue", "web": "PonyNotes-Web-Desktop"}
 EXCLUDE = {".git", ".ssh", ".idea", ".vscode", ".zcode", "target", "build", "node_modules", "vendor", "__pycache__", ".dart_tool", "logs", "data"}
-TOOLS = ["deploy-test.sh", "build-cloud.sh", "build-gotrue.sh", "Dockerfile.cloud", "Dockerfile.gotrue", ".dockerignore", "migrate-cloud.py", "smoke.py", "test-otp-smoke.py"]
+TOOLS = ["deploy-test.sh", "build-cloud.sh", "build-gotrue.sh", "Dockerfile.cloud", "Dockerfile.gotrue", ".dockerignore", "migrate-cloud.py", "smoke.py", "test-otp-smoke.py", "migrate-weknora-backend.py", "smoke-weknora-backend.py"]
 
 
 def include_source(info):

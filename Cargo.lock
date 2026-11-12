@@ -5488,6 +5488,7 @@ name = "ponynotes-weknora"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "hmac",
  "jsonwebtoken",
  "reqwest",
  "serde_json",

@@ -158,7 +158,12 @@ pub(crate) fn note_parts(
     &title
   };
   let mut header = format!("来源：小马笔记\n\n目录：{location}\n\n");
-  if kind != "quick" {
+  if kind == "quick" {
+    header += &format!(
+      "所属用户：{}\n\n",
+      view.ok_or_else(|| anyhow!("quick note owner missing"))?
+    );
+  } else {
     header += &format!(
       "[在小马笔记中打开](ponynotes://open?viewId={}&workspaceId={wid})\n\n",
       view.unwrap_or(oid)
@@ -176,7 +181,12 @@ pub(crate) fn note_parts(
   let total = chars.len().div_ceil(size);
   let mut notes = Notes::new();
   for (index, chunk) in chars.chunks(size).enumerate() {
-    let identity = format!("{wid}/{kind}/{oid}/{index}");
+    let mut identity = format!("{wid}/{kind}/{oid}/{index}");
+    if kind != "quick" {
+      if let Some(view) = view {
+        identity += &format!("/{view}");
+      }
+    }
     let channel = format!("pn:{:x}", Sha256::digest(identity.as_bytes()))[..43].to_owned();
     let label = if total > 1 {
       format!("{title}（{}/{total}）", index + 1)
@@ -192,7 +202,7 @@ pub(crate) fn note_parts(
 }
 
 impl Client {
-  pub(crate) async fn scan(&self, token: &str, wid: &str) -> Result<Notes> {
+  pub(crate) async fn scan(&self, token: &str, wid: &str, owner: &str) -> Result<Notes> {
     let views = self.views(token, wid).await?;
     let mut notes = Notes::new();
     let mut database_views = HashSet::new();
@@ -368,7 +378,7 @@ impl Client {
           &format!("随手记 {date}"),
           &body,
           "随手记",
-          None,
+          Some(owner),
         )?);
       }
       if page["has_more"] == false {

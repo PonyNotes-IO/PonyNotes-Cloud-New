@@ -61,7 +61,7 @@ use crate::api::file_storage::file_storage_scope;
 use crate::api::guest::sharing_scope;
 use crate::api::integrations::baidu::baidu_scope;
 use crate::api::internal::internal_scope;
-use crate::api::knowledge::knowledge_scope;
+use crate::api::knowledge::{knowledge_embedding_scope, knowledge_scope};
 use crate::api::invite_code::invite_code_scope;
 use crate::api::invite_landing;
 use crate::api::metrics::metrics_scope;
@@ -163,6 +163,7 @@ pub async fn run_actix_server(
     app
       .app_data(knowledge_client.clone())
       .service(knowledge_scope())
+      .service(knowledge_embedding_scope())
       .service(server_info_scope())
       .service(user_scope())
       .service(workspace_scope())

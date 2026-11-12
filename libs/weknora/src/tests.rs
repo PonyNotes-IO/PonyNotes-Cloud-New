@@ -7,8 +7,18 @@ use std::thread;
 
 /// Tiny local HTTP server; exercises real requests without credentials or external services.
 fn mock(responses: Vec<(String, u16, Value)>) -> (Client, thread::JoinHandle<()>) {
+  let (client, task, _) = mock_recorded(responses);
+  (client, task)
+}
+
+type Requests = std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>;
+fn mock_recorded(
+  responses: Vec<(String, u16, Value)>,
+) -> (Client, thread::JoinHandle<()>, Requests) {
   let listener = TcpListener::bind("127.0.0.1:0").unwrap();
   let address = format!("http://{}", listener.local_addr().unwrap());
+  let requests: Requests = Default::default();
+  let captured = requests.clone();
   let task = thread::spawn(move || {
     for (expected, status, payload) in responses {
       let (mut stream, _) = listener.accept().unwrap();
@@ -38,6 +48,10 @@ fn mock(responses: Vec<(String, u16, Value)>) -> (Client, thread::JoinHandle<()>
         .unwrap_or(0);
       let mut body = vec![0u8; length];
       stream.read_exact(&mut body).unwrap();
+      captured
+        .lock()
+        .unwrap()
+        .push((header, serde_json::from_slice(&body).unwrap_or(Value::Null)));
       let body = payload.to_string();
       write!(stream,"HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
     }
@@ -45,6 +59,7 @@ fn mock(responses: Vec<(String, u16, Value)>) -> (Client, thread::JoinHandle<()>
   (
     Client::new(address.clone() + "/api/v1/", address).unwrap(),
     task,
+    requests,
   )
 }
 
@@ -139,7 +154,7 @@ async fn current_visibility_filters_stale_private_pages_and_deduplicates() {
   let responses = vec![
     ("GET /gotrue/user".into(), 200, json!({"id":uid})),
     (
-      "GET /api/workspace ".into(),
+      "GET /api/workspace?include_role=true ".into(),
       200,
       json!({"data":[{"workspace_id":wid}]}),
     ),
@@ -167,10 +182,21 @@ async fn current_visibility_filters_stale_private_pages_and_deduplicates() {
     ("GET /api/v1/knowledge/own".into(), 200, entry(own)),
   ];
   let (client, task) = mock(responses);
-  let account = json!({"api_key":"only-user-a","workspaces":{wid.to_string():{"id":"kb-a"}}});
-  let result = search(&client, Some(&account), uid, "session", wid, "query")
+  let session = library::Session::authenticate(&client, uid, 1, "session")
     .await
     .unwrap();
+  let state = json!({"service":{"api_key":"service"},"workspaces":{wid.to_string():{"id":"kb-a","ready":true}}});
+  let result = library::read(
+    &client,
+    &session,
+    "session",
+    "search",
+    &json!({"workspace_id":wid,"query":"query"}),
+    &state,
+    &json!({}),
+  )
+  .await
+  .unwrap();
   assert_eq!(result["sources"].as_array().unwrap().len(), 1);
   assert_eq!(result["sources"][0]["content"], "Visible text");
   assert!(!result.to_string().contains("secret"));
@@ -232,7 +258,10 @@ async fn source_failure_stops_scan_before_reconcile() {
       json!({}),
     ),
   ]);
-  assert!(client.scan("token", &wid.to_string()).await.is_err());
+  assert!(client
+    .scan("token", &wid.to_string(), "owner")
+    .await
+    .is_err());
   task.join().unwrap();
 }
 
@@ -265,7 +294,10 @@ async fn scan_handles_deep_folders_and_quick_note_pagination() {
     ));
   }
   let (client, task) = mock(responses);
-  let notes = client.scan("token", &wid.to_string()).await.unwrap();
+  let notes = client
+    .scan("token", &wid.to_string(), "owner")
+    .await
+    .unwrap();
   assert_eq!(notes.len(), 102);
   assert!(notes
     .values()
@@ -322,27 +354,645 @@ async fn forged_identity_and_foreign_workspace_cannot_reach_weknora() {
     200,
     json!({"id":Uuid::new_v4()}),
   )]);
-  assert!(search(&client, None, uid, "token", wid, "query")
+  assert!(library::Session::authenticate(&client, uid, 1, "token")
     .await
     .is_err());
   task.join().unwrap();
   let (client, task) = mock(vec![
     ("GET /gotrue/user".into(), 200, json!({"id":uid})),
     (
-      "GET /api/workspace ".into(),
+      "GET /api/workspace?include_role=true ".into(),
       200,
       json!({"data":[{"workspace_id":Uuid::new_v4()}]}),
     ),
   ]);
-  assert!(search(
+  let session = library::Session::authenticate(&client, uid, 1, "token")
+    .await
+    .unwrap();
+  let result = library::read(
     &client,
-    Some(&json!({"api_key":"foreign"})),
-    uid,
+    &session,
     "token",
-    wid,
-    "query"
+    "search",
+    &json!({"workspace_id":wid,"query":"query"}),
+    &json!({}),
+    &json!({}),
+  )
+  .await;
+  assert_eq!(library::status(&result.unwrap_err()), 403);
+  task.join().unwrap();
+}
+
+#[tokio::test]
+async fn native_library_permissions_import_and_connector_redaction() {
+  use library::{read, Session};
+  let uid = Uuid::new_v4();
+  let wid = Uuid::new_v4();
+  let bid = Uuid::new_v4();
+  let mut session = Session {
+    uid,
+    user_id: 2,
+    workspaces: vec![
+      json!({"workspace_id":wid,"workspace_name":"空间","owner_uid":1,"role":"Member"}),
+    ],
+  };
+  let mut config = json!({"bases":{bid.to_string():{"id":bid,"workspace_id":wid,"name":"神","owner_uuid":uid,"visibility":"private","ready":true}},"workspaces":{wid.to_string():{"visibility":"private"}}});
+  let state = json!({"service":{"api_key":"server-secret"},"workspaces":{wid.to_string():{"id":"workspace-kb","ready":true}}});
+  let (client, task) = mock(vec![]);
+  let list = read(
+    &client,
+    &session,
+    "token",
+    "bases",
+    &json!({}),
+    &state,
+    &config,
   )
   .await
-  .is_err());
+  .unwrap();
+  assert_eq!(list["bases"].as_array().unwrap().len(), 1);
+  assert_eq!(list["bases"][0]["name"], "神");
+  assert_eq!(list["bases"][0]["can_manage"], true);
+  assert!(!list.to_string().contains("server-secret"));
+  let payload = json!({"workspace_id":wid,"base_id":bid,"url":" https://example.test/article ","chunk_size":800,"chunk_overlap":100,"strategy":"heading","kb_id":"forged","user_id":"forged"});
+  session.workspaces[0]["role"] = json!("Guest");
+  assert_eq!(
+    library::status(
+      &read(
+        &client,
+        &session,
+        "t",
+        "import_url",
+        &payload,
+        &state,
+        &config
+      )
+      .await
+      .unwrap_err()
+    ),
+    403
+  );
+  session.workspaces[0]["role"] = json!("Member");
+  config["bases"][bid.to_string()]["owner_uuid"] = json!(Uuid::new_v4());
+  assert_eq!(
+    library::status(
+      &read(
+        &client,
+        &session,
+        "t",
+        "documents",
+        &payload,
+        &state,
+        &config
+      )
+      .await
+      .unwrap_err()
+    ),
+    403
+  );
   task.join().unwrap();
+
+  let base = json!({"data":{"chunking_config":{"chunk_size":640,"chunk_overlap":80,"strategy":"auto","separators":["\n\n"],"enable_multimodal":true}}});
+  let (client, task, requests) = mock_recorded(vec![
+    (
+      format!("GET /api/v1/knowledge-bases/{bid} "),
+      200,
+      base.clone(),
+    ),
+    (
+      format!("GET /api/v1/knowledge-bases/{bid} "),
+      200,
+      base.clone(),
+    ),
+    (
+      format!("POST /api/v1/knowledge-bases/{bid}/knowledge/url "),
+      200,
+      json!({"data":{"id":"web-document"}}),
+    ),
+    (
+      format!("GET /api/v1/knowledge-bases/{bid} "),
+      200,
+      base.clone(),
+    ),
+    (
+      format!("POST /api/v1/knowledge-bases/{bid}/knowledge/url "),
+      409,
+      json!({"message":"private upstream body"}),
+    ),
+    (
+      format!("GET /api/v1/datasource?kb_id={bid} "),
+      200,
+      json!([
+      {"knowledge_base_id":bid,"id":"connector","name":"飞书","type":"feishu","status":"ready","api_key":"never-return","settings":{"secret":"never-return"}},
+      {"knowledge_base_id":"foreign","id":"foreign-secret"}]),
+    ),
+  ]);
+  config["bases"][bid.to_string()]["owner_uuid"] = json!(uid);
+  let options = read(
+    &client,
+    &session,
+    "t",
+    "web_import_options",
+    &payload,
+    &state,
+    &config,
+  )
+  .await
+  .unwrap();
+  assert_eq!(
+    options,
+    json!({"chunk_size":640,"chunk_overlap":80,"strategy":"auto"})
+  );
+  assert_eq!(
+    read(
+      &client,
+      &session,
+      "t",
+      "import_url",
+      &payload,
+      &state,
+      &config
+    )
+    .await
+    .unwrap()["document_id"],
+    "web-document"
+  );
+  assert_eq!(
+    library::status(
+      &read(
+        &client,
+        &session,
+        "t",
+        "import_url",
+        &payload,
+        &state,
+        &config
+      )
+      .await
+      .unwrap_err()
+    ),
+    409
+  );
+  let sources = read(&client, &session, "t", "sources", &payload, &state, &config)
+    .await
+    .unwrap();
+  assert_eq!(sources["sources"].as_array().unwrap().len(), 1);
+  assert!(!sources.to_string().contains("never-return"));
+  assert!(!sources.to_string().contains("foreign-secret"));
+  task.join().unwrap();
+  let requests = requests.lock().unwrap();
+  assert_eq!(
+    requests[2].1,
+    json!({"url":"https://example.test/article","process_config":{"chunking_config":{
+    "chunk_size":800,"chunk_overlap":100,"strategy":"heading","separators":["\n\n"],"enable_multimodal":true}}})
+  );
+  assert!(requests[2]
+    .0
+    .to_ascii_lowercase()
+    .contains("x-api-key: server-secret"));
+  drop(requests);
+  for invalid in [
+    "file:///etc/passwd",
+    "https://user:pass@example.test/",
+    "https://example.test/a b",
+    "https://example.test/\nsecret",
+  ] {
+    let (client, task) = mock(vec![(
+      format!("GET /api/v1/knowledge-bases/{bid} "),
+      200,
+      base.clone(),
+    )]);
+    let mut payload = payload.clone();
+    payload["url"] = json!(invalid);
+    assert_eq!(
+      library::status(
+        &read(
+          &client,
+          &session,
+          "t",
+          "import_url",
+          &payload,
+          &state,
+          &config
+        )
+        .await
+        .unwrap_err()
+      ),
+      400
+    );
+    task.join().unwrap();
+  }
+}
+
+#[tokio::test]
+async fn embedding_and_wiki_boundaries_fail_closed() {
+  let proxy = json!({"token":"workspace-secret","name":"local-model","parameters":{"dimension":2,"truncate_prompt_tokens":2048,"supports_dimension_override":true}});
+  let payload =
+    json!({"input":"text","model":"local-model","user_id":"forged","base_url":"http://evil"});
+  let request = embedding::prepare(&proxy, "Bearer workspace-secret", &payload).unwrap();
+  assert_eq!(
+    request,
+    json!({"model":"local-model","input":["text"],"truncate":true,"options":{"num_ctx":2048},"dimensions":2})
+  );
+  assert_eq!(
+    library::status(&embedding::prepare(&proxy, "Bearer user-login", &payload).unwrap_err()),
+    401
+  );
+  assert_eq!(
+    library::status(
+      &embedding::prepare(&Value::Null, "Bearer workspace-secret", &payload).unwrap_err()
+    ),
+    401
+  );
+  for input in [json!([1]), json!([]), json!(true)] {
+    let mut p = payload.clone();
+    p["input"] = input;
+    assert_eq!(
+      library::status(&embedding::prepare(&proxy, "Bearer workspace-secret", &p).unwrap_err()),
+      400
+    );
+  }
+  let (mut client, task) = mock(vec![(
+    "POST /api/embed ".into(),
+    200,
+    json!({"embeddings":[[0.5,0.25]],"prompt_eval_count":7}),
+  )]);
+  client.ollama = client.cloud.clone();
+  let response = embedding::infer(&client, &request).await.unwrap();
+  assert_eq!(embedding::tokens(&response).unwrap(), 7);
+  assert_eq!(
+    embedding::response(&proxy, &request, &response, 7).unwrap()["usage"]["total_tokens"],
+    7
+  );
+  for tokens in [json!(true), json!(-1), Value::Null, json!(u64::MAX)] {
+    assert!(embedding::tokens(&json!({"prompt_eval_count":tokens})).is_err());
+  }
+  assert!(embedding::response(&proxy, &request, &json!({"embeddings":[[0.5]]}), 7).is_err());
+  task.join().unwrap();
+  let visible = HashSet::from(["own".into()]);
+  assert!(library::wiki_readable(
+    &json!({"knowledge_base_id":"kb","source_refs":["own|chunk"]}),
+    "kb",
+    &visible,
+    false
+  ));
+  assert!(!library::wiki_readable(
+    &json!({"knowledge_base_id":"kb","source_refs":["hidden|chunk"]}),
+    "kb",
+    &visible,
+    true
+  ));
+  assert!(!library::wiki_readable(
+    &json!({"knowledge_base_id":"kb"}),
+    "kb",
+    &visible,
+    false
+  ));
+  assert!(!library::wiki_readable(
+    &json!({"knowledge_base_id":"foreign","source_refs":["own|chunk"]}),
+    "kb",
+    &visible,
+    true
+  ));
+  let uid = Uuid::new_v4().to_string();
+  let channel = format!("pn:{}", "c".repeat(40));
+  let entry = json!({"knowledge_base_id":"kb","title":"quick","channel":channel,"metadata":{"content":format!("来源：小马笔记\n\n目录：随手记\n\n所属用户：{uid}\n\n正文")}});
+  assert!(library::entry_source(&entry, "kb", "wid", &uid, &visible).is_some());
+  assert!(library::entry_source(&entry, "kb", "wid", "foreign", &visible).is_none());
+}
+
+/// Uses only an explicitly named disposable database. Run with --ignored --test-threads=1.
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL ending in /weknora_native_test"]
+async fn native_database_create_recovery_concurrent_settings_and_workspace_sync() {
+  let url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL");
+  assert!(url.ends_with("/weknora_native_test"));
+  let pool = sqlx::postgres::PgPoolOptions::new()
+    .max_connections(6)
+    .connect(&url)
+    .await
+    .unwrap();
+  sqlx::raw_sql("CREATE SCHEMA IF NOT EXISTS auth;
+    CREATE TABLE IF NOT EXISTS auth.users(id uuid PRIMARY KEY,deleted_at timestamptz,banned_until timestamptz);
+    CREATE TABLE IF NOT EXISTS af_user(uid bigint PRIMARY KEY,uuid uuid,email text);
+    CREATE TABLE IF NOT EXISTS af_workspace(workspace_id uuid PRIMARY KEY,workspace_name text,owner_uid bigint,deleted_at timestamptz,is_initialized bool);
+    CREATE TABLE IF NOT EXISTS af_workspace_member(workspace_id uuid,uid bigint,role_id int);
+    TRUNCATE auth.users,af_user,af_workspace,af_workspace_member;")
+    .execute(&pool).await.unwrap();
+  sqlx::raw_sql(include_str!(
+    "../../../migrations/20261106020000_weknora_sync_state.sql"
+  ))
+  .execute(&pool)
+  .await
+  .unwrap();
+  sqlx::raw_sql("TRUNCATE af_weknora_sync_state")
+    .execute(&pool)
+    .await
+    .unwrap();
+  sqlx::raw_sql(include_str!(
+    "../../../migrations/20261112010000_weknora_library_settings.sql"
+  ))
+  .execute(&pool)
+  .await
+  .unwrap();
+  let uid = Uuid::new_v4();
+  let member = Uuid::new_v4();
+  let wid = Uuid::new_v4();
+  let request_id = Uuid::new_v4();
+  let (client, task) = mock(vec![]);
+  assert!(sync::run_once(&pool, &client).await.is_err()); // No writes before legacy import.
+  task.join().unwrap();
+  let bid = Uuid::new_v5(
+    &Uuid::NAMESPACE_URL,
+    format!("ponynotes:base:{uid}:{wid}:{request_id}").as_bytes(),
+  );
+  let proxy = json!({"token":"workspace-secret","name":"local-model","source_id":"original-embedding","id":"workspace-embedding","ready":true,
+    "parameters":{"dimension":2,"truncate_prompt_tokens":2048}});
+  let state = json!({"native_library_version":0,"users":{"old-account":{"workspaces":{"old":"untouched"}}},"service":{"api_key":"service-key","tenant_id":1},
+    "workspaces":{wid.to_string():{"id":"workspace-kb","ready":true,"notes":{},"embedding_proxy":proxy}}});
+  sqlx::query("UPDATE af_weknora_sync_state SET state=$1,settings='{}'::jsonb WHERE singleton")
+    .bind(&state)
+    .execute(&pool)
+    .await
+    .unwrap();
+  let session = library::Session {
+    uid,
+    user_id: 1,
+    workspaces: vec![
+      json!({"workspace_id":wid,"workspace_name":"空间","owner_uid":1,"role":"Owner"}),
+    ],
+  };
+  let payload =
+    json!({"workspace_id":wid,"request_id":request_id,"name":"神","visibility":"private"});
+  let (client, task) = mock(vec![
+    (
+      format!("GET /api/v1/knowledge-bases/{bid} "),
+      404,
+      json!({}),
+    ),
+    ("POST /api/v1/knowledge-bases ".into(), 500, json!({})),
+    (
+      format!("GET /api/v1/knowledge-bases/{bid} "),
+      200,
+      json!({"data":{"id":bid,"embedding_model_id":"workspace-embedding"}}),
+    ),
+  ]);
+  assert!(
+    library::execute(&pool, &client, &session, "t", "create", &payload)
+      .await
+      .is_err()
+  );
+  let config: Value =
+    sqlx::query_scalar("SELECT settings FROM af_weknora_sync_state WHERE singleton")
+      .fetch_one(&pool)
+      .await
+      .unwrap();
+  assert_eq!(config["bases"][bid.to_string()]["ready"], false);
+  assert_eq!(
+    config["bases"][bid.to_string()]["owner_uuid"],
+    uid.to_string()
+  );
+  for _ in 0..2 {
+    assert_eq!(
+      library::execute(&pool, &client, &session, "t", "create", &payload)
+        .await
+        .unwrap()["base"]["id"],
+      bid.to_string()
+    );
+  }
+  task.join().unwrap();
+  let (client, task) = mock(vec![]);
+  let favorite = json!({"workspace_id":wid,"base_id":bid,"is_favorite":true});
+  let visibility = json!({"workspace_id":wid,"base_id":bid,"visibility":"shared"});
+  let (fav, vis) = tokio::join!(
+    library::execute(&pool, &client, &session, "t", "favorite", &favorite),
+    library::execute(&pool, &client, &session, "t", "visibility", &visibility)
+  );
+  fav.unwrap();
+  vis.unwrap();
+  // Worker writes cannot clobber independently locked library settings.
+  sync::persist(
+    &mut pool.acquire().await.unwrap(),
+    "service",
+    None,
+    &json!({"tenant_id":1,"api_key":"service-key"}),
+  )
+  .await
+  .unwrap();
+  let list = library::execute(&pool, &client, &session, "t", "bases", &json!({}))
+    .await
+    .unwrap();
+  let base = list["bases"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .find(|b| b["id"] == bid.to_string())
+    .unwrap();
+  assert_eq!(base["is_favorite"], true);
+  assert_eq!(base["visibility"], "shared");
+  task.join().unwrap();
+  sqlx::query("INSERT INTO af_user VALUES(1,$1,'owner@test'),(2,$2,'member@test')")
+    .bind(uid)
+    .bind(member)
+    .execute(&pool)
+    .await
+    .unwrap();
+  sqlx::query("INSERT INTO auth.users(id) VALUES($1),($2)")
+    .bind(uid)
+    .bind(member)
+    .execute(&pool)
+    .await
+    .unwrap();
+  sqlx::query("INSERT INTO af_workspace VALUES($1,'空间',1,NULL,true)")
+    .bind(wid)
+    .execute(&pool)
+    .await
+    .unwrap();
+  sqlx::query("INSERT INTO af_workspace_member VALUES($1,1,1),($1,2,2)")
+    .bind(wid)
+    .execute(&pool)
+    .await
+    .unwrap();
+  let captured_owner = embedding::owner(&pool, wid).await.unwrap();
+  sqlx::query("UPDATE af_workspace SET owner_uid=2 WHERE workspace_id=$1")
+    .bind(wid)
+    .execute(&pool)
+    .await
+    .unwrap();
+  assert_eq!(captured_owner, 1);
+  assert_eq!(embedding::owner(&pool, wid).await.unwrap(), 2);
+  sqlx::query("UPDATE auth.users SET banned_until=now()+interval '1 hour' WHERE id=$1")
+    .bind(member)
+    .execute(&pool)
+    .await
+    .unwrap();
+  assert_eq!(
+    library::status(&embedding::owner(&pool, wid).await.unwrap_err()),
+    403
+  );
+  sqlx::query("UPDATE auth.users SET banned_until=NULL WHERE id=$1")
+    .bind(member)
+    .execute(&pool)
+    .await
+    .unwrap();
+  sqlx::query("UPDATE af_workspace SET deleted_at=now() WHERE workspace_id=$1")
+    .bind(wid)
+    .execute(&pool)
+    .await
+    .unwrap();
+  assert_eq!(
+    library::status(&embedding::owner(&pool, wid).await.unwrap_err()),
+    403
+  );
+  sqlx::query("UPDATE af_workspace SET owner_uid=1,deleted_at=NULL WHERE workspace_id=$1")
+    .bind(wid)
+    .execute(&pool)
+    .await
+    .unwrap();
+  let admin_path =
+    std::env::temp_dir().join(format!("weknora-native-test-{}.json", Uuid::new_v4()));
+  std::fs::write(&admin_path, "{}").unwrap();
+  std::env::set_var("PONYNOTES_WEKNORA_ADMIN_FILE", &admin_path);
+  std::env::set_var("APPFLOWY_GOTRUE_JWT_SECRET", "native-test-secret");
+  std::env::set_var(
+    "PONYNOTES_WEKNORA_EMBEDDING_URL",
+    "http://appflowy_cloud:8000/internal/knowledge",
+  );
+  let remote = |url: &str| {
+    json!({"id":"workspace-embedding","type":"Embedding","source":"remote","name":"local-model",
+    "description":format!("PonyNotes workspace embedding {wid}"),"parameters":{"base_url":url,"embedding_parameters":proxy["parameters"]}})
+  };
+  let legacy_url = format!("http://old-python:18083/internal/knowledge/{wid}/v1");
+  let native_url = format!("http://appflowy_cloud:8000/internal/knowledge/{wid}/v1");
+  let provision = || {
+    vec![
+      (
+        "POST /api/v1/auth/login ".into(),
+        200,
+        json!({"token":"admin","active_tenant":{"id":1}}),
+      ),
+      (
+        "GET /api/v1/tenants/1/api-keys ".into(),
+        200,
+        json!({"data":[{"id":1,"name":"PonyNotes workspaces","capabilities":["retrieve","ingest","manage_kbs","manage_datasources"]}]}),
+      ),
+      (
+        "GET /api/v1/models ".into(),
+        200,
+        json!({"data":[remote(&legacy_url)]}),
+      ),
+    ]
+  };
+  let scan = |number| {
+    vec![
+      (
+        format!("GET /api/workspace/{wid}/folder?"),
+        200,
+        json!({"data":{"view_id":wid,"name":"root","children":[],"is_space":true}}),
+      ),
+      (
+        format!("GET /api/workspace/{wid}/database "),
+        200,
+        json!({"data":[]}),
+      ),
+      (
+        format!("GET /api/workspace/{wid}/quick-note?"),
+        200,
+        json!({"data":{"quick_notes":[{"id":format!("quick-{number}"),"created_at":"2026-11-12","data":[{"insert":"note"}]}],"has_more":false}}),
+      ),
+    ]
+  };
+  let mut responses = provision();
+  responses.extend(scan(1));
+  responses.extend(scan(2));
+  responses.extend(vec![
+    (
+      "GET /api/v1/knowledge-bases/workspace-kb ".into(),
+      200,
+      json!({"data":{"id":"workspace-kb","embedding_model_id":"workspace-embedding"}}),
+    ),
+    (
+      "GET /api/v1/models ".into(),
+      200,
+      json!({"data":[remote(&legacy_url)]}),
+    ),
+    (
+      "PUT /api/v1/models/workspace-embedding ".into(),
+      200,
+      json!({"data":remote(&native_url)}),
+    ),
+    (
+      "GET /api/v1/knowledge-bases/workspace-kb/knowledge?".into(),
+      200,
+      json!({"data":[],"total":0}),
+    ),
+    (
+      "POST /api/v1/knowledge-bases/workspace-kb/knowledge/manual ".into(),
+      200,
+      json!({}),
+    ),
+    (
+      "POST /api/v1/knowledge-bases/workspace-kb/knowledge/manual ".into(),
+      200,
+      json!({}),
+    ),
+  ]);
+  let (client, task, requests) = mock_recorded(responses);
+  let report = sync::run_once(&pool, &client).await.unwrap();
+  assert_eq!(report["errors"], json!([]));
+  assert_eq!(report["workspaces"][0]["parts"], 2);
+  task.join().unwrap();
+  let requests = requests.lock().unwrap();
+  let exports = requests
+    .iter()
+    .filter(|(h, _)| h.starts_with("POST /api/v1/knowledge-bases/workspace-kb/knowledge/manual"))
+    .map(|(_, b)| b["content"].as_str().unwrap().to_owned())
+    .collect::<Vec<_>>();
+  assert!(exports
+    .iter()
+    .any(|s| s.contains(&format!("所属用户：{uid}"))));
+  assert!(exports
+    .iter()
+    .any(|s| s.contains(&format!("所属用户：{member}"))));
+  let update = requests
+    .iter()
+    .find(|(h, _)| h.starts_with("PUT /api/v1/models/"))
+    .unwrap();
+  assert_eq!(update.1["parameters"]["base_url"], native_url);
+  drop(requests);
+  let saved: Value = sqlx::query_scalar("SELECT state FROM af_weknora_sync_state WHERE singleton")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+  assert_eq!(saved["users"], state["users"]);
+  let mut responses = provision();
+  responses.extend(scan(1));
+  responses.push((format!("GET /api/workspace/{wid}/folder?"), 503, json!({})));
+  let (client, task) = mock(responses);
+  let report = sync::run_once(&pool, &client).await.unwrap();
+  assert_eq!(report["errors"].as_array().unwrap().len(), 1);
+  task.join().unwrap();
+  let after: Value =
+    sqlx::query_scalar("SELECT state->'workspaces' FROM af_weknora_sync_state WHERE singleton")
+      .fetch_one(&pool)
+      .await
+      .unwrap();
+  assert_eq!(after, saved["workspaces"]); // Failed member scan never prunes or changes prior knowledge.
+  let mut connection = pool.acquire().await.unwrap();
+  sqlx::query("SELECT pg_advisory_lock(781142063)")
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+  let (client, task) = mock(vec![]);
+  assert_eq!(
+    sync::run_once(&pool, &client).await.unwrap()["skipped"],
+    "already_running"
+  );
+  task.join().unwrap();
+  sqlx::query("SELECT pg_advisory_unlock(781142063)")
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+  std::fs::remove_file(admin_path).unwrap();
+  pool.close().await;
 }

@@ -53,7 +53,7 @@ if ! "$cloud_only"; then
   mkdir -p "$root/web-source"
   rsync -a --checksum --delete --exclude target "$stage/web/" "$root/web-source/"
 fi
-for file in build-cloud.sh build-gotrue.sh Dockerfile.cloud Dockerfile.gotrue .dockerignore migrate-cloud.py smoke.py test-otp-smoke.py; do
+for file in build-cloud.sh build-gotrue.sh Dockerfile.cloud Dockerfile.gotrue .dockerignore migrate-cloud.py smoke.py test-otp-smoke.py migrate-weknora-backend.py smoke-weknora-backend.py; do
   cp "$stage/tools/$file" "$root/$file"
 done
 
