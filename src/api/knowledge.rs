@@ -27,7 +27,7 @@ fn failure(status: u16) -> HttpResponse {
     401 => "登录已过期，请重新登录。",
     403 => "你没有此知识库的访问或管理权限。",
     404 => "知识库接口不存在。",
-    409 => "该网页已存在于知识库中。",
+    409 => "操作冲突，请刷新知识库状态后重试。",
     _ => "知识库暂时不可用，请稍后重试。",
   };
   HttpResponse::build(actix_web::http::StatusCode::from_u16(status).unwrap())
@@ -57,7 +57,7 @@ async fn knowledge(
     };
     let permission = if matches!(
       action.as_str(),
-      "create" | "import_url" | "web_import_options"
+      "create" | "import_url" | "web_import_options" | "data_source"
     ) {
       Action::Write
     } else {

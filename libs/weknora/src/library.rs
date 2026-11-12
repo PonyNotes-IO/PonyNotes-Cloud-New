@@ -20,6 +20,7 @@ pub const ACTIONS: &[&str] = &[
   "search",
   "web_import_options",
   "import_url",
+  "data_source",
 ];
 
 #[derive(Debug)]
@@ -336,8 +337,11 @@ pub(crate) async fn read(
   let wid = uuid(payload, "workspace_id")?.to_string();
   let bid = base_id(payload, &wid)?;
   let info = session.accessible(&wid, &bid, config, state)?;
-  if matches!(action, "web_import_options" | "import_url") {
+  if matches!(action, "web_import_options" | "import_url" | "data_source") {
     session.can_write(&wid)?;
+  }
+  if action == "data_source" {
+    require(info["can_manage"] == true, 403)?;
   }
   if action == "search" {
     let query = payload["query"]
@@ -351,7 +355,10 @@ pub(crate) async fn read(
     &config["bases"][&bid]
   };
   if mapping["ready"] != true {
-    require(!matches!(action, "web_import_options" | "import_url"), 503)?;
+    require(
+      !matches!(action, "web_import_options" | "import_url" | "data_source"),
+      503,
+    )?;
     if action == "search" {
       return Ok(json!({"sources":[],"status":"awaiting_sync"}));
     }
@@ -359,6 +366,9 @@ pub(crate) async fn read(
   }
   let key = text(&state["service"], "api_key")?;
   let kb = text(mapping, "id")?;
+  if action == "data_source" {
+    return crate::data_source::execute(client, key, kb, payload).await;
+  }
   if matches!(action, "web_import_options" | "import_url") {
     return crate::web_import::execute(client, key, kb, &state["service"], action, payload).await;
   }

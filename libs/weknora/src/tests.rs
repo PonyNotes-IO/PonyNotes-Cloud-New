@@ -6,6 +6,353 @@ use std::net::TcpListener;
 use std::thread;
 
 #[tokio::test]
+async fn data_source_management_uses_library_ownership_and_workspace_write_access() {
+  let uid = Uuid::new_v4();
+  let wid = Uuid::new_v4().to_string();
+  let bid = Uuid::new_v4().to_string();
+  let mut session = library::Session {
+    uid,
+    user_id: 2,
+    workspaces: vec![
+      json!({"workspace_id":wid,"workspace_name":"Library","owner_uid":1,"role":"Member"}),
+    ],
+  };
+  let config = json!({"bases":{&bid:{"id":bid,"workspace_id":wid,"name":"Owned library","owner_uuid":uid,"visibility":"shared","ready":true}}});
+  let state = json!({"service":{"api_key":"server-only-key"},"workspaces":{&wid:{"id":"default-kb","ready":true}}});
+  let (client, task) = mock(vec![]);
+  for (target, owner, role, expected) in [
+    (&wid, 1, "Member", 403),
+    (&wid, 2, "Guest", 403),
+    (&bid, 1, "Guest", 403),
+    (&Uuid::new_v4().to_string(), 2, "Owner", 403),
+  ] {
+    session.workspaces[0]["owner_uid"] = json!(owner);
+    session.workspaces[0]["role"] = json!(role);
+    let result = library::read(
+      &client,
+      &session,
+      "token",
+      "data_source",
+      &json!({"workspace_id":wid,"base_id":target,"operation":"types"}),
+      &state,
+      &config,
+    )
+    .await;
+    assert_eq!(library::status(&result.unwrap_err()), expected);
+  }
+  task.join().unwrap();
+  session.workspaces[0]["owner_uid"] = json!(1);
+  session.workspaces[0]["role"] = json!("Member");
+  let (client, task, requests) = mock_recorded(vec![(
+    format!("GET /api/v1/datasource?kb_id={bid} "),
+    200,
+    json!([]),
+  )]);
+  assert_eq!(
+    library::read(
+      &client,
+      &session,
+      "token",
+      "data_source",
+      &json!({"workspace_id":wid,"base_id":bid,"operation":"list","knowledge_base_id":"forged"}),
+      &state,
+      &config
+    )
+    .await
+    .unwrap(),
+    json!({"sources":[]})
+  );
+  task.join().unwrap();
+  assert!(requests.lock().unwrap()[0]
+    .0
+    .to_ascii_lowercase()
+    .contains("x-api-key: server-only-key"));
+  let (client, task) = mock(vec![]);
+  let mut not_ready = config.clone();
+  not_ready["bases"][&bid]["ready"] = json!(false);
+  assert_eq!(
+    library::status(
+      &library::read(
+        &client,
+        &session,
+        "token",
+        "data_source",
+        &json!({"workspace_id":wid,"base_id":bid,"operation":"types"}),
+        &state,
+        &not_ready
+      )
+      .await
+      .unwrap_err()
+    ),
+    503
+  );
+  task.join().unwrap();
+}
+
+#[tokio::test]
+async fn data_source_native_lifecycle_redacts_secrets_and_preserves_explicit_scope() {
+  use crate::data_source::execute;
+  let kb = Uuid::new_v4().to_string();
+  let rid = Uuid::new_v4();
+  let sid = Uuid::new_v5(
+    &Uuid::NAMESPACE_URL,
+    format!("ponynotes:datasource:{kb}:{rid}").as_bytes(),
+  );
+  let path = format!("/api/v1/datasource/{sid}");
+  let secret = "never-return-secret";
+  let source = json!({"id":sid,"knowledge_base_id":kb,"name":"My Notion","type":"notion","status":"paused",
+    "config":{"resource_ids":[],"credentials":{"api_key":secret},"settings":{"api_key":secret}},
+    "credentials":{"credentials":{"configured":true}},"last_sync_cursor":secret,"error_message":secret,
+    "latest_sync_log":{"id":"log","status":"success","items_created":1,"error_message":secret}});
+  let mut saved = source.clone();
+  saved["config"]["resource_ids"] = json!(["space"]);
+  saved["sync_schedule"] = json!("0 0 */6 * * *");
+  let create = json!({"operation":"create","type":"notion","name":"My Notion","credentials":{"api_key":secret},
+    "request_id":rid,"settings":{},"resource_ids":[],"tenant_id":999,"knowledge_base_id":"forged"});
+  let save = json!({"operation":"save","source_id":sid,"resource_ids":["space"],"sync_schedule":"0 0 */6 * * *",
+    "sync_mode":"incremental","conflict_strategy":"overwrite","sync_deletions":false});
+  let mut responses = vec![
+    (
+      "GET /api/v1/datasource/types ".into(),
+      200,
+      json!([
+      {"type":"notion","name":"Notion","description":"Notion"},{"type":"unknown"}]),
+    ),
+    (
+      "POST /api/v1/datasource/validate-credentials ".into(),
+      200,
+      json!({"status":"connected"}),
+    ),
+    (
+      "POST /api/v1/datasource/validate-credentials ".into(),
+      200,
+      json!({"status":"connected"}),
+    ),
+    (format!("GET {path} "), 404, json!({})),
+    ("POST /api/v1/datasource ".into(), 201, source.clone()),
+    (format!("GET {path} "), 200, source.clone()),
+  ];
+  for _ in 0..3 {
+    responses.push((format!("GET {path} "), 200, source.clone()));
+  }
+  responses.extend([
+    (format!("GET {path} "), 200, source.clone()),
+    (format!("PATCH {path}/sync-settings "), 200, saved.clone()),
+    (format!("GET /api/v1/datasource?kb_id={kb} "), 200, json!([saved, {"knowledge_base_id":"foreign"}])),
+    (format!("GET {path} "), 200, saved.clone()),
+    (format!("GET {path}/resources?parent_id=space%26other "), 200,
+      json!([{"external_id":"page","parent_id":"space","name":"Page","has_children":false,"url":secret}])),
+    (format!("GET {path} "), 200, saved.clone()),
+    (format!("PUT {path}/credentials "), 200, json!({"success":true,"data":{}})),
+    (format!("GET {path} "), 200, saved.clone()),
+    (format!("GET {path}/logs?limit=1&offset=0 "), 200, json!([])),
+    (format!("POST {path}/sync "), 200, json!({"id":"log","status":"running","error_message":secret})),
+    (format!("GET {path} "), 200, saved.clone()),
+    (format!("GET {path}/logs?limit=1&offset=0 "), 200, json!([{"status":"running"}])),
+    (format!("GET {path} "), 200, saved.clone()),
+    (format!("GET {path}/logs?limit=20&offset=0 "), 200, json!([{"status":"failed","error_message":secret,"items_failed":1}])),
+  ]);
+  for operation in ["pause", "resume", "validate"] {
+    responses.push((format!("GET {path} "), 200, saved.clone()));
+    responses.push((
+      format!("POST {path}/{operation} "),
+      200,
+      json!({"status":"connected"}),
+    ));
+  }
+  for _ in 0..9 {
+    responses.push((
+      format!("GET {path} "),
+      200,
+      json!({"knowledge_base_id":"foreign"}),
+    ));
+  }
+  responses.extend([
+    (format!("GET {path} "), 200, saved),
+    (format!("DELETE {path} "), 204, Value::Null),
+  ]);
+  let (client, task, requests) = mock_recorded(responses);
+  let types = execute(&client, "server-key", &kb, &json!({"operation":"types"}))
+    .await
+    .unwrap();
+  assert_eq!(types["types"].as_array().unwrap().len(), 1);
+  assert_eq!(types["types"][0]["fields"][0]["key"], "api_key");
+  for payload in [
+    json!({"operation":"test","type":[],"credentials":{}}),
+    json!({"operation":"test","type":"notion","credentials":{"api_key":secret,"injected":secret}}),
+    json!({"operation":"test","type":"notion","credentials":{}}),
+    json!({"operation":"create","type":"notion","credentials":{"api_key":secret},"resource_ids":["same","same"]}),
+  ] {
+    assert_eq!(
+      library::status(
+        &execute(&client, "server-key", &kb, &payload)
+          .await
+          .unwrap_err()
+      ),
+      400
+    );
+  }
+  execute(
+    &client,
+    "server-key",
+    &kb,
+    &json!({"operation":"test","type":"notion","credentials":{"api_key":secret}}),
+  )
+  .await
+  .unwrap();
+  execute(&client, "server-key", &kb, &json!({"operation":"test","type":"rss","credentials":{},"settings":{"feed_urls":"https://example.test/feed"}})).await.unwrap();
+  let created = execute(&client, "server-key", &kb, &create).await.unwrap();
+  assert_eq!(created["source"]["id"], sid.to_string());
+  assert!(!created.to_string().contains(secret));
+  assert_eq!(
+    execute(&client, "server-key", &kb, &create).await.unwrap(),
+    created
+  );
+  for payload in [
+    json!({"operation":"sync","source_id":sid}),
+    json!({"operation":"save","source_id":sid,"resource_ids":[]}),
+    json!({"operation":"save","source_id":sid,"resource_ids":["space"],"sync_deletions":"true"}),
+  ] {
+    assert_eq!(
+      library::status(
+        &execute(&client, "server-key", &kb, &payload)
+          .await
+          .unwrap_err()
+      ),
+      400
+    );
+  }
+  let saved = execute(&client, "server-key", &kb, &save).await.unwrap();
+  assert_eq!(saved["source"]["config"]["resource_ids"], json!(["space"]));
+  let list = execute(&client, "server-key", &kb, &json!({"operation":"list"}))
+    .await
+    .unwrap();
+  assert_eq!(list["sources"].as_array().unwrap().len(), 1);
+  assert!(!list.to_string().contains(secret));
+  let resources = execute(
+    &client,
+    "server-key",
+    &kb,
+    &json!({"operation":"resources","source_id":sid,"parent_id":"space&other"}),
+  )
+  .await
+  .unwrap();
+  assert_eq!(resources["resources"][0]["external_id"], "page");
+  assert!(!resources.to_string().contains(secret));
+  execute(
+    &client,
+    "server-key",
+    &kb,
+    &json!({"operation":"credentials","source_id":sid,"credentials":{"api_key":"replacement"}}),
+  )
+  .await
+  .unwrap();
+  assert_eq!(
+    execute(
+      &client,
+      "server-key",
+      &kb,
+      &json!({"operation":"sync","source_id":sid})
+    )
+    .await
+    .unwrap()["log"]["status"],
+    "running"
+  );
+  assert_eq!(
+    library::status(
+      &execute(
+        &client,
+        "server-key",
+        &kb,
+        &json!({"operation":"sync","source_id":sid})
+      )
+      .await
+      .unwrap_err()
+    ),
+    409
+  );
+  let logs = execute(
+    &client,
+    "server-key",
+    &kb,
+    &json!({"operation":"logs","source_id":sid}),
+  )
+  .await
+  .unwrap();
+  assert_eq!(logs["logs"][0]["items_failed"], 1);
+  assert!(!logs.to_string().contains(secret));
+  for operation in ["pause", "resume", "validate"] {
+    execute(
+      &client,
+      "server-key",
+      &kb,
+      &json!({"operation":operation,"source_id":sid}),
+    )
+    .await
+    .unwrap();
+  }
+  for operation in [
+    "resources",
+    "validate",
+    "sync",
+    "pause",
+    "resume",
+    "logs",
+    "delete",
+    "save",
+    "credentials",
+  ] {
+    for id in [format!("../{sid}"), sid.to_string()] {
+      assert_eq!(
+        library::status(
+          &execute(
+            &client,
+            "server-key",
+            &kb,
+            &json!({"operation":operation,"source_id":id})
+          )
+          .await
+          .unwrap_err()
+        ),
+        if id.starts_with("../") { 400 } else { 403 }
+      );
+    }
+  }
+  assert_eq!(
+    execute(
+      &client,
+      "server-key",
+      &kb,
+      &json!({"operation":"delete","source_id":sid})
+    )
+    .await
+    .unwrap(),
+    json!({"deleted":true})
+  );
+  task.join().unwrap();
+  let requests = requests.lock().unwrap();
+  let create = &requests
+    .iter()
+    .find(|(header, _)| header.starts_with("POST /api/v1/datasource "))
+    .unwrap()
+    .1;
+  assert_eq!(create["knowledge_base_id"], kb);
+  assert!(create.get("tenant_id").is_none());
+  assert_eq!(create["status"], "paused");
+  assert_eq!(create["sync_schedule"], "");
+  assert_eq!(create["sync_deletions"], false);
+  let patch = &requests
+    .iter()
+    .find(|(header, _)| header.starts_with("PATCH"))
+    .unwrap()
+    .1;
+  assert_eq!(patch.as_object().unwrap().len(), 5);
+  assert!(patch.get("credentials").is_none() && patch.get("status").is_none());
+  let rss = &requests[2].1;
+  assert_eq!(rss["credentials"]["feed_urls"], "https://example.test/feed");
+}
+
+#[tokio::test]
 async fn web_import_v2_preserves_explicit_choices_and_rejects_untrusted_settings() {
   let base = json!({"summary_model_id":"summary","chunking_config":{"chunk_size":640,"chunk_overlap":80,"separators":["\n\n"],"enable_parent_child":true},
     "vlm_config":{"enabled":true,"model_id":"vision"},"question_generation_config":{"enabled":true,"question_count":3}});
