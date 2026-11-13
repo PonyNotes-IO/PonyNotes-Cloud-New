@@ -67,7 +67,7 @@ fn automation_id(id: &str) -> actix_web::Result<String> {
 
 /// An automation only exists for the workspace that registered it.
 async fn owned(ctx: &Context, id: &str, state: &AppState) -> actix_web::Result<Option<String>> {
-  sqlx::query_scalar(
+  sqlx::query_scalar::<_, Option<String>>(
     "SELECT model_id FROM af_agent_automations \
      WHERE automation_id = $1 AND uid = $2 AND workspace_id = $3",
   )
@@ -297,14 +297,16 @@ async fn list(
   client: web::Data<Client>,
 ) -> actix_web::Result<HttpResponse> {
   let ctx = context(&auth, *path, &state, &client).await?;
-  let managed: HashSet<String> = sqlx::query_scalar(
+  let managed: HashSet<String> = sqlx::query_scalar::<_, String>(
     "SELECT automation_id FROM af_agent_automations WHERE uid = $1 AND workspace_id = $2",
   )
   .bind(ctx.uid)
   .bind(ctx.workspace)
   .fetch_all(&state.pg_pool)
   .await
-  .map_err(unavailable)?;
+  .map_err(unavailable)?
+  .into_iter()
+  .collect();
   let upstream = client
     .agent_request(&ctx.token, "automations", Method::GET, None)
     .await
