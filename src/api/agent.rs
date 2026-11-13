@@ -12,6 +12,7 @@ use crate::{biz::authentication::jwt::UserUuid, state::AppState};
 
 mod conversations;
 pub(crate) use conversations::authorize_artifact_blob;
+mod automations;
 mod note_tools;
 mod provisioning;
 
@@ -170,6 +171,21 @@ fn gateway(state: &AppState) -> actix_web::Result<&Sub2ApiGateway> {
     .ok_or_else(|| error::ErrorServiceUnavailable("内部模型服务尚未配置，请联系管理员"))
 }
 
+impl Sub2ApiGateway {
+  /// Unattended automation runs need a credential that outlives a 24h session.
+  pub(crate) fn automation_token(&self, uid: i64) -> actix_web::Result<Secret<String>> {
+    self
+      .provisioning
+      .as_ref()
+      .map(|provisioning| Secret::new(provisioning.automation_token(uid)))
+      .ok_or_else(|| error::ErrorServiceUnavailable("内部 AI 自动开通尚未配置，自动化任务暂不可用"))
+  }
+
+  fn automation_uid(&self, token: &str) -> Option<i64> {
+    self.provisioning.as_ref()?.automation_uid(token)
+  }
+}
+
 pub fn agent_scope() -> Scope {
   web::scope("/agent")
     .service(
@@ -187,6 +203,7 @@ pub fn agent_scope() -> Scope {
     )
     .service(conversations::scope())
     .service(conversations::collection_scope())
+    .service(automations::scope())
     .route("/models", web::get().to(models))
     .route("/usage", web::get().to(usage))
     .route("/session", web::post().to(create_session))
@@ -377,19 +394,30 @@ async fn revoke_conversation_model(
 }
 
 fn session_token(req: &HttpRequest) -> actix_web::Result<&str> {
-  req
+  let token = req
     .headers()
     .get("Authorization")
     .and_then(|value| value.to_str().ok())
     .and_then(|value| value.strip_prefix("Bearer "))
-    .filter(|value| {
-      value.starts_with("pn-agent-")
-        && value.len() == 57
-        && value
-          .bytes()
-          .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    .ok_or_else(|| error::ErrorUnauthorized("内部模型会话无效，请重新连接 Agent"))?;
+  let valid = if let Some(rest) = token.strip_prefix(provisioning::AUTOMATION_TOKEN_PREFIX) {
+    rest.split_once('-').is_some_and(|(uid, digest)| {
+      !uid.is_empty()
+        && uid.bytes().all(|c| c.is_ascii_digit())
+        && digest.len() == 32
+        && digest.bytes().all(|c| c.is_ascii_hexdigit())
     })
-    .ok_or_else(|| error::ErrorUnauthorized("内部模型会话无效，请重新连接 Agent"))
+  } else {
+    token.starts_with("pn-agent-")
+      && token.len() == 57
+      && token
+        .bytes()
+        .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+  };
+  if !valid {
+    return Err(error::ErrorUnauthorized("内部模型会话无效，请重新连接 Agent"));
+  }
+  Ok(token)
 }
 
 async fn revoke_session(
@@ -411,13 +439,19 @@ async fn completions(
   payload: web::Json<Value>,
 ) -> actix_web::Result<HttpResponse> {
   let token = session_token(&req)?;
-  let mut redis = state.redis_connection_manager.clone();
-  let uid: Option<i64> = redis
-    .get(format!("agent:session:{token}"))
-    .await
-    .map_err(|_| error::ErrorServiceUnavailable("内部模型会话查询失败"))?;
-  let uid = uid.ok_or_else(|| error::ErrorUnauthorized("内部模型会话已过期，请重新连接 Agent"))?;
   let gateway = gateway(&state)?;
+  let uid = if token.starts_with(provisioning::AUTOMATION_TOKEN_PREFIX) {
+    gateway
+      .automation_uid(token)
+      .ok_or_else(|| error::ErrorUnauthorized("自动化凭据无效，请重新保存自动化任务"))?
+  } else {
+    let mut redis = state.redis_connection_manager.clone();
+    let uid: Option<i64> = redis
+      .get(format!("agent:session:{token}"))
+      .await
+      .map_err(|_| error::ErrorServiceUnavailable("内部模型会话查询失败"))?;
+    uid.ok_or_else(|| error::ErrorUnauthorized("内部模型会话已过期，请重新连接 Agent"))?
+  };
   let key = gateway.key_for_user(&state, uid).await?;
   let mut body = payload.into_inner();
   if body["model"]
