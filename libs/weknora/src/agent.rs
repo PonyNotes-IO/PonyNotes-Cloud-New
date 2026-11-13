@@ -235,6 +235,26 @@ impl Client {
     })
   }
 
+  /// Drop a staged upload that a failed submission will never reference.
+  pub async fn agent_delete_attachment(
+    &self,
+    token: &str,
+    session: &str,
+    attachment: &str,
+  ) -> Result<()> {
+    Uuid::parse_str(session)?;
+    Uuid::parse_str(attachment)?;
+    self
+      .agent_request(
+        token,
+        &format!("sessions/{session}/attachments/{attachment}"),
+        Method::DELETE,
+        None,
+      )
+      .await
+      .map(|_| ())
+  }
+
   /// Current parse state for every attachment in the session.
   pub async fn agent_attachments(&self, token: &str, session: &str) -> Result<Vec<Value>> {
     Uuid::parse_str(session)?;

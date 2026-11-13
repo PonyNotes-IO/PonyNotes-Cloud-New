@@ -787,6 +787,49 @@ fn mock_recorded(
 }
 
 #[tokio::test]
+async fn attachment_delete_targets_the_session_and_rejects_bad_ids() {
+  let session = Uuid::new_v4().to_string();
+  let agent = Uuid::new_v4().to_string();
+  let staged = Uuid::new_v4().to_string();
+  let (client, task, requests) = mock_recorded(vec![
+    (
+      format!("POST /api/v1/sessions/{session}/attachments "),
+      202,
+      json!({"success":true,"data":{"id":staged,"session_id":session}}),
+    ),
+    (
+      format!("DELETE /api/v1/sessions/{session}/attachments/{staged} "),
+      200,
+      json!({"success":true}),
+    ),
+  ]);
+  assert!(client
+    .agent_upload("owner-token", &session, &agent, "first.pdf", vec![1])
+    .await
+    .is_ok());
+  assert!(client
+    .agent_delete_attachment("owner-token", &session, &staged)
+    .await
+    .is_ok());
+  // Path traversal must never reach upstream.
+  assert!(client
+    .agent_delete_attachment("owner-token", &session, "../escape")
+    .await
+    .is_err());
+  task.join().unwrap();
+  let requests = requests.lock().unwrap();
+  let cleanup = requests
+    .iter()
+    .find(|request| request.0.starts_with("DELETE "))
+    .expect("delete request was never sent");
+  assert!(cleanup.0.contains(&staged));
+  assert!(cleanup
+    .0
+    .to_lowercase()
+    .contains("authorization: bearer owner-token"));
+}
+
+#[tokio::test]
 async fn session_upload_keeps_original_bytes_and_checks_returned_session() {
   let session = Uuid::new_v4().to_string();
   let agent = Uuid::new_v4().to_string();
