@@ -632,7 +632,11 @@ fn validate(payload: &Send) -> actix_web::Result<()> {
       return Err(error::ErrorBadRequest("附件名称、大小或内容无效"));
     }
   }
-  if !["", "off", "minimal", "low", "medium", "high"].contains(&payload.reasoning_effort.as_str()) {
+  if ![
+    "", "off", "minimal", "low", "medium", "high", "xhigh", "max",
+  ]
+  .contains(&payload.reasoning_effort.as_str())
+  {
     return Err(error::ErrorBadRequest("思考程度无效"));
   }
   for image in &payload.images {
@@ -1459,6 +1463,10 @@ mod tests {
     assert!(validate(&p).is_err());
     p.model.base_url = "https://model.example/v1".into();
     assert!(validate(&p).is_ok());
+    for level in ["off", "minimal", "low", "medium", "high", "xhigh", "max"] {
+      p.reasoning_effort = level.into();
+      assert!(validate(&p).is_ok(), "{level} should be accepted");
+    }
     p.reasoning_effort = "unlimited".into();
     assert!(validate(&p).is_err());
   }
