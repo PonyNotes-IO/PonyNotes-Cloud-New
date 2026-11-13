@@ -16,6 +16,8 @@ use super::{upstream_error, Sub2ApiGateway};
 #[cfg(test)]
 mod tests;
 
+pub(super) const AUTOMATION_TOKEN_PREFIX: &str = "pn-agent-auto-";
+
 #[derive(Clone)]
 pub(super) enum ManagementAuth {
   Key(Secret<String>),
@@ -81,6 +83,34 @@ impl Provisioning {
     mac.update(provision_id.as_bytes());
     let bytes = mac.finalize().into_bytes();
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+  }
+
+  /// Automation runs outlive a 24h Agent session, so they authenticate with a
+  /// credential derived from the provisioning secret. It is stateless: the uid
+  /// travels in the token and the trailing digest proves the server issued it.
+  pub(super) fn automation_token(&self, uid: i64) -> String {
+    let digest = self.automation_digest(uid);
+    format!("{AUTOMATION_TOKEN_PREFIX}{uid}-{digest}")
+  }
+
+  pub(super) fn automation_uid(&self, token: &str) -> Option<i64> {
+    let rest = token.strip_prefix(AUTOMATION_TOKEN_PREFIX)?;
+    let (uid, digest) = rest.split_once('-')?;
+    let uid: i64 = uid.parse().ok()?;
+    (self.automation_digest(uid) == digest).then_some(uid)
+  }
+
+  fn automation_digest(&self, uid: i64) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(self.secret.expose_secret().as_bytes())
+      .expect("HMAC accepts arbitrary-length keys");
+    mac.update(b"ponynotes-automation-v1\0");
+    mac.update(uid.to_string().as_bytes());
+    mac.finalize()
+      .into_bytes()
+      .iter()
+      .take(16)
+      .map(|byte| format!("{byte:02x}"))
+      .collect()
   }
 }
 
