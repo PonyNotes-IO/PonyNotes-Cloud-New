@@ -235,6 +235,20 @@ impl Client {
     })
   }
 
+  /// Current parse state for every attachment in the session.
+  pub async fn agent_attachments(&self, token: &str, session: &str) -> Result<Vec<Value>> {
+    Uuid::parse_str(session)?;
+    let documents = self
+      .agent_request(
+        token,
+        &format!("sessions/{session}/attachments"),
+        Method::GET,
+        None,
+      )
+      .await?;
+    Ok(array(&documents["data"])?.to_vec())
+  }
+
   pub async fn agent_history(&self, token: &str, session: &str) -> Result<Vec<Value>> {
     Uuid::parse_str(session)?;
     let mut messages = Vec::new();
@@ -285,15 +299,7 @@ impl Client {
         .as_array()
         .is_some_and(|files| files.iter().any(|file| file["id"].is_string()))
     }) {
-      let documents = self
-        .agent_request(
-          token,
-          &format!("sessions/{session}/attachments"),
-          Method::GET,
-          None,
-        )
-        .await?;
-      let documents = array(&documents["data"])?;
+      let documents = self.agent_attachments(token, session).await?;
       for message in &mut messages {
         for file in message
           .get_mut("attachments")
