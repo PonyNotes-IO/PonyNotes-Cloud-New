@@ -270,6 +270,7 @@ pub fn scope() -> Scope {
     .route("/steer", web::post().to(steer))
     .route("/stream", web::get().to(resume))
     .route("/prompt-response", web::post().to(resolve_prompt))
+    .route("/attachments", web::get().to(attachment_status))
     .route("/artifacts", web::post().to(save_cloud_artifact))
     .route(
       "/messages/{message_id}/artifacts/{index}",
@@ -348,6 +349,63 @@ async fn context(
     account,
     catalog,
   })
+}
+
+/// WeKnora parses uploaded files asynchronously; the client polls this instead
+/// of treating the upload response as the final state.
+/// Only report files this conversation uploaded; the session may be shared.
+fn attachment_views(documents: &[Value], names: &Value) -> Vec<Value> {
+  let scoped = names.as_object().is_some_and(|names| !names.is_empty());
+  let mut attachments = Vec::new();
+  for document in documents {
+    let Some(id) = document["id"].as_str() else {
+      continue;
+    };
+    if scoped && names.get(id).is_none() {
+      continue;
+    }
+    let mut view = json!({
+      "id": id,
+      "file_name": names.get(id).and_then(Value::as_str).unwrap_or("附件"),
+      "status": document["status"],
+    });
+    if let Some(message) = document["error_message"]
+      .as_str()
+      .filter(|message| !message.is_empty())
+    {
+      view["error_message"] = json!(message);
+    }
+    attachments.push(view);
+  }
+  attachments
+}
+
+async fn attachment_status(
+  auth: Authorization,
+  path: Document,
+  state: web::Data<AppState>,
+  client: web::Data<Client>,
+) -> actix_web::Result<HttpResponse> {
+  let ctx = context(&auth, &path, &state, &client).await?;
+  let record = stored(&ctx, &state).await?;
+  let Ok(session) = session_id(&record) else {
+    return Ok(
+      HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store"))
+        .json(json!({"attachments": []})),
+    );
+  };
+  let documents = client
+    .agent_attachments(&ctx.scope.token, session)
+    .await
+    .map_err(unavailable)?;
+  let names = &record["attachment_names"];
+  let attachments = attachment_views(&documents, names);
+  Ok(
+    HttpResponse::Ok()
+      .insert_header(("Cache-Control", "no-store"))
+      .json(json!({"attachments": attachments})),
+  )
 }
 
 async fn stored(ctx: &Context, state: &AppState) -> actix_web::Result<Value> {
@@ -1072,8 +1130,7 @@ async fn send(
   record["mode"] = json!(payload.mode);
   save(&ctx, &record, &mut connection).await?;
   let mut attachment_ids = Vec::new();
-  for file in &payload.attachments {
-    let bytes = base64::engine::general_purpose::STANDARD
+  for file in &payload.attachments {    let bytes = base64::engine::general_purpose::STANDARD
       .decode(file["data"].as_str().unwrap_or(""))
       .map_err(unavailable)?;
     let id = client
@@ -1086,7 +1143,10 @@ async fn send(
       )
       .await
       .map_err(|_| {
-        error::ErrorServiceUnavailable("附件上传失败，问题尚未发送；请保留附件后重试")
+        error::ErrorServiceUnavailable(format!(
+          "附件「{}」上传失败，问题尚未发送；请保留附件后重试",
+          file["file_name"].as_str().unwrap_or("附件")
+        ))
       })?;
     attachment_ids.push(id);
   }
@@ -1094,6 +1154,15 @@ async fn send(
     record["attachment_names"][id] = file["file_name"].clone();
   }
   save(&ctx, &record, &mut connection).await?;
+  // Report the parse state WeKnora actually holds; upload does not mean parsed.
+  let parsed = if attachment_ids.is_empty() {
+    Vec::new()
+  } else {
+    client
+      .agent_attachments(&ctx.scope.token, &session)
+      .await
+      .unwrap_or_default()
+  };
   let knowledge_ids = selected_ids.unwrap_or_else(|| {
     ctx
       .scope
@@ -1137,8 +1206,18 @@ async fn send(
   Ok(stream_response(
     upstream,
     json!({"response_type":"scope","data":{"sources":ctx.scope.documents,
-      "attachments":payload.attachments.iter().zip(&attachment_ids).map(|(file,id)|
-        json!({"id":id,"file_name":file["file_name"],"file_size":file["file_size"],"status":"processing"})).collect::<Vec<_>>()}}),
+      "attachments":payload.attachments.iter().zip(&attachment_ids).map(|(file,id)|{
+        let document = parsed.iter().find(|document| document["id"] == json!(id));
+        let mut view = json!({"id":id,"file_name":file["file_name"],"file_size":file["file_size"],
+          "status":document.and_then(|document| document["status"].as_str()).unwrap_or("processing")});
+        if let Some(message) = document
+          .and_then(|document| document["error_message"].as_str())
+          .filter(|message| !message.is_empty())
+        {
+          view["error_message"] = json!(message);
+        }
+        view
+      }).collect::<Vec<_>>()}}),
   ))
 }
 
@@ -1472,6 +1551,27 @@ mod tests {
     }
     p.reasoning_effort = "unlimited".into();
     assert!(validate(&p).is_err());
+  }
+
+  #[test]
+  fn attachment_status_reports_only_this_conversation_and_keeps_failures() {
+    let documents = vec![
+      json!({"id":"mine","status":"failed","error_message":"解析器不支持该文件"}),
+      json!({"id":"other","status":"ready"}),
+      json!({"status":"ready"}),
+    ];
+    let names = json!({"mine":"扫描.pdf"});
+    let views = attachment_views(&documents, &names);
+    assert_eq!(views.len(), 1);
+    assert_eq!(views[0]["file_name"], "扫描.pdf");
+    assert_eq!(views[0]["status"], "failed");
+    assert_eq!(views[0]["error_message"], "解析器不支持该文件");
+
+    // Without stored names the session view is all we can report.
+    let views = attachment_views(&documents, &json!({}));
+    assert_eq!(views.len(), 2);
+    assert_eq!(views[0]["file_name"], "附件");
+    assert!(views[1].get("error_message").is_none());
   }
 
   #[test]
