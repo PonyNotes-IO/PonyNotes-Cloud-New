@@ -24,7 +24,10 @@ pub fn collection_scope() -> Scope {
     .route("", web::post().to(create_conversation))
 }
 
-async fn knowledge_account(auth: &Authorization, state: &AppState) -> actix_web::Result<Value> {
+pub(super) async fn knowledge_account(
+  auth: &Authorization,
+  state: &AppState,
+) -> actix_web::Result<Value> {
   let account: Option<Value> =
     sqlx::query_scalar("SELECT state->'users'->$1 FROM af_weknora_sync_state WHERE singleton")
       .bind(auth.uuid()?.to_string())
@@ -115,7 +118,7 @@ pub(super) async fn reference_file(
   )
 }
 
-async fn workspace_user(
+pub(super) async fn workspace_user(
   auth: &Authorization,
   workspace: Uuid,
   state: &AppState,
