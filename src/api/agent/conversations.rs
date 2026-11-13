@@ -1130,10 +1130,11 @@ async fn send(
   record["mode"] = json!(payload.mode);
   save(&ctx, &record, &mut connection).await?;
   let mut attachment_ids = Vec::new();
-  for file in &payload.attachments {    let bytes = base64::engine::general_purpose::STANDARD
+  for file in &payload.attachments {
+    let bytes = base64::engine::general_purpose::STANDARD
       .decode(file["data"].as_str().unwrap_or(""))
       .map_err(unavailable)?;
-    let id = client
+    let uploaded = client
       .agent_upload(
         &ctx.scope.token,
         &session,
@@ -1141,14 +1142,23 @@ async fn send(
         file["file_name"].as_str().unwrap_or(""),
         bytes,
       )
-      .await
-      .map_err(|_| {
-        error::ErrorServiceUnavailable(format!(
+      .await;
+    match uploaded {
+      Ok(id) => attachment_ids.push(id),
+      Err(_) => {
+        // The submission never referenced these, so leaving them staged only
+        // accumulates unreachable temporary documents on every retry.
+        for id in &attachment_ids {
+          let _ = client
+            .agent_delete_attachment(&ctx.scope.token, &session, id)
+            .await;
+        }
+        return Err(error::ErrorServiceUnavailable(format!(
           "附件「{}」上传失败，问题尚未发送；请保留附件后重试",
           file["file_name"].as_str().unwrap_or("附件")
-        ))
-      })?;
-    attachment_ids.push(id);
+        )));
+      },
+    }
   }
   for (file, id) in payload.attachments.iter().zip(&attachment_ids) {
     record["attachment_names"][id] = file["file_name"].clone();
