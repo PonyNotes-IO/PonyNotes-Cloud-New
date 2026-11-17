@@ -84,7 +84,7 @@ fn user_token(user: &Value) -> Result<String> {
   }),&jsonwebtoken::EncodingKey::from_secret(secret.as_bytes())).map_err(|_|anyhow!("cannot sign user token"))
 }
 
-async fn admin_login(client: &Client) -> Result<Value> {
+pub(crate) async fn admin_login(client: &Client) -> Result<Value> {
   let path = std::env::var("PONYNOTES_WEKNORA_ADMIN_FILE").context("missing administrator file")?;
   let credentials: Value = serde_json::from_slice(&tokio::fs::read(path).await?)?;
   client
@@ -96,7 +96,7 @@ async fn admin_login(client: &Client) -> Result<Value> {
     )
     .await
 }
-async fn admin(
+pub(crate) async fn admin(
   client: &Client,
   login: &Value,
   path: &str,
@@ -195,6 +195,12 @@ async fn provision(
   let response = admin(client, &login, "models", Method::GET, None).await?;
   let models = optional_array(&response["data"])?
     .into_iter()
+    .filter(|m| {
+      !m["description"]
+        .as_str()
+        .unwrap_or("")
+        .starts_with("PonyNotes library model ")
+    })
     .cloned()
     .collect::<Vec<_>>();
   let embedding = models
@@ -409,6 +415,7 @@ async fn sync_workspace(
   service: &Value,
   workspace: &Value,
   mapping: &mut Value,
+  binding: &Value,
 ) -> Result<Value> {
   let wid = text(workspace, "workspace_id")?;
   let members = array(&workspace["members"])?;
@@ -445,11 +452,18 @@ async fn sync_workspace(
     .or_else(|| service["embedding_model_id"].as_str())
     .unwrap_or("")
     .to_owned();
-  let embedding = workspace_embedding(client, connection, login, wid, mapping, &source).await?;
+  let embedding = if let Some(selected) = binding["embedding_model_id"]
+    .as_str()
+    .filter(|s| !s.is_empty())
+  {
+    selected.to_owned()
+  } else {
+    workspace_embedding(client, connection, login, wid, mapping, &source).await?
+  };
   if kb.is_null() {
     kb = client.weknora(key,"knowledge-bases",Method::POST,Some(&json!({"id":id,"name":format!("小马笔记 · {}",text(workspace,"workspace_name")?),
       "type":"document","description":"工作空间知识库；小马云端笔记自动同步。","embedding_model_id":embedding,
-      "summary_model_id":service["summary_model_id"].as_str().unwrap_or("")}))).await?["data"].clone();
+      "summary_model_id":binding["summary_model_id"].as_str().or_else(||service["summary_model_id"].as_str()).unwrap_or("")}))).await?["data"].clone();
   } else {
     let mut updates = json!({});
     if kb["embedding_model_id"] != embedding {
@@ -460,7 +474,8 @@ async fn sync_workspace(
       );
       updates["embedding_model_id"] = json!(embedding);
     }
-    if kb["summary_model_id"].as_str().unwrap_or("").is_empty()
+    if binding.get("summary_model_id").is_none()
+      && kb["summary_model_id"].as_str().unwrap_or("").is_empty()
       && !service["summary_model_id"]
         .as_str()
         .unwrap_or("")
@@ -487,8 +502,8 @@ async fn sync_workspace(
 }
 
 async fn cycle(connection: &mut PgConnection, client: &Client) -> Result<Value> {
-  let mut state: Value =
-    sqlx::query_scalar("SELECT state FROM af_weknora_sync_state WHERE singleton")
+  let (mut state, settings): (Value, Value) =
+    sqlx::query_as("SELECT state,settings FROM af_weknora_sync_state WHERE singleton")
       .fetch_one(&mut *connection)
       .await?;
   // Deploying binaries must not start a new writer before the legacy mappings/settings are imported.
@@ -520,6 +535,7 @@ async fn cycle(connection: &mut PgConnection, client: &Client) -> Result<Value> 
       &service,
       &workspace,
       &mut mapping,
+      &settings["workspaces"][&wid]["model_bindings"],
     )
     .await
     {

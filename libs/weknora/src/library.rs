@@ -21,6 +21,12 @@ pub const ACTIONS: &[&str] = &[
   "web_import_options",
   "import_url",
   "data_source",
+  "models",
+  "model_providers",
+  "model_save",
+  "model_delete",
+  "model_settings",
+  "model_bind",
 ];
 
 #[derive(Debug)]
@@ -91,7 +97,7 @@ impl Session {
     })
   }
 
-  fn workspace(&self, wid: &str) -> Result<&Value> {
+  pub(crate) fn workspace(&self, wid: &str) -> Result<&Value> {
     self
       .workspaces
       .iter()
@@ -132,7 +138,13 @@ impl Session {
       "ready":if custom {record["ready"] == true} else {state["workspaces"][wid]["ready"] == true}}))
   }
 
-  fn accessible(&self, wid: &str, bid: &str, config: &Value, state: &Value) -> Result<Value> {
+  pub(crate) fn accessible(
+    &self,
+    wid: &str,
+    bid: &str,
+    config: &Value,
+    state: &Value,
+  ) -> Result<Value> {
     self
       .base_info(self.workspace(wid)?, bid, config, state)
       .ok_or_else(|| anyhow!(Rejected(403)))
@@ -149,7 +161,7 @@ impl Session {
   }
 }
 
-async fn load(connection: &mut PgConnection, locked: bool) -> Result<(Value, Value)> {
+pub(crate) async fn load(connection: &mut PgConnection, locked: bool) -> Result<(Value, Value)> {
   // ponytail: serialize settings on one row; split per-base rows if concurrent writes become frequent.
   let query = if locked {
     "SELECT state,settings FROM af_weknora_sync_state WHERE singleton FOR UPDATE"
@@ -163,7 +175,7 @@ async fn load(connection: &mut PgConnection, locked: bool) -> Result<(Value, Val
   )?;
   Ok((state, settings))
 }
-async fn save(connection: &mut PgConnection, settings: &Value) -> Result<()> {
+pub(crate) async fn save(connection: &mut PgConnection, settings: &Value) -> Result<()> {
   sqlx::query("UPDATE af_weknora_sync_state SET settings=$1,updated_at=now() WHERE singleton")
     .bind(settings)
     .execute(connection)
@@ -181,6 +193,12 @@ pub async fn execute(
 ) -> Result<Value> {
   require(ACTIONS.contains(&action), 404)?;
   require(payload.is_object(), 400)?;
+  if matches!(
+    action,
+    "models" | "model_providers" | "model_save" | "model_delete" | "model_settings" | "model_bind"
+  ) {
+    return crate::models::execute(pool, client, session, action, payload).await;
+  }
   if action == "create" {
     return create(pool, client, session, payload).await;
   }
@@ -225,7 +243,7 @@ pub async fn execute(
   read(client, session, token, action, payload, &state, &config).await
 }
 
-fn base_id(payload: &Value, wid: &str) -> Result<String> {
+pub(crate) fn base_id(payload: &Value, wid: &str) -> Result<String> {
   if payload.get("base_id").is_none() {
     Ok(wid.to_owned())
   } else {
@@ -420,7 +438,10 @@ pub(crate) async fn read(
       &wid,
       &uid,
       &visible,
-      text(payload, "query")?,
+      &crate::models::search_request(
+        text(payload, "query")?,
+        &config[if bid == wid { "workspaces" } else { "bases" }][&bid]["model_bindings"],
+      ),
     )
     .await;
   }
@@ -504,7 +525,7 @@ async fn search(
   wid: &str,
   uid: &str,
   visible: &HashSet<String>,
-  query: &str,
+  request: &Value,
 ) -> Result<Value> {
   let base = client
     .weknora(key, &format!("knowledge-bases/{kb}"), Method::GET, None)
@@ -520,7 +541,7 @@ async fn search(
       key,
       &format!("knowledge-bases/{kb}/hybrid-search"),
       Method::POST,
-      Some(&json!({"query_text":query.trim(),"match_count":12,"vector_threshold":0.35})),
+      Some(request),
     )
     .await?;
   let mut sources = Vec::new();

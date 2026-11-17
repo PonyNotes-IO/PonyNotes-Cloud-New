@@ -259,6 +259,21 @@ pub(crate) async fn execute(
     .weknora(key, &format!("knowledge-bases/{kb}"), Method::GET, None)
     .await?;
   let base = &response["data"];
+  // Bindings are server-validated. Keep the selected custom parser models in subsequent import forms.
+  let mut scoped_service = service.clone();
+  let mut parse_models = scoped_service["parse_models"]
+    .as_array()
+    .cloned()
+    .unwrap_or_default();
+  for (field, kind) in [("vlm_config", "VLLM"), ("asr_config", "ASR")] {
+    if let Some(id) = base[field]["model_id"].as_str().filter(|id| !id.is_empty()) {
+      if !parse_models.iter().any(|m| m["id"] == id) {
+        parse_models.push(json!({"id":id,"name":id,"type":kind}));
+      }
+    }
+  }
+  scoped_service["parse_models"] = json!(parse_models);
+  let service = &scoped_service;
   let defaults = defaults(base, service);
   if action == "web_import_options" {
     return Ok(

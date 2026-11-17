@@ -57,7 +57,13 @@ async fn knowledge(
     };
     let permission = if matches!(
       action.as_str(),
-      "create" | "import_url" | "web_import_options" | "data_source"
+      "create"
+        | "import_url"
+        | "web_import_options"
+        | "data_source"
+        | "model_save"
+        | "model_delete"
+        | "model_bind"
     ) {
       Action::Write
     } else {

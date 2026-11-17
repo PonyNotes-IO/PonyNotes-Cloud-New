@@ -1101,7 +1101,7 @@ async fn current_visibility_filters_stale_private_pages_and_deduplicates() {
     ("GET /api/v1/knowledge/hidden".into(), 200, entry(private)),
     ("GET /api/v1/knowledge/own".into(), 200, entry(own)),
   ];
-  let (client, task) = mock(responses);
+  let (client, task, requests) = mock_recorded(responses);
   let session = library::Session::authenticate(&client, uid, 1, "session")
     .await
     .unwrap();
@@ -1113,7 +1113,7 @@ async fn current_visibility_filters_stale_private_pages_and_deduplicates() {
     "search",
     &json!({"workspace_id":wid,"query":"query"}),
     &state,
-    &json!({}),
+    &json!({"workspaces":{wid.to_string():{"model_bindings":{"rerank_model_id":"rank","rerank_top_k":7}}}}),
   )
   .await
   .unwrap();
@@ -1121,6 +1121,16 @@ async fn current_visibility_filters_stale_private_pages_and_deduplicates() {
   assert_eq!(result["sources"][0]["content"], "Visible text");
   assert!(!result.to_string().contains("secret"));
   task.join().unwrap();
+  let requests = requests.lock().unwrap();
+  let search = &requests
+    .iter()
+    .find(|(header, _)| header.contains("/hybrid-search"))
+    .unwrap()
+    .1;
+  assert_eq!(
+    search["rerank"],
+    json!({"enabled":true,"model_id":"rank","top_k":7})
+  );
 }
 
 #[tokio::test]
@@ -1927,4 +1937,70 @@ async fn native_database_create_recovery_concurrent_settings_and_workspace_sync(
     .unwrap();
   std::fs::remove_file(admin_path).unwrap();
   pool.close().await;
+}
+
+#[tokio::test]
+async fn library_models_save_into_the_existing_tenant_and_return_no_credentials() {
+  let wid = Uuid::new_v4().to_string();
+  let body = crate::models::validate_model(&json!({"name":"my-reranker","type":"Rerank","parameters":{"base_url":"https://rank.example/v1","api_key":"user-secret","provider":"generic"}}),None,&wid).unwrap();
+  let mut saved = body.clone();
+  saved["id"] = json!(Uuid::new_v4());
+  let (client, task, requests) = mock_recorded(vec![(
+    "POST /api/v1/models ".into(),
+    201,
+    json!({"success":true,"data":saved}),
+  )]);
+  let output = crate::models::save_model(
+    &client,
+    &json!({"token":"existing-tenant-token"}),
+    &body,
+    None,
+    &wid,
+  )
+  .await
+  .unwrap();
+  task.join().unwrap();
+  assert_eq!(output["model"]["type"], "Rerank");
+  assert!(!output.to_string().contains("user-secret"));
+  let requests = requests.lock().unwrap();
+  assert!(requests[0]
+    .0
+    .to_ascii_lowercase()
+    .contains("authorization: bearer existing-tenant-token"));
+  assert_eq!(requests[0].1["parameters"]["api_key"], "user-secret");
+  assert!(requests[0].1.get("tenant_id").is_none());
+  assert!(requests[0].1["parameters"]
+    .get("embedding_parameters")
+    .is_none());
+}
+
+#[test]
+fn model_delete_rejects_other_workspaces_builtins_and_bound_models() {
+  let wid = Uuid::new_v4().to_string();
+  let other = Uuid::new_v4().to_string();
+  let model = json!({"id":"model-id","description":format!("PonyNotes library model {wid}")});
+  let models = vec![model.clone()];
+  assert!(crate::models::validate_delete(&models, &wid, "model-id", &json!({})).is_ok());
+  for (workspace, id, settings, expected) in [
+    (other.as_str(), "model-id", json!({}), 403),
+    (wid.as_str(), "missing-id", json!({}), 403),
+    (
+      wid.as_str(),
+      "model-id",
+      json!({"workspaces":{wid.clone():{"model_bindings":{"rerank_model_id":"model-id"}}}}),
+      409,
+    ),
+    (
+      wid.as_str(),
+      "model-id",
+      json!({"bases":{"base-id":{"model_bindings":{"summary_model_id":"model-id"}}}}),
+      409,
+    ),
+  ] {
+    let error = crate::models::validate_delete(&models, workspace, id, &settings).unwrap_err();
+    assert_eq!(crate::library::status(&error), expected);
+  }
+  let mut builtin = model;
+  builtin["is_builtin"] = json!(true);
+  assert!(crate::models::validate_delete(&[builtin], &wid, "model-id", &json!({})).is_err());
 }

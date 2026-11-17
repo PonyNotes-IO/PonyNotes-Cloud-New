@@ -4,6 +4,7 @@ pub mod attachments;
 mod data_source;
 pub mod embedding;
 pub mod library;
+mod models;
 mod notes;
 pub mod references;
 pub mod sync;
