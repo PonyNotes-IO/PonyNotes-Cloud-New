@@ -50,9 +50,11 @@ use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::env::temp_dir;
 use std::fmt::Display;
+#[cfg(unix)]
 use std::fs::Permissions;
 use std::io::ErrorKind;
 use std::ops::DerefMut;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -754,6 +756,7 @@ async fn download_and_unzip_file(
     fs::create_dir_all(&output_file_path)
       .await
       .map_err(|err| ImportError::Internal(err.into()))?;
+    #[cfg(unix)]
     fs::set_permissions(&output_file_path, Permissions::from_mode(0o777))
       .await
       .map_err(|err| {

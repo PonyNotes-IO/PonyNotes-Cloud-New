@@ -1,6 +1,7 @@
 use crate::error::WorkerError;
 use anyhow::{anyhow, Context};
 use aws_sdk_s3::error::SdkError;
+#[cfg(unix)]
 use std::fs::Permissions;
 
 use anyhow::Result;
@@ -12,6 +13,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use futures::AsyncReadExt;
 use std::ops::Deref;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -263,8 +265,8 @@ pub async fn download_file(
   let zip_file_dir = storage_dir.join(format!("{}", Uuid::new_v4()));
   if !zip_file_dir.exists() {
     fs::create_dir_all(&zip_file_dir).await?;
-    let file_permissions = Permissions::from_mode(0o777);
-    fs::set_permissions(&zip_file_dir, file_permissions).await?;
+    #[cfg(unix)]
+    fs::set_permissions(&zip_file_dir, Permissions::from_mode(0o777)).await?;
   }
 
   let zip_file_path = zip_file_dir.join("file.zip");
@@ -291,11 +293,11 @@ pub async fn write_stream_to_file(
   mut stream: Box<dyn futures::AsyncBufRead + Unpin + Send>,
 ) -> Result<(), anyhow::Error> {
   let mut context = md5::Context::new();
-  let mut file = OpenOptions::new()
-    .write(true)
-    .create(true)
-    .truncate(true)
-    .mode(0o644)
+  let mut options = OpenOptions::new();
+  options.write(true).create(true).truncate(true);
+  #[cfg(unix)]
+  options.mode(0o644);
+  let mut file = options
     .open(file_path)
     .await
     .map_err(|err| anyhow!("Failed to create file with permissions: {:?}", err))?;
