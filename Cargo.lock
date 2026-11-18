@@ -618,6 +618,7 @@ dependencies = [
  "actix-session",
  "actix-web",
  "actix-web-actors",
+ "aes-gcm",
  "anyhow",
  "app-error",
  "appflowy-ai-client",

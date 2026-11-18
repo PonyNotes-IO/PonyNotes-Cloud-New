@@ -218,7 +218,7 @@ fn editable(payload: &Save) -> actix_web::Result<Value> {
 }
 
 /// Automation model records live in WeKnora but always point back at Cloud, so
-/// every run is metered by sub2api like an interactive conversation.
+/// every run uses the same provider and workspace quota as an interactive conversation.
 async fn configure_model(
   client: &Client,
   ctx: &Context,
@@ -227,8 +227,12 @@ async fn configure_model(
   existing: Option<&str>,
 ) -> actix_web::Result<String> {
   let (base, credential) = if config.is_internal {
+    super::builtin_model(state, &config.model_name)?;
     let token: Secret<String> = gateway(state)?.automation_token(ctx.uid)?;
-    (client.model_base_url(), token.expose_secret().to_owned())
+    (
+      format!("{}/workspaces/{}", client.model_base_url(), ctx.workspace),
+      token.expose_secret().to_owned(),
+    )
   } else {
     (
       config

@@ -714,6 +714,7 @@ fn reference_catalog_uses_live_notes_and_excludes_personal_knowledge_copies() {
   let legacy = Uuid::new_v4().to_string();
   let scope = agent::Scope {
     token: "session-token".into(),
+    workspace_name: "Workspace".into(),
     documents: std::collections::BTreeMap::from([(legacy.clone(), json!({"title":"Legacy personal copy","base_id":"personal-base"}))]),
     notes: std::collections::BTreeMap::from([(
       note.clone(), json!({"title":"Current note","path":"Private","visibility":"private","space_name":"My space","url":"ponynotes://open"})
@@ -782,7 +783,7 @@ async fn smart_reasoning_uses_builtin_tuning_and_provisions_a_user_sandbox() {
     ),
   ]);
   let cfg = client
-    .agent_config("token", "smart-reasoning", "own-model", false)
+    .agent_config("token", "smart-reasoning", "own-model", false, false)
     .await
     .unwrap();
   assert_eq!(cfg["sandbox_config_id"], "isolated-docker");
@@ -809,7 +810,7 @@ async fn quick_answer_keeps_rag_defaults_without_provisioning_a_sandbox() {
     json!({"data":{"config":{"agent_mode":"quick-answer","enable_rewrite":true,"faq_score_boost":1.2,"sandbox_config_id":"must-not-execute"}}}),
   )]);
   let cfg = client
-    .agent_config("token", "quick-answer", "own-model", true)
+    .agent_config("token", "quick-answer", "own-model", false, true)
     .await
     .unwrap();
   assert_eq!(cfg["sandbox_config_id"], "");
@@ -2136,6 +2137,7 @@ async fn library_models_save_into_the_existing_tenant_and_return_no_credentials(
 
 #[test]
 fn model_delete_rejects_other_workspaces_builtins_and_bound_models() {
+  assert!(crate::library::ACTIONS.contains(&"model_delete"));
   let wid = Uuid::new_v4().to_string();
   let other = Uuid::new_v4().to_string();
   let model = json!({"id":"model-id","description":format!("PonyNotes library model {wid}")});
@@ -2163,4 +2165,111 @@ fn model_delete_rejects_other_workspaces_builtins_and_bound_models() {
   let mut builtin = model;
   builtin["is_builtin"] = json!(true);
   assert!(crate::models::validate_delete(&[builtin], &wid, "model-id", &json!({})).is_err());
+}
+
+#[tokio::test]
+async fn agent_catalog_keeps_shared_identity_and_hides_runtime_and_secrets() {
+  let private = Uuid::new_v4().to_string();
+  let runtime = Uuid::new_v4().to_string();
+  let hidden = Uuid::new_v4().to_string();
+  let agent = |id: &str| json!({"id":id,"name":"同名助手","config":{"agent_mode":"smart-reasoning","system_prompt":"private prompt","model_id":"secret-model","kb_selection_mode":"selected","multi_turn_enabled":true}});
+  let (client, task) = mock(vec![
+    (
+      "GET /api/v1/agents ".into(),
+      200,
+      json!({"data":[agent(&private),agent(&runtime),agent(&hidden)],"disabled_own_agent_ids":[hidden]}),
+    ),
+    (
+      "GET /api/v1/shared-agents ".into(),
+      200,
+      json!({"data":[
+      {"agent":agent(&private),"source_tenant_id":17},
+      {"agent":agent(&private),"source_tenant_id":18,"disabled_by_me":true}]}),
+    ),
+  ]);
+  let catalog = client
+    .agent_catalog("user-token", &[runtime])
+    .await
+    .unwrap();
+  assert_eq!(catalog.len(), 2);
+  assert_eq!(catalog[0]["id"], private);
+  assert_eq!(catalog[0]["group"], "private");
+  assert_eq!(catalog[1]["id"], private);
+  assert_eq!(catalog[1]["source_tenant_id"], 17);
+  assert_eq!(catalog[1]["group"], "shared");
+  assert!(!json!(catalog).to_string().contains("private prompt"));
+  assert!(!json!(catalog).to_string().contains("secret-model"));
+  task.join().unwrap();
+}
+
+#[tokio::test]
+async fn revoked_shared_agent_never_falls_back_to_the_callers_same_id() {
+  let selection = crate::agent_catalog::Selection {
+    id: "builtin-smart-reasoning".into(),
+    source_tenant_id: Some(17),
+  };
+  let (client, task) = mock(vec![(
+    "GET /api/v1/shared-agents ".into(),
+    200,
+    json!({"data":[{"agent":{"id":selection.id},"source_tenant_id":18}]}),
+  )]);
+  assert!(client
+    .selected_agent("user-token", &selection)
+    .await
+    .is_err());
+  task.join().unwrap();
+}
+
+#[test]
+fn selected_agents_keep_specialist_tools_and_restrict_implicit_knowledge() {
+  use crate::agent_catalog::{permits_document, Selection};
+  assert!(!Selection {
+    id: "../agents".into(),
+    source_tenant_id: None
+  }
+  .valid());
+  assert!(!Selection {
+    id: "builtin-smart-reasoning".into(),
+    source_tenant_id: Some(0)
+  }
+  .valid());
+  let preset = json!({"agent_mode":"smart-reasoning","system_prompt_id":"wiki_researcher",
+    "system_prompt":"custom instructions","kb_selection_mode":"selected","knowledge_bases":["allowed"],
+    "allowed_tools":["wiki_search","wiki_read_page","data_schema","data_analysis","search_conversations","wiki_delete_page"]});
+  let config = crate::agent::config(&preset, "own-model", true, false).unwrap();
+  assert_eq!(config["system_prompt_id"], "wiki_researcher");
+  assert_eq!(
+    config["allowed_tools"],
+    json!([
+      "wiki_search",
+      "wiki_read_page",
+      "data_schema",
+      "data_analysis",
+      "ask_user"
+    ])
+  );
+  assert!(config["system_prompt"]
+    .as_str()
+    .unwrap()
+    .contains("custom instructions"));
+  let cloud_only = crate::agent::config(&preset, "own-model", false, false).unwrap();
+  assert_eq!(cloud_only["system_prompt_id"], "");
+  assert_eq!(cloud_only["knowledge_bases"], json!([]));
+  assert_eq!(cloud_only["allowed_tools"], json!(["ask_user"]));
+  assert!(cloud_only["system_prompt"].as_str().unwrap().contains("custom instructions"));
+  assert!(permits_document(
+    &preset,
+    &json!({"base_id":"allowed"}),
+    None
+  ));
+  assert!(!permits_document(
+    &preset,
+    &json!({"base_id":"other"}),
+    None
+  ));
+  assert!(!permits_document(
+    &json!({"kb_selection_mode":"none"}),
+    &json!({}),
+    Some("allowed")
+  ));
 }

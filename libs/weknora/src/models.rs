@@ -56,7 +56,8 @@ pub(crate) fn public_model(model: &Value, wid: &str) -> Value {
       result[field] = value.clone();
     }
   }
-  result["is_builtin"] = json!(!owned(model, wid));
+  result["is_builtin"] = json!(model["is_builtin"] == true);
+  result["can_edit"] = json!(owned(model, wid) && model["is_builtin"] != true);
   let mut parameters = json!({});
   let fields: &[&str] = match model["type"].as_str() {
     Some("Embedding") => &["embedding_parameters"],
@@ -309,7 +310,7 @@ pub(crate) async fn execute(
       Some(
         *models
           .iter()
-          .find(|m| m["id"] == id && owned(m, &wid))
+          .find(|m| m["id"] == id && owned(m, &wid) && m["is_builtin"] != true)
           .ok_or_else(|| anyhow!(crate::library::Rejected(403)))?,
       )
     } else {
@@ -593,5 +594,24 @@ mod tests {
     assert!(search_request("question", &Value::Null)
       .get("rerank")
       .is_none());
+  }
+
+  #[test]
+  fn shared_library_models_are_readonly_without_becoming_agent_builtins() {
+    let own = model("KnowledgeQA");
+    let public = public_model(&own, "workspace");
+    assert_eq!(public["can_edit"], true);
+    assert_eq!(public["is_builtin"], false);
+    let mut shared = own.clone();
+    shared["description"] = json!("");
+    let public = public_model(&shared, "workspace");
+    assert_eq!(public["can_edit"], false);
+    assert_eq!(public["is_builtin"], false);
+    assert!(visible(&shared, "workspace", &Value::Null));
+    shared["is_builtin"] = json!(true);
+    let public = public_model(&shared, "workspace");
+    assert_eq!(public["is_builtin"], true);
+    assert_eq!(public["can_edit"], false);
+    assert!(public["parameters"].get("api_key").is_none());
   }
 }
