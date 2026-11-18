@@ -1,5 +1,5 @@
 //! Cloud owns identity, note scope and billing; WeKnora owns the agent loop.
-use super::{gateway, issue_session_token};
+use super::issue_session_token;
 use crate::{biz::authentication::jwt::Authorization, state::AppState};
 use access_control::act::Action;
 use actix_web::{error, web, FromRequest, HttpRequest, HttpResponse, Scope};
@@ -8,7 +8,6 @@ use base64::Engine;
 use futures_util::{stream, StreamExt};
 use ponynotes_weknora::references::{restore_reference_input, Catalog, Reference};
 use ponynotes_weknora::{agent, Client};
-use redis::AsyncCommands;
 use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -917,26 +916,25 @@ async fn send(
   let base;
   let credential;
   if payload.model.is_internal {
-    let gw = gateway(&state)?;
-    let key = gw.key_for_user(&state, ctx.uid).await?;
-    let available = gw.get("models", &key).await?;
-    if !available["data"]
-      .as_array()
-      .is_some_and(|models| models.iter().any(|m| m["id"] == payload.model.model_name))
-    {
-      return Err(error::ErrorBadRequest("所选内部模型已不可用"));
-    }
+    super::builtin_model(&state, &payload.model.model_name)?;
     base = client.model_base_url();
     super::revoke_conversation_model(&state, ctx.uid, ctx.workspace, ctx.document).await?;
     credential = issue_session_token(&state, ctx.uid).await?;
-    let _: () = state
-      .redis_connection_manager
-      .clone()
+    let _: () = redis::pipe()
+      .atomic()
       .set_ex(
         super::conversation_model_key(ctx.uid, ctx.workspace, ctx.document),
         &credential,
         super::SESSION_SECONDS,
       )
+      .ignore()
+      .set_ex(
+        format!("agent:session:workspace:{credential}"),
+        ctx.workspace.to_string(),
+        super::SESSION_SECONDS,
+      )
+      .ignore()
+      .query_async(&mut state.redis_connection_manager.clone())
       .await
       .map_err(unavailable)?;
   } else {
