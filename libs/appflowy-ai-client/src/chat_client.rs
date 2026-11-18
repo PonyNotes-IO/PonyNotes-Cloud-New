@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use reqwest::Client;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::pin::Pin;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -87,9 +87,8 @@ impl ChatClient {
         .unwrap_or_else(|_| String::new()),
       deepseek_web_search_bot_model: deepseek_web_search_bot,
       qwen_api_key,
-      qwen_api_base: std::env::var("AI_CHAT_QWEN_API_BASE").unwrap_or_else(|_| {
-        "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()
-      }),
+      qwen_api_base: std::env::var("AI_CHAT_QWEN_API_BASE")
+        .unwrap_or_else(|_| "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()),
       qwen3_vl_plus_model: std::env::var("AI_CHAT_QWEN3_VL_PLUS_MODEL")
         .unwrap_or_else(|_| "qwen3-vl-plus".to_string()),
       qwen_search_model,
@@ -99,6 +98,97 @@ impl ChatClient {
       doubao_model: std::env::var("AI_CHAT_DOUBAO_MODEL")
         .unwrap_or_else(|_| "ep-m-20250814175607-b77g6".to_string()),
     })
+  }
+
+  /// Forward the Agent's OpenAI messages and tool calls using the existing provider configuration.
+  pub async fn agent_completion(
+    &self,
+    model: AIModel,
+    mut body: Value,
+  ) -> Result<reqwest::Response> {
+    if !self.is_model_available(model) {
+      return Err(anyhow!("Model unavailable"));
+    }
+    let thinking = body["reasoning_effort"].as_str().unwrap_or("off") != "off";
+    let (base, key, name) = self.agent_provider(model, thinking);
+    let object = body
+      .as_object_mut()
+      .ok_or_else(|| anyhow!("Expected a completion object"))?;
+    object.insert("model".into(), json!(name));
+    object.remove("reasoning_effort");
+    if model != AIModel::Qwen3VlPlus {
+      body["thinking"] = json!({"type": if thinking { "enabled" } else { "disabled" }});
+    }
+    if body["stream"] == true {
+      body["stream_options"] = json!({"include_usage": true});
+    }
+    Ok(
+      self
+        .http_client
+        .post(format!("{}/chat/completions", base.trim_end_matches('/')))
+        .bearer_auth(key)
+        .json(&body)
+        .send()
+        .await?,
+    )
+  }
+
+  fn agent_provider(&self, model: AIModel, thinking: bool) -> (&str, &str, &str) {
+    match model {
+      AIModel::DeepSeek => (
+        &self.deepseek_api_base,
+        &self.deepseek_api_key,
+        if thinking && !self.deepseek_reasoner_model.is_empty() {
+          &self.deepseek_reasoner_model
+        } else {
+          &self.deepseek_model
+        },
+      ),
+      AIModel::Qwen3VlPlus => (
+        &self.qwen_api_base,
+        &self.qwen_api_key,
+        &self.qwen3_vl_plus_model,
+      ),
+      AIModel::Doubao => (
+        &self.doubao_api_base,
+        &self.doubao_api_key,
+        &self.doubao_model,
+      ),
+    }
+  }
+
+  /// Metadata and execution resolve the same provider configuration; credentials stay server-side.
+  pub fn agent_models(&self) -> Vec<Value> {
+    self
+      .get_available_models()
+      .into_iter()
+      .map(|model| {
+        let (base, _, upstream) = self.agent_provider(model, false);
+        let (_, _, reasoning) = self.agent_provider(model, true);
+        let host = reqwest::Url::parse(base)
+          .ok()
+          .and_then(|url| url.host_str().map(str::to_owned))
+          .unwrap_or_default();
+        let provider = if host.ends_with(".volces.com") {
+          "火山引擎"
+        } else if host.ends_with(".aliyuncs.com") {
+          "阿里云 DashScope"
+        } else if host == "api.deepseek.com" {
+          "DeepSeek"
+        } else {
+          "模型服务"
+        };
+        let name = match model {
+          AIModel::DeepSeek => "DeepSeek",
+          AIModel::Qwen3VlPlus => "通义千问",
+          AIModel::Doubao => "豆包",
+        };
+        json!({"id":model.to_str(),"name":name,"provider_name":provider,
+        "upstream_model":upstream,"reasoning_model":reasoning,
+        "supports_reasoning":model != AIModel::Qwen3VlPlus,
+        "supports_vision":model != AIModel::DeepSeek})
+      })
+      .collect()
   }
 
   /// 统一的流式聊天接口
@@ -305,7 +395,10 @@ impl ChatClient {
       // Bot API 第一个 SSE chunk 包含巨大的 references 数组（搜索引用），
       // 会导致 Flutter SSE 客户端因 chunk 过大而无法解析，从而卡死。
       // 通过转换函数剥离 references/metadata，只保留标准 OpenAI 格式内容。
-      return Ok(Self::convert_stream(response.bytes_stream(), Self::convert_deepseek_bot_to_openai));
+      return Ok(Self::convert_stream(
+        response.bytes_stream(),
+        Self::convert_deepseek_bot_to_openai,
+      ));
     }
 
     error!("[DeepSeek Bot] 重试 {} 次后仍失败：{}", max_retries, last_error);
@@ -457,11 +550,9 @@ impl ChatClient {
       info!("✅ [通义千问] API响应成功: {}", status);
     }
 
-    Ok(Box::pin(
-      response
-        .bytes_stream()
-        .map(|result| result.map_err(|e| anyhow!("Stream error: {}", e))),
-    ))
+    Ok(Box::pin(response.bytes_stream().map(|result| {
+      result.map_err(|e| anyhow!("Stream error: {}", e))
+    })))
   }
 
   /// 调用豆包 API（支持多模态）
@@ -550,11 +641,9 @@ impl ChatClient {
 
     info!("Doubao API response status: {}", status);
 
-    Ok(Box::pin(
-      response
-        .bytes_stream()
-        .map(|result| result.map_err(|e| anyhow!("Stream error: {}", e))),
-    ))
+    Ok(Box::pin(response.bytes_stream().map(|result| {
+      result.map_err(|e| anyhow!("Stream error: {}", e))
+    })))
   }
 
   /// 调用豆包 Responses API 进行文本联网搜索
@@ -610,7 +699,10 @@ impl ChatClient {
     info!("✅ [豆包联网] 响应状态: {}", status);
 
     // Responses API 返回 SSE 格式需要转换为 OpenAI 标准格式
-    Ok(Self::convert_stream(response.bytes_stream(), Self::convert_doubao_responses_to_openai))
+    Ok(Self::convert_stream(
+      response.bytes_stream(),
+      Self::convert_doubao_responses_to_openai,
+    ))
   }
 
   /// 调用豆包多模态 API（使用 /responses 接口）
@@ -659,7 +751,10 @@ impl ChatClient {
     info!("✅ [豆包多模态] API响应成功: {}", status);
 
     // 将豆包 /responses 接口的响应格式转换为 OpenAI 标准格式
-    Ok(Self::convert_stream(response.bytes_stream(), Self::convert_doubao_responses_to_openai))
+    Ok(Self::convert_stream(
+      response.bytes_stream(),
+      Self::convert_doubao_responses_to_openai,
+    ))
   }
 
   fn convert_stream(
@@ -675,7 +770,10 @@ impl ChatClient {
             Ok(bytes) => pending.extend_from_slice(&bytes),
           }
           if pending.len() > 1024 * 1024 {
-            return Some((Err(anyhow!("Provider SSE event too large")), (source, Vec::new())));
+            return Some((
+              Err(anyhow!("Provider SSE event too large")),
+              (source, Vec::new()),
+            ));
           }
           // Normalize only complete lines: HTTP chunks can split a UTF-8 character or usage JSON.
           if let Some(end) = pending.iter().rposition(|byte| *byte == b'\n') {
@@ -739,7 +837,7 @@ impl ChatClient {
                   output.push_str(&format!("data: {}\n\n", openai_json));
                   debug!("🔄 [豆包多模态] 转换内容增量: {}", delta);
                 }
-              }
+              },
               // 处理响应完成
               "response.done" | "response.completed" => {
                 if let Some(usage) = json_value.pointer("/response/usage").or_else(|| json_value.get("usage")) {
@@ -747,11 +845,11 @@ impl ChatClient {
                 }
                 output.push_str("data: [DONE]\n\n");
                 info!("✅ [豆包多模态] 响应完成");
-              }
+              },
               // 忽略其他事件类型（reasoning、created等）
               _ => {
                 debug!("⏭️ [豆包多模态] 跳过事件类型: {}", event_type);
-              }
+              },
             }
           }
         }
@@ -767,7 +865,10 @@ impl ChatClient {
   }
 
   /// 构建消息列表 (OpenAI兼容格式，支持历史对话、多模态和文件)
-  fn build_messages_for_openai_compatible(&self, params: &ChatRequestParams) -> Vec<serde_json::Value> {
+  fn build_messages_for_openai_compatible(
+    &self,
+    params: &ChatRequestParams,
+  ) -> Vec<serde_json::Value> {
     let mut messages = Vec::new();
 
     // 添加历史消息
@@ -829,7 +930,10 @@ impl ChatClient {
   }
 
   /// 构建豆包多模态 API 的 input 字段
-  fn build_input_for_doubao_multimodal(&self, params: &ChatRequestParams) -> Vec<serde_json::Value> {
+  fn build_input_for_doubao_multimodal(
+    &self,
+    params: &ChatRequestParams,
+  ) -> Vec<serde_json::Value> {
     let mut input = Vec::new();
 
     // 添加历史消息（如果有）
@@ -949,29 +1053,16 @@ impl ChatClient {
 
   /// 检查指定模型是否可用
   pub fn is_model_available(&self, model: AIModel) -> bool {
-    match model {
-      AIModel::DeepSeek => !self.deepseek_api_key.is_empty(),
-      AIModel::Qwen3VlPlus => !self.qwen_api_key.is_empty(),
-      AIModel::Doubao => !self.doubao_api_key.is_empty(),
-    }
+    let (_, key, name) = self.agent_provider(model, false);
+    !key.trim().is_empty() && !name.trim().is_empty()
   }
 
   /// 获取可用的模型列表
   pub fn get_available_models(&self) -> Vec<AIModel> {
-    let mut models = Vec::new();
-    if !self.deepseek_api_key.is_empty() {
-      models.push(AIModel::DeepSeek);
-    }
-    if !self.qwen_api_key.is_empty() {
-      // 检查 qwen3-vl-plus 模型是否配置（通过环境变量判断）
-      if !self.qwen3_vl_plus_model.is_empty() {
-        models.push(AIModel::Qwen3VlPlus);
-      }
-    }
-    if !self.doubao_api_key.is_empty() {
-      models.push(AIModel::Doubao);
-    }
-    models
+    [AIModel::DeepSeek, AIModel::Qwen3VlPlus, AIModel::Doubao]
+      .into_iter()
+      .filter(|model| self.is_model_available(*model))
+      .collect()
   }
 }
 
@@ -979,6 +1070,142 @@ impl ChatClient {
 mod tests {
   use super::*;
   use crate::usage::ChatUsage;
+
+  #[tokio::test]
+  async fn agent_requests_reuse_provider_config_and_preserve_tools() {
+    use std::{
+      io::{Read, Write},
+      net::TcpListener,
+    };
+    for model in [AIModel::DeepSeek, AIModel::Qwen3VlPlus, AIModel::Doubao] {
+      let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+      let base = format!("http://{}", listener.local_addr().unwrap());
+      let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+          .set_read_timeout(Some(Duration::from_secs(5)))
+          .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0; 4096];
+        loop {
+          let size = socket.read(&mut buffer).unwrap();
+          assert!(size > 0);
+          request.extend_from_slice(&buffer[..size]);
+          let text = String::from_utf8_lossy(&request);
+          if let Some((headers, body)) = text.split_once("\r\n\r\n") {
+            let length: usize = headers
+              .lines()
+              .find_map(|line| {
+                line
+                  .to_lowercase()
+                  .strip_prefix("content-length: ")
+                  .map(str::to_owned)
+              })
+              .unwrap()
+              .parse()
+              .unwrap();
+            if body.len() >= length {
+              break;
+            }
+          }
+        }
+        socket
+          .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+          .unwrap();
+        let request = String::from_utf8(request).unwrap();
+        let (headers, body) = request.split_once("\r\n\r\n").unwrap();
+        assert!(headers.starts_with("POST /chat/completions "));
+        assert!(
+          headers
+            .to_lowercase()
+            .contains("authorization: bearer test-provider-key")
+        );
+        serde_json::from_str::<Value>(body).unwrap()
+      });
+      let mut client = ChatClient::from_env().unwrap();
+      client.deepseek_api_base = base.clone();
+      client.qwen_api_base = base.clone();
+      client.doubao_api_base = base;
+      client.deepseek_api_key = "test-provider-key".into();
+      client.qwen_api_key = "test-provider-key".into();
+      client.doubao_api_key = "test-provider-key".into();
+      client.deepseek_reasoner_model.clear();
+      client.deepseek_model = "configured-deepseek".into();
+      client.qwen3_vl_plus_model = "configured-qwen".into();
+      client.doubao_model = "configured-doubao".into();
+      let catalog = client.agent_models();
+      let advertised = catalog
+        .iter()
+        .find(|entry| entry["id"] == model.to_str())
+        .unwrap();
+      assert_eq!(
+        advertised["upstream_model"],
+        client.agent_provider(model, false).2
+      );
+      assert!(!catalog
+        .iter()
+        .any(|entry| entry.to_string().contains("test-provider-key")));
+      let input = json!({"model":model.to_str(),"messages":[{"role":"tool","tool_call_id":"call-1","content":"note"}],"tools":[{"type":"function","function":{"name":"read_note","parameters":{"type":"object"}}}],"reasoning_effort":"high","stream":true});
+      assert!(
+        client
+          .agent_completion(model, input.clone())
+          .await
+          .unwrap()
+          .status()
+          .is_success()
+      );
+      let body = server.join().unwrap();
+      assert_eq!(body["messages"], input["messages"]);
+      assert_eq!(body["tools"], input["tools"]);
+      assert_eq!(
+        body["model"],
+        match model {
+          AIModel::DeepSeek => "configured-deepseek",
+          AIModel::Qwen3VlPlus => "configured-qwen",
+          AIModel::Doubao => "configured-doubao",
+        }
+      );
+      assert_eq!(body["model"], advertised["reasoning_model"]);
+      assert_eq!(body["stream_options"]["include_usage"], true);
+      assert!(body.get("reasoning_effort").is_none());
+      assert_eq!(
+        body["thinking"],
+        if model == AIModel::Qwen3VlPlus {
+          Value::Null
+        } else {
+          json!({"type":"enabled"})
+        }
+      );
+    }
+  }
+
+  #[test]
+  fn agent_catalog_tracks_provider_changes_reasoning_and_disabled_models() {
+    let mut client = ChatClient::from_env().unwrap();
+    client.deepseek_api_key = "private-deepseek-key".into();
+    client.qwen_api_key = "private-qwen-key".into();
+    client.doubao_api_key = "private-doubao-key".into();
+    client.deepseek_api_base = "https://ark.cn-beijing.volces.com/api/v3".into();
+    client.qwen_api_base = "https://dashscope.aliyuncs.com/compatible-mode/v1".into();
+    client.doubao_api_base = client.deepseek_api_base.clone();
+    client.deepseek_model = "configured-deepseek".into();
+    client.deepseek_reasoner_model = "configured-reasoner".into();
+    client.qwen3_vl_plus_model = "configured-qwen".into();
+    client.doubao_model = "configured-doubao".into();
+    let models = client.agent_models();
+    assert_eq!(models.len(), 3);
+    assert_eq!(models[0]["provider_name"], "火山引擎");
+    assert_eq!(models[1]["provider_name"], "阿里云 DashScope");
+    assert_eq!(models[2]["provider_name"], "火山引擎");
+    assert_eq!(models[0]["reasoning_model"], "configured-reasoner");
+    assert_eq!(models[0]["supports_vision"], false);
+    assert_eq!(models[1]["supports_reasoning"], false);
+    assert_eq!(models[2]["supports_reasoning"], true);
+    assert!(!serde_json::to_string(&models).unwrap().contains("private-"));
+    client.qwen3_vl_plus_model.clear();
+    client.doubao_api_key.clear();
+    assert_eq!(client.agent_models().len(), 1);
+  }
 
   #[test]
   fn converted_streams_preserve_split_utf8_and_actual_usage() {
@@ -997,7 +1224,7 @@ mod tests {
       let chunks: Vec<_> = input.as_bytes().chunks(1)
         .map(|chunk| Ok(Bytes::copy_from_slice(chunk))).collect();
       let result = futures::executor::block_on(
-        ChatClient::convert_stream(futures::stream::iter(chunks), convert).collect::<Vec<_>>()
+        ChatClient::convert_stream(futures::stream::iter(chunks), convert).collect::<Vec<_>>(),
       );
       let bytes: Vec<u8> = result.into_iter().flat_map(|chunk| chunk.unwrap().to_vec()).collect();
       let text = std::str::from_utf8(&bytes).unwrap();
@@ -1007,4 +1234,3 @@ mod tests {
     }
   }
 }
-
