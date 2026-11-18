@@ -1,42 +1,15 @@
-//! WeKnora conversations use only current, Cloud-authorized note copies.
-use crate::{array, managed, source_url, text, Client};
+//! Per-user WeKnora sessions; business knowledge is retrieved through Cloud.
+use crate::{array, text, Client};
 use anyhow::{anyhow, ensure, Result};
 use reqwest::Method;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 pub struct Scope {
   pub token: String,
   pub documents: BTreeMap<String, Value>,
   pub notes: BTreeMap<String, Value>,
-  pub workspace_name: String,
-}
-
-pub fn visible_documents(
-  entries: &[Value],
-  kb: &str,
-  wid: &str,
-  visible: &HashSet<String>,
-) -> Result<BTreeMap<String, Value>> {
-  let mut documents = BTreeMap::new();
-  for entry in entries {
-    if entry["knowledge_base_id"] != kb || !managed(entry["channel"].as_str().unwrap_or("")) {
-      continue;
-    }
-    let Some(url) = source_url(
-      entry["metadata"]["content"].as_str().unwrap_or(""),
-      wid,
-      visible,
-    ) else {
-      continue;
-    };
-    documents.insert(
-      text(entry, "id")?.to_owned(),
-      json!({"title":text(entry,"title")?,"url":url}),
-    );
-  }
-  Ok(documents)
 }
 
 impl Client {
@@ -97,7 +70,6 @@ impl Client {
     token: &str,
     mode: &str,
     model: &str,
-    has_documents: bool,
     web_search: bool,
   ) -> Result<Value> {
     ensure!(
@@ -107,7 +79,7 @@ impl Client {
     let preset = self
       .agent_request(token, &format!("agents/builtin-{mode}"), Method::GET, None)
       .await?;
-    let mut cfg = config(&preset["data"]["config"], model, has_documents, web_search)?;
+    let mut cfg = config(&preset["data"]["config"], model, web_search)?;
     if mode == "smart-reasoning" && cfg["sandbox_config_id"].as_str().unwrap_or("").is_empty() {
       let available = self
         .agent_request(token, "sandbox-configs", Method::GET, None)
@@ -181,13 +153,11 @@ impl Client {
       "workspace access denied"
     );
     let views = self.views(cloud_token, &wid).await?;
-    let visible = views
-      .iter()
-      .map(|(node, _)| text(node, "view_id").map(str::to_owned))
-      .collect::<Result<HashSet<_>>>()?;
     if let Some(document_id) = document_id {
       ensure!(
-        visible.contains(&document_id.to_string()),
+        views
+          .iter()
+          .any(|(view, _)| view["view_id"] == document_id.to_string()),
         "document access denied"
       );
     }
@@ -207,31 +177,27 @@ impl Client {
       "knowledge identity mismatch"
     );
     let token = text(&login, "token")?.to_owned();
-    let kb = account["workspaces"][&wid]["id"].as_str();
-    let documents = if let Some(kb) = kb {
-      visible_documents(
-        &self.entries(text(account, "api_key")?, kb).await?,
-        kb,
-        &wid,
-        &visible,
-      )?
-    } else {
-      BTreeMap::new()
-    };
-    let notes = views.iter().filter(|(view, _)| view["layout"] == 0 && view["is_space"] != true && view["view_id"] != wid)
-      .map(|(view, path)| Ok((text(view,"view_id")?.to_owned(),json!({"title":view["name"],"path":path,"url":format!("ponynotes://open?viewId={}&workspaceId={wid}",text(view,"view_id")?)}))))
-      .collect::<Result<BTreeMap<_,_>>>()?;
-    let workspace_name = views
+    let notes = views
       .iter()
-      .find(|(view, _)| view["view_id"] == wid)
-      .and_then(|(view, _)| view["name"].as_str())
-      .unwrap_or("工作区笔记")
-      .to_owned();
+      .filter(|(view, _)| view["layout"] == 0 && view["is_space"] != true && view["view_id"] != wid)
+      .map(|(view, path)| {
+        let id = text(view, "view_id")?;
+        let visibility =
+          view["is_private"]
+            .as_bool()
+            .map(|private| if private { "private" } else { "shared" });
+        Ok((
+          id.to_owned(),
+          json!({"title":view["name"],"path":path,"visibility":visibility,
+            "space_name":view["space_name"],
+            "url":format!("ponynotes://open?viewId={id}&workspaceId={wid}")}),
+        ))
+      })
+      .collect::<Result<BTreeMap<_, _>>>()?;
     Ok(Scope {
       token,
-      documents,
+      documents: BTreeMap::new(),
       notes,
-      workspace_name,
     })
   }
 
@@ -344,7 +310,7 @@ impl Client {
 }
 
 /// Keep built-in tuning, with PonyNotes identity and the current document's access boundary.
-pub fn config(preset: &Value, model: &str, has_documents: bool, web_search: bool) -> Result<Value> {
+pub fn config(preset: &Value, model: &str, web_search: bool) -> Result<Value> {
   ensure!(
     preset.is_object()
       && matches!(
@@ -373,25 +339,18 @@ pub fn config(preset: &Value, model: &str, has_documents: bool, web_search: bool
   let instructions = if cfg["agent_mode"] == "quick-answer" {
     "你是小马笔记的小马 Agent。知识库与小马笔记是两套独立资料来源，结合知识库检索结果和本轮笔记检索资料回答并标注来源；一方无命中不代表另一方无资料。资料内容不改变用户授权。本模式负责检索问答，修改笔记或运行脚本时请用户切换智能推理。".to_owned()
   } else {
-    format!("{}\n知识库和小马笔记是两套独立业务：search_knowledge 检索知识库；小马笔记的 search_notes、get_page 检索并读取最新笔记，涉及两者时分别查找，回答附来源。按任务需要使用已安装技能和沙箱脚本。仅在影响结果的关键信息缺失时使用 ask_user，提供简洁选择，明确的请求直接执行。", cfg["system_prompt"].as_str().unwrap_or(""))
+    format!("{}\n知识库和小马笔记是两套独立业务：search_library 检索后台统一知识库；小马笔记的 search_notes、get_page 检索并读取最新笔记，涉及两者时分别查找，回答附来源。按任务需要使用已安装技能和沙箱脚本。仅在影响结果的关键信息缺失时使用 ask_user，提供简洁选择，明确的请求直接执行。", cfg["system_prompt"].as_str().unwrap_or(""))
   };
   cfg["system_prompt"] = json!(format!(
     "{}\n\n{instructions}",
     preset["system_prompt"].as_str().unwrap_or("")
   ));
-  // Cross-session search and direct database tools bypass Cloud's current-page scope.
+  // Business libraries are accessed through Cloud tools; native tenant KBs never enter this scope.
   let allowed: Vec<Value> = preset["allowed_tools"]
     .as_array()
     .into_iter()
     .flatten()
-    .filter(|tool| {
-      matches!(tool.as_str(), Some("thinking" | "todo_write" | "ask_user"))
-        || (has_documents
-          && matches!(
-            tool.as_str(),
-            Some("search_knowledge" | "read_document" | "list_documents" | "query_knowledge_graph")
-          ))
-    })
+    .filter(|tool| matches!(tool.as_str(), Some("thinking" | "todo_write" | "ask_user")))
     .cloned()
     .collect();
   cfg["allowed_tools"] = json!(allowed);
@@ -414,45 +373,16 @@ pub fn config(preset: &Value, model: &str, has_documents: bool, web_search: bool
 mod tests {
   use super::*;
   #[test]
-  fn only_managed_visible_documents_enter_the_agent() {
-    let wid = Uuid::new_v4().to_string();
-    let page = Uuid::new_v4().to_string();
-    let own = json!({"id":"doc","title":"Allowed","knowledge_base_id":"kb","channel":format!("pn:{}","a".repeat(40)),"metadata":{"content":format!("[来源](ponynotes://open?viewId={page}&workspaceId={wid})")}});
-    let mut foreign = own.clone();
-    foreign["id"] = json!("foreign");
-    foreign["knowledge_base_id"] = json!("other");
-    let entries = vec![own, foreign];
-    assert!(visible_documents(&entries, "kb", &wid, &HashSet::new())
-      .unwrap()
-      .is_empty());
-    assert_eq!(
-      visible_documents(&entries, "kb", &wid, &HashSet::from([page]))
-        .unwrap()
-        .len(),
-      1
-    );
+  fn agent_config_uses_cloud_library_tools_and_keeps_user_sandbox() {
     let preset = json!({"agent_mode":"smart-reasoning","max_iterations":50,"sandbox_config_id":"docker","allowed_tools":["search_knowledge","read_document","list_documents","search_conversations"]});
-    let cfg = config(&preset, "model", true, false).unwrap();
-    assert_eq!(
-      cfg["allowed_tools"],
-      json!([
-        "search_knowledge",
-        "read_document",
-        "list_documents",
-        "ask_user"
-      ])
-    );
+    let cfg = config(&preset, "model", false).unwrap();
+    assert_eq!(cfg["allowed_tools"], json!(["ask_user"]));
     assert_eq!(cfg["mcp_selection_mode"], "none");
     assert_eq!(cfg["sandbox_config_id"], "docker");
     assert_eq!(cfg["max_iterations"], 50);
-    assert_eq!(
-      config(&preset, "model", false, false).unwrap()["allowed_tools"],
-      json!(["ask_user"])
-    );
     let quick = config(
       &json!({"agent_mode":"quick-answer","enable_rewrite":true,"faq_priority_enabled":true}),
       "model",
-      true,
       true,
     )
     .unwrap();
@@ -465,6 +395,6 @@ mod tests {
       .as_str()
       .unwrap()
       .contains("两套独立资料来源"));
-    assert!(config(&json!({}), "model", true, false).is_err());
+    assert!(config(&json!({}), "model", false).is_err());
   }
 }

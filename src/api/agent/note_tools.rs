@@ -3,9 +3,11 @@ use super::conversations::{unavailable, Document};
 use crate::{biz::authentication::jwt::Authorization, state::AppState};
 use access_control::act::Action;
 use actix_web::{error, web, HttpRequest, HttpResponse};
+use ponynotes_weknora::{agent_library, library, Client};
 use redis::AsyncCommands;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -63,6 +65,24 @@ pub(super) async fn channel(
     ));
   }
   Ok(token)
+}
+
+/// Bind the server-authenticated turn, never credentials or scopes supplied by a tool caller.
+pub(super) async fn bind_library(
+  state: &AppState,
+  token: &str,
+  auth: &Authorization,
+  sources: &BTreeMap<String, Value>,
+) -> actix_web::Result<()> {
+  let mut value = record(state, token).await?;
+  value["library_access"] = json!({"uuid":auth.uuid()?,"token":auth.token,"sources":sources});
+  let _: () = state
+    .redis_connection_manager
+    .clone()
+    .set_ex(token_key(token), value.to_string(), 86400)
+    .await
+    .map_err(unavailable)?;
+  Ok(())
 }
 
 #[derive(Deserialize)]
@@ -279,6 +299,7 @@ fn tool_error(message: &str) -> Value {
 pub(super) async fn rpc(
   req: HttpRequest,
   state: web::Data<AppState>,
+  client: web::Data<Client>,
   payload: web::Json<Value>,
 ) -> actix_web::Result<HttpResponse> {
   let token = req
@@ -303,14 +324,45 @@ pub(super) async fn rpc(
   if payload["id"].is_null() {
     return Ok(HttpResponse::Accepted().finish());
   }
+  let mut tools = value["tools"].as_array().cloned().unwrap_or_default();
+  // These reserved names execute only on Cloud, even if a client advertises a matching name.
+  let library_tools = agent_library::tools();
+  tools.retain(|tool| {
+    !library_tools
+      .iter()
+      .any(|server| server["name"] == tool["name"])
+  });
+  if value["library_access"]["sources"]
+    .as_object()
+    .is_some_and(|m| !m.is_empty())
+  {
+    tools.extend(library_tools.clone());
+  }
   let result=match payload["method"].as_str() {
     Some("initialize")=>json!({"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"小马笔记","version":"1.0.0"},"instructions":"小马 Agent 的笔记操作入口。客户端负责实际授权、审批与执行。"}),
     Some("ping")=>json!({}),
-    Some("tools/list")=>json!({"tools":value["tools"]}),
+    Some("tools/list")=>json!({"tools":tools}),
     Some("tools/call")=>{
       let name=payload["params"]["name"].as_str().unwrap_or("");
       let mut args=payload["params"].get("arguments").cloned().unwrap_or(json!({}));
-      if !value["tools"].as_array().is_some_and(|tools|tools.iter().any(|tool|tool["name"]==name)) || !args.is_object() || (args.get("workspace_id").is_some() && args["workspace_id"]!=value["workspace"]) { tool_error("未知、禁用或越权的笔记工具") }
+      if !tools.iter().any(|tool|tool["name"]==name) || !args.is_object() || (args.get("workspace_id").is_some() && args["workspace_id"]!=value["workspace"]) { tool_error("未知、禁用或越权的笔记工具") }
+      else if library_tools.iter().any(|tool|tool["name"]==name) {
+        let access=&value["library_access"];
+        let uuid=Uuid::parse_str(access["uuid"].as_str().unwrap_or("")).map_err(unavailable)?;
+        let uid=value["uid"].as_i64().ok_or_else(||unavailable("invalid library identity"))?;
+        let wid=Uuid::parse_str(value["workspace"].as_str().unwrap_or("")).map_err(unavailable)?;
+        let cloud_token=access["token"].as_str().ok_or_else(||unavailable("missing library authorization"))?;
+        let sources:BTreeMap<String,Value>=serde_json::from_value(access["sources"].clone()).map_err(unavailable)?;
+        state.workspace_access_control.enforce_action(&uid,&wid,Action::Read).await.map_err(|_|error::ErrorForbidden("知识库权限已失效"))?;
+        let output=async {
+          let session=library::Session::authenticate(&client,uuid,uid,cloud_token).await?;
+          agent_library::execute(&state.pg_pool,&client,&session,cloud_token,wid,&sources,name,&args).await
+        }.await;
+        match output {
+          Ok(data)=>json!({"content":[{"type":"text","text":data.to_string()}]}),
+          Err(_)=>tool_error("资料已删除、无权访问或知识库暂不可用，请勿编造检索结果"),
+        }
+      }
       else {
         let uid=value["uid"].as_i64().ok_or_else(||unavailable("invalid note identity"))?;
         let wid=Uuid::parse_str(value["workspace"].as_str().unwrap_or("")).map_err(unavailable)?;
