@@ -1,7 +1,8 @@
-//! Authenticated model discovery and a scoped OpenAI proxy; sub2api is the billing authority.
+//! Project model discovery and a scoped OpenAI proxy; legacy gateway sessions retain sub2api billing.
 use std::time::Duration;
 
 use actix_web::{error, web, HttpRequest, HttpResponse, Scope};
+use appflowy_ai_client::AIModel;
 use futures_util::StreamExt;
 use redis::AsyncCommands;
 use rust_decimal::{prelude::ToPrimitive, Decimal};
@@ -15,6 +16,7 @@ pub(crate) use conversations::authorize_artifact_blob;
 mod automations;
 mod note_tools;
 mod provisioning;
+mod custom_models;
 
 const SESSION_SECONDS: u64 = 86400;
 
@@ -147,7 +149,7 @@ fn bound_key(key: &Value, user_id: i64) -> actix_web::Result<Secret<String>> {
   match key["status"].as_str() {
     Some("active") => {},
     Some("quota_exhausted") => {
-      return Err(error::ErrorForbidden("积分不足，充值后可继续使用 Agent"))
+      return Err(error::ErrorForbidden("积分不足，充值后可继续使用 Agent"));
     },
     Some("expired") => return Err(error::ErrorForbidden("内部模型凭据已过期，请联系管理员")),
     _ => return Err(error::ErrorForbidden("内部模型凭据已停用，请联系管理员")),
@@ -188,10 +190,15 @@ impl Sub2ApiGateway {
 
 pub fn agent_scope() -> Scope {
   web::scope("/agent")
+    .service(custom_models::scope())
     .service(
       web::resource("/note-tools")
         .app_data(web::JsonConfig::default().limit(1024 * 1024))
         .route(web::post().to(note_tools::rpc)),
+    )
+    .route(
+      "/conversations/{workspace_id}/agents",
+      web::get().to(conversations::agent_catalog),
     )
     .route(
       "/conversations/{workspace_id}/references",
@@ -209,6 +216,11 @@ pub fn agent_scope() -> Scope {
     .route("/session", web::post().to(create_session))
     .route("/session", web::delete().to(revoke_session))
     .service(
+      web::resource("/workspaces/{workspace_id}/chat/completions")
+        .app_data(web::JsonConfig::default().limit(20 * 1024 * 1024))
+        .route(web::post().to(completions)),
+    )
+    .service(
       web::resource("/chat/completions")
         .app_data(web::JsonConfig::default().limit(20 * 1024 * 1024))
         .route(web::post().to(completions)),
@@ -224,24 +236,19 @@ async fn user_uid(user: &UserUuid, state: &AppState) -> actix_web::Result<i64> {
 }
 
 async fn models(user: UserUuid, state: web::Data<AppState>) -> actix_web::Result<HttpResponse> {
-  let gateway = gateway(&state)?;
-  let key = gateway
-    .key_for_user(&state, user_uid(&user, &state).await?)
-    .await?;
-  let body = gateway.get("models", &key).await?;
-  let data = body["data"]
-    .as_array()
-    .ok_or_else(|| error::ErrorBadGateway("内部模型列表响应无效"))?;
-  // Only publish model metadata, never the admin response or credentials.
-  let models: Vec<Value> = data.iter().filter_map(|model| {
-    let id = model["id"].as_str().filter(|id| !id.is_empty())?;
-    Some(json!({"id": id, "supports_reasoning": model["supports_reasoning"].as_bool().unwrap_or(false)}))
-  }).collect();
+  user_uid(&user, &state).await?;
+  let models = state.chat_client.agent_models();
   Ok(
     HttpResponse::Ok()
       .insert_header(("Cache-Control", "no-store"))
       .json(json!({"data": models})),
   )
+}
+
+fn builtin_model(state: &AppState, name: &str) -> actix_web::Result<AIModel> {
+  AIModel::from_str(name)
+    .filter(|model| state.chat_client.is_model_available(*model))
+    .ok_or_else(|| error::ErrorBadRequest("所选内置模型已不可用，请重新选择"))
 }
 
 fn credit_balance(body: &Value, wallet: Option<&Value>, rate: u32) -> actix_web::Result<Value> {
@@ -297,7 +304,30 @@ fn credit_balance(body: &Value, wallet: Option<&Value>, rate: u32) -> actix_web:
   )
 }
 
-async fn usage(user: UserUuid, state: web::Data<AppState>) -> actix_web::Result<HttpResponse> {
+#[derive(serde::Deserialize)]
+struct UsageQuery {
+  model: Option<String>,
+  workspace_id: Option<String>,
+}
+
+async fn usage(
+  user: UserUuid,
+  state: web::Data<AppState>,
+  query: web::Query<UsageQuery>,
+) -> actix_web::Result<HttpResponse> {
+  if let Some(name) = &query.model {
+    builtin_model(&state, name)?;
+    let uid = user_uid(&user, &state).await?;
+    let owner = super::ai::resource_owner_uid(&state, uid, query.workspace_id.as_deref()).await?;
+    let remaining = super::ai::check_ai_remaining_by_uid(&state, owner).await?;
+    return Ok(
+      HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store"))
+        .json(
+          json!({"unit": "AI_CALLS", "remaining": remaining, "unlimited": remaining == i64::MAX}),
+        ),
+    );
+  }
   let gateway = gateway(&state)?;
   let (user_id, key_id) = gateway
     .account_for_user(&state.pg_pool, user_uid(&user, &state).await?)
@@ -349,7 +379,6 @@ async fn create_session(
   state: web::Data<AppState>,
 ) -> actix_web::Result<HttpResponse> {
   let uid = user_uid(&user, &state).await?;
-  gateway(&state)?.key_for_user(&state, uid).await?;
   let token = issue_session_token(&state, uid).await?;
   Ok(
     HttpResponse::Ok()
@@ -415,7 +444,9 @@ fn session_token(req: &HttpRequest) -> actix_web::Result<&str> {
         .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
   };
   if !valid {
-    return Err(error::ErrorUnauthorized("内部模型会话无效，请重新连接 Agent"));
+    return Err(error::ErrorUnauthorized(
+      "内部模型会话无效，请重新连接 Agent",
+    ));
   }
   Ok(token)
 }
@@ -439,9 +470,8 @@ async fn completions(
   payload: web::Json<Value>,
 ) -> actix_web::Result<HttpResponse> {
   let token = session_token(&req)?;
-  let gateway = gateway(&state)?;
   let uid = if token.starts_with(provisioning::AUTOMATION_TOKEN_PREFIX) {
-    gateway
+    gateway(&state)?
       .automation_uid(token)
       .ok_or_else(|| error::ErrorUnauthorized("自动化凭据无效，请重新保存自动化任务"))?
   } else {
@@ -452,7 +482,6 @@ async fn completions(
       .map_err(|_| error::ErrorServiceUnavailable("内部模型会话查询失败"))?;
     uid.ok_or_else(|| error::ErrorUnauthorized("内部模型会话已过期，请重新连接 Agent"))?
   };
-  let key = gateway.key_for_user(&state, uid).await?;
   let mut body = payload.into_inner();
   if body["model"]
     .as_str()
@@ -462,6 +491,18 @@ async fn completions(
   {
     return Err(error::ErrorBadRequest("请选择内部模型并提供消息"));
   }
+  if AIModel::from_str(body["model"].as_str().unwrap_or_default()).is_some() {
+    return builtin_completion(
+      &state,
+      uid,
+      token,
+      req.match_info().get("workspace_id"),
+      body,
+    )
+    .await;
+  }
+  let gateway = gateway(&state)?;
+  let key = gateway.key_for_user(&state, uid).await?;
   body["user"] = json!(uid.to_string());
   let response = gateway
     .client
@@ -508,6 +549,68 @@ async fn completions(
           .map(|chunk| chunk.map_err(upstream_error)),
       ),
   )
+}
+
+async fn builtin_completion(
+  state: &AppState,
+  uid: i64,
+  token: &str,
+  workspace_id: Option<&str>,
+  mut body: Value,
+) -> actix_web::Result<HttpResponse> {
+  let model = builtin_model(state, body["model"].as_str().unwrap_or_default())?;
+  let workspace: Option<String> = state
+    .redis_connection_manager
+    .clone()
+    .get(format!("agent:session:workspace:{token}"))
+    .await
+    .map_err(|_| error::ErrorServiceUnavailable("内部模型会话查询失败"))?;
+  let owner =
+    super::ai::resource_owner_uid(state, uid, workspace.as_deref().or(workspace_id)).await?;
+  if super::ai::check_ai_remaining_by_uid(state, owner).await? < 1 {
+    return Ok(HttpResponse::PaymentRequired().json(json!({"error": {
+      "code": "AI_LIMIT_EXCEEDED", "message": "AI 调用次数已用完，请升级订阅或购买补充包"
+    }})));
+  }
+  body["user"] = json!(uid.to_string());
+  let streaming = body["stream"] == true;
+  let response = state
+    .chat_client
+    .agent_completion(model, body)
+    .await
+    .map_err(|_| error::ErrorBadGateway("内置模型服务连接失败，请稍后重试"))?;
+  if !response.status().is_success() {
+    return Err(error::ErrorBadGateway("内置模型请求失败，请稍后重试"));
+  }
+  super::ai::record_ai_chat_usage_by_uid(state, owner).await?;
+  if streaming {
+    let stream = response
+      .bytes_stream()
+      .map(|result| result.map_err(anyhow::Error::from));
+    return Ok(
+      HttpResponse::Ok()
+        .content_type("text/event-stream")
+        .streaming(super::ai::account_chat_tokens(
+          Box::pin(stream),
+          state.pg_pool.clone(),
+          owner,
+        )),
+    );
+  }
+  let body = response.json::<Value>().await.map_err(upstream_error)?;
+  let stream = futures_util::stream::once(std::future::ready(Ok(bytes::Bytes::from(format!(
+    "data: {body}\n\n"
+  )))));
+  // Reuse the same usage parser for non-streaming tool requests.
+  let mut accounted = Box::pin(super::ai::account_chat_tokens(
+    Box::pin(stream),
+    state.pg_pool.clone(),
+    owner,
+  ));
+  if let Some(result) = accounted.next().await {
+    result?;
+  }
+  Ok(HttpResponse::Ok().json(body))
 }
 
 #[cfg(test)]

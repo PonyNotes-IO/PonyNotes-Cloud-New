@@ -48,9 +48,12 @@ MCP 的随机凭据只在 Cloud、Redis 和 WeKnora 的加密凭据存储之间�
 1. 先发布 Cloud，执行 `migrations/20261111000000_weknora_agent_sessions.sql` 和 `migrations/20261112000000_agent_conversations.sql`，再发布客户端。新查询使用运行时 SQLx API，不需要增补 `.sqlx` 查询缓存。
 2. 保留既有 `PONYNOTES_WEKNORA_ENABLED=true`、`PONYNOTES_WEKNORA_URL` 和用户同步映射。本轮实际验证测试服 WeKnora `v0.9.0`，运行版本提交 `f17ee8a`；内置配置和产物接口按对应源码核实。
 3. WeKnora 必须能访问 Cloud 的 `/api/ai/agent/chat/completions` 和 `/api/ai/agent/note-tools`。默认 Base URL 为 `${PONYNOTES_WEKNORA_CLOUD_URL}/api/ai/agent`；网络不同时设置 `PONYNOTES_WEKNORA_MODEL_BASE_URL` 为同一 Cloud 的 Agent Base URL。只在 WeKnora 的 `SSRF_WHITELIST_EXTRA` 添加实际 Cloud 主机，不关闭 SSRF 检查。
-4. Cloud 根据当前用户的内部模型列表建立独立模型配置，模型请求仍经过 Cloud → 用户自己的 sub2api Key，由 sub2api 计费。WeKnora 里存储的是有期限的 Cloud 模型令牌，每轮提交时更新；客户端不需要获得 sub2api Key。自定义模型的凭据会保存到用户自己的 WeKnora 模型配置中，部署应配置其加密存储；模型地址必须可由服务端访问，本机 loopback 模型不再能从远端引擎直连。
-5. 联网查询需要在对应用户的 WeKnora 空间配置搜索服务；客户端的“联网”开关只决定本轮是否开放搜索。
-6. WeKnora 开启 `WEKNORA_SANDBOX_DOCKER_ENABLED=true` 并可访问 Docker daemon。智能推理优先复用该用户已有的内置沙箱绑定或 Docker 配置；没有时在其独立租户创建会话级 Docker 配置。镜像默认 `wechatopenai/weknora-sandbox:v0.9.0`，可通过 Cloud 的 `PONYNOTES_WEKNORA_SANDBOX_IMAGE` 指定已部署的兼容镜像。管理员租户里的沙箱配置不会作为跨用户共享执行目录使用。
+4. 设置页和 Agent 菜单共用已登录的 `/api/ai/agent/models`。目录由实际执行使用的 `ChatClient` 配置生成，返回稳定选择 ID、供应商、实际模型名、推理模型名与能力，不返回凭据。三个内置 ID 是 `deepseek-chat`、`qwen3-vl-plus`、`doubao`；Cloud 通过对应的 `AI_CHAT_*` 配置调用上游，按当前工作区资源所有者的 AI 调用次数和实际 token 计量。旧会话的其他模型名继续走既有 sub2api 网关与余额，保持兼容。
+5. Cloud 为每个 Agent 会话建立独立的 WeKnora 代理模型，保存短期 Cloud 模型令牌并在每轮提交时更新。自动化代理使用带工作区路径的 Cloud 接口。客户端不持有供应商密钥。自定义模型的凭据继续保存到用户自己的 WeKnora 模型配置中；地址必须可由服务端访问，本机 loopback 模型不能从远端引擎直连。
+6. 联网查询需要在对应用户的 WeKnora 空间配置搜索服务；客户端的“联网”开关只决定本轮是否开放搜索。
+7. WeKnora 开启 `WEKNORA_SANDBOX_DOCKER_ENABLED=true` 并可访问 Docker daemon。智能推理优先复用该用户已有的内置沙箱绑定或 Docker 配置；没有时在其独立租户创建会话级 Docker 配置。镜像默认 `wechatopenai/weknora-sandbox:v0.9.0`，可通过 Cloud 的 `PONYNOTES_WEKNORA_SANDBOX_IMAGE` 指定已部署的兼容镜像。管理员租户里的沙箱配置不会作为跨用户共享执行目录使用。
+
+设置页统一按“全部／对话／Embedding／ReRank／视觉／语音”筛选，下方只按“小马内置模型／自定义模型”分组。三个 Agent 内置模型都归入“对话”；模型能力中的视觉支持不改变它们的分类。其他配置继续读取 `/api/knowledge/models`，只将真实内置项及 `can_edit=true` 的本工作区自建模型合并展示、计数，服务端共享手工配置不出现在管理列表。卡片本体不响应点击，编辑／删除仅由各自图标触发，中间链条为占位。此展示过滤不改变后端已有绑定或权限，Agent 选择 ID 不进入知识库 UUID 绑定列表。
 
 ## 会话和资料范围
 

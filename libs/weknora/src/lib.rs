@@ -1,5 +1,6 @@
 //! Shared WeKnora integration used by the existing Cloud and Worker processes.
 pub mod agent;
+pub mod agent_catalog;
 pub mod attachments;
 mod data_source;
 pub mod embedding;
@@ -193,12 +194,12 @@ impl Client {
   }
 
   async fn views(&self, token: &str, wid: &str) -> Result<Vec<(Value, String)>> {
-    let mut pending = vec![(wid.to_owned(), String::new())];
+    let mut pending = vec![(wid.to_owned(), String::new(), None, String::new())];
     let mut visited = HashSet::new();
     let mut views = Vec::new();
-    while let Some((oid, parent)) = pending.pop() {
+    while let Some((oid, parent, parent_private, parent_space)) = pending.pop() {
       ensure!(visited.insert(oid.clone()), "cyclic folder");
-      let node = self
+      let mut node = self
         .cloud(
           token,
           &format!("workspace/{wid}/folder?depth=1&root_view_id={oid}"),
@@ -210,10 +211,25 @@ impl Client {
         if parent.is_empty() { "" } else { " / " },
         text(&node, "name")?
       );
+      // A subtree request restarts Cloud's inherited flag at its root. Keep the
+      // private ancestor discovered during this authorized workspace traversal.
+      let is_private = node["is_private"]
+        .as_bool()
+        .map(|private| private || parent_private == Some(true))
+        .or(parent_private);
+      let space_name = if oid == wid || node["is_space"] == true {
+        text(&node, "name")?.to_owned()
+      } else {
+        parent_space
+      };
+      if let Some(is_private) = is_private {
+        node["is_private"] = json!(is_private);
+      }
+      node["space_name"] = json!(space_name);
       for child in array(&node["children"])? {
         let id = text(child, "view_id")?;
         Uuid::parse_str(id)?;
-        pending.push((id.to_owned(), path.clone()));
+        pending.push((id.to_owned(), path.clone(), is_private, space_name.clone()));
       }
       views.push((node, path));
     }
