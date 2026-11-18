@@ -45,21 +45,15 @@ pub(crate) async fn catalog_with_state(
   state: &Value,
   config: &Value,
 ) -> Result<Catalog> {
-  let wid = wid.to_string();
-  let workspace = session.workspace(&wid)?;
+  session.workspace(&wid.to_string())?;
+  let bases = library::read(client, session, token, "bases", &json!({}), state, config).await?;
   let mut catalog = Catalog {
     items: vec![],
     sources: BTreeMap::new(),
   };
-  for bid in std::iter::once(wid.as_str()).chain(
-    config["bases"]
-      .as_object()
-      .into_iter()
-      .flat_map(|m| m.keys().map(String::as_str)),
-  ) {
-    let Some(info) = session.base_info(workspace, bid, config, state) else {
-      continue;
-    };
+  for info in optional_array(&bases["bases"])? {
+    let bid = text(info, "id")?;
+    let wid = text(info, "workspace_id")?;
     let response = library::read(
       client,
       session,
@@ -82,6 +76,7 @@ pub(crate) async fn catalog_with_state(
       let mut source = doc.clone();
       source["base_id"] = json!(bid);
       source["library_id"] = json!(bid);
+      source["workspace_id"] = json!(wid);
       if source["url"].as_str().unwrap_or("").is_empty() {
         source["url"] = json!(format!("ponynotes://knowledge-file?id={id}"));
       }
@@ -95,24 +90,40 @@ pub(crate) async fn catalog_with_state(
       ids.push(id.to_owned());
       catalog.items.push(
         json!({"kind":"file","id":id,"name":source["title"],"subtitle":info["name"],
-        "visibility":info["visibility"],"library_id":bid,"knowledge_ids":[id]}),
+        "visibility":info["visibility"],"workspace_id":wid,"library_id":bid,"knowledge_ids":[id]}),
       );
     }
-    if bid != wid || !ids.is_empty() {
-      catalog.items.push(
-        json!({"kind":"base","id":bid,"name":info["name"],"subtitle":"知识库导入资料",
-        "visibility":info["visibility"],"library_id":bid,"knowledge_ids":ids}),
-      );
-    }
+    catalog.items.push(
+      json!({"kind":"base","id":bid,"name":info["name"],"subtitle":"知识库导入资料",
+        "visibility":info["visibility"],"workspace_id":wid,"library_id":bid,"knowledge_ids":ids}),
+    );
   }
   Ok(catalog)
+}
+
+/// Restrict shared conversations to shared business libraries in this workspace.
+pub fn retain_shared(catalog: &mut Catalog, wid: Uuid) {
+  let wid = wid.to_string();
+  catalog.items.retain(|item| {
+    item["kind"] == "note" || (item["workspace_id"] == wid && item["visibility"] == "shared")
+  });
+  catalog.sources.retain(|_, source| {
+    source["workspace_id"] == wid
+      && catalog
+        .items
+        .iter()
+        .any(|item| item["kind"] == "base" && item["id"] == source["library_id"])
+  });
 }
 
 /// Intersect a turn's grant with live permissions. New or moved documents never widen that grant.
 pub(crate) fn retain_grant(catalog: &mut Catalog, allowed: &BTreeMap<String, Value>) {
   catalog.sources.retain(|id, source| {
     allowed.get(id).is_some_and(|old| {
-      old["library_id"] == source["library_id"] && source["library_id"].is_string()
+      old["library_id"] == source["library_id"]
+        && source["library_id"].is_string()
+        && old["workspace_id"] == source["workspace_id"]
+        && source["workspace_id"].is_string()
     })
   });
 }
@@ -136,7 +147,7 @@ pub async fn execute(
 pub(crate) async fn execute_with_state(
   client: &Client,
   catalog: &Catalog,
-  wid: Uuid,
+  _wid: Uuid,
   state: &Value,
   config: &Value,
   name: &str,
@@ -219,7 +230,8 @@ pub(crate) async fn execute_with_state(
   }
   let mut hits = vec![];
   for (bid, ids) in bases {
-    let kb = if bid == wid.to_string() {
+    let wid = text(sources[&ids[0].to_owned()], "workspace_id")?;
+    let kb = if bid == wid {
       text(&state["workspaces"][bid], "id")?
     } else {
       bid
@@ -228,11 +240,7 @@ pub(crate) async fn execute_with_state(
     for ids in ids.chunks(20) {
       let mut request = crate::models::search_request(
         query,
-        &config[if bid == wid.to_string() {
-          "workspaces"
-        } else {
-          "bases"
-        }][bid]["model_bindings"],
+        &config[if bid == wid { "workspaces" } else { "bases" }][bid]["model_bindings"],
       );
       request["knowledge_ids"] = json!(ids);
       request["skip_context_enrichment"] = json!(true);

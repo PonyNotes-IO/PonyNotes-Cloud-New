@@ -480,8 +480,8 @@ pub(crate) async fn read(
   for entry in client.entries(key, kb).await? {
     if let Some(mut source) = entry_source(&entry, kb, &wid, &uid, &visible) {
       source["id"] = entry["id"].clone();
-      source["status"] = json!(entry["parse_status"].as_str().unwrap_or(""));
       source["is_note"] = json!(crate::managed(entry["channel"].as_str().unwrap_or("")));
+      source["status"] = json!(entry["parse_status"].as_str().unwrap_or(""));
       documents.push(source);
     }
   }

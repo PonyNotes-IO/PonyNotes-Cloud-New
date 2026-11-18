@@ -49,6 +49,16 @@ pub struct Catalog {
 }
 
 impl Catalog {
+  pub fn notes(scope: &Scope) -> Self {
+    Self {
+      items: scope.notes.iter().map(|(id, note)| {
+        json!({"kind":"note","id":id,"name":note["title"],"subtitle":note["path"],
+        "visibility":note["visibility"],"space_name":note["space_name"],"knowledge_ids":[],"url":note["url"]})
+      }).collect(),
+      sources: BTreeMap::new(),
+    }
+  }
+
   pub fn resolve(&self, references: &[Reference], strict: bool) -> Result<BTreeMap<String, Value>> {
     let mut sources = BTreeMap::new();
     for reference in references {
@@ -88,22 +98,6 @@ impl Catalog {
   pub fn mentions(&self, references: &[Reference]) -> Vec<Value> {
     self.items.iter().filter(|item| references.iter().any(|r| item["kind"] == r.kind && item["id"] == r.id))
       .map(|item| json!({"id":item["id"],"name":item["name"],"type":if item["kind"] == "base" {"kb"} else {"knowledge"}})).collect()
-  }
-}
-
-impl Catalog {
-  /// Notes use live Cloud content. Business libraries are appended by agent_library.
-  pub fn notes(scope: &Scope) -> Self {
-    let mut catalog = Self {
-      items: vec![],
-      sources: BTreeMap::new(),
-    };
-    for (id, note) in &scope.notes {
-      // Explicit notes use the live Cloud document instead of a potentially stale search copy.
-      catalog.items.push(json!({"kind":"note","id":id,"name":note["title"],"subtitle":note["path"],
-        "visibility":note["visibility"],"space_name":note["space_name"],"knowledge_ids":[],"url":note["url"]}));
-    }
-    catalog
   }
 }
 

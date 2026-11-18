@@ -29,12 +29,8 @@ pub(super) async fn authorize(
   path: &Document,
   state: &AppState,
 ) -> actix_web::Result<i64> {
-  let uid = state.user_cache.get_user_uid(&auth.uuid()?).await?;
-  state
-    .workspace_access_control
-    .enforce_action(&uid, &path.as_ref().0, Action::Read)
-    .await
-    .map_err(|_| error::ErrorForbidden("无权操作此工作区"))?;
+  let uid = super::conversations::workspace_user(auth, path.as_ref().0, state).await?;
+  super::conversations::independent_access(state, path.as_ref().0, path.as_ref().1, uid).await?;
   Ok(uid)
 }
 

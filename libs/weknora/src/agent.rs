@@ -235,8 +235,18 @@ impl Client {
       "knowledge identity mismatch"
     );
     let token = text(&login, "token")?.to_owned();
-    // Business libraries are resolved separately through Cloud permissions.
-    let documents = BTreeMap::new();
+    // Keep legacy note IDs for existing history authorization; library retrieval uses Cloud.
+    let kb = account["workspaces"][&wid]["id"].as_str();
+    let documents = if let Some(kb) = kb {
+      visible_documents(
+        &self.entries(text(account, "api_key")?, kb).await?,
+        kb,
+        &wid,
+        &visible,
+      )?
+    } else {
+      BTreeMap::new()
+    };
     let notes = views
       .iter()
       .filter(|(view, _)| view["layout"] == 0 && view["is_space"] != true && view["view_id"] != wid)

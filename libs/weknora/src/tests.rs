@@ -6,6 +6,136 @@ use std::net::TcpListener;
 use std::thread;
 
 #[tokio::test]
+async fn ask_ai_lists_all_accessible_business_bases_and_maps_each_workspace() {
+  let uid = Uuid::new_v4();
+  let wid = Uuid::new_v4();
+  let other = Uuid::new_v4();
+  let bid = Uuid::new_v4();
+  let private = Uuid::new_v4();
+  let doc = Uuid::new_v4();
+  let engine = Uuid::new_v4();
+  let session = library::Session {
+    uid,
+    user_id: 2,
+    workspaces: vec![
+      json!({"workspace_id":wid,"workspace_name":"My Workspace","owner_uid":1}),
+      json!({"workspace_id":other,"workspace_name":"胡迪","owner_uid":1}),
+    ],
+  };
+  let state = json!({"service":{"api_key":"service-secret"},"workspaces":{
+    wid.to_string():{"ready":false},other.to_string():{"ready":true,"id":engine}
+  }});
+  let config = json!({"bases":{
+    bid.to_string():{"workspace_id":wid,"name":"神","visibility":"shared","ready":false},
+    private.to_string():{"workspace_id":wid,"name":"Hidden private base","visibility":"private","owner_uuid":Uuid::new_v4()}
+  }});
+  let (client, task, requests) = mock_recorded(vec![
+    (
+      format!("GET /api/workspace/{other}/folder?depth=1&root_view_id={other} "),
+      200,
+      json!({"data":{"view_id":other,"name":"胡迪","children":[]}}),
+    ),
+    (
+      format!("GET /api/v1/knowledge-bases/{engine}/knowledge?page=1&page_size=100 "),
+      200,
+      json!({"data":[{"id":doc,"knowledge_base_id":engine,"title":"Other workspace import","type":"url","parse_status":"completed"}],"total":1}),
+    ),
+    (
+      format!("POST /api/v1/knowledge-bases/{engine}/hybrid-search "),
+      200,
+      json!({"data":[{"knowledge_id":doc,"content":"Authorized answer","score":1.0}]}),
+    ),
+    (
+      format!("GET /api/v1/chunks/{doc}?page=1&page_size=25 "),
+      200,
+      json!({"data":[{"id":"chunk","content":"Original content"}],"total":1}),
+    ),
+  ]);
+  let catalog = agent_library::catalog_with_state(&client, &session, "token", wid, &state, &config)
+    .await
+    .unwrap();
+  let bases = catalog
+    .items
+    .iter()
+    .filter(|item| item["kind"] == "base")
+    .collect::<Vec<_>>();
+  assert_eq!(
+    bases
+      .iter()
+      .map(|item| item["name"].as_str().unwrap())
+      .collect::<Vec<_>>(),
+    vec!["My Workspace", "神", "胡迪"]
+  );
+  assert_eq!(bases[0]["id"], wid.to_string());
+  assert_eq!(bases[0]["knowledge_ids"], json!([]));
+  assert_eq!(bases[1]["knowledge_ids"], json!([]));
+  assert_eq!(bases[2]["knowledge_ids"], json!([doc]));
+  assert!(catalog
+    .items
+    .iter()
+    .all(|item| item["id"] != private.to_string()));
+  assert_eq!(
+    catalog.sources[&doc.to_string()]["workspace_id"],
+    other.to_string()
+  );
+  let selected = catalog
+    .resolve(
+      &[references::Reference {
+        kind: "base".into(),
+        id: other.to_string(),
+      }],
+      true,
+    )
+    .unwrap();
+  let result = agent_library::execute_with_state(
+    &client,
+    &catalog,
+    wid,
+    &state,
+    &config,
+    "search_library",
+    &json!({"query":"question","base_id":other}),
+  )
+  .await
+  .unwrap();
+  assert_eq!(result["sources"][0]["content"], "Authorized answer");
+  let read = agent_library::execute_with_state(
+    &client,
+    &catalog,
+    wid,
+    &state,
+    &config,
+    "read_library_document",
+    &json!({"document_id":doc}),
+  )
+  .await
+  .unwrap();
+  assert_eq!(read["chunks"][0]["content"], "Original content");
+  let mut moved = references::Catalog {
+    items: vec![],
+    sources: selected.clone(),
+  };
+  moved.sources.get_mut(&doc.to_string()).unwrap()["workspace_id"] = json!(wid);
+  agent_library::retain_grant(&mut moved, &selected);
+  assert!(moved.sources.is_empty());
+  let mut shared = catalog;
+  agent_library::retain_shared(&mut shared, wid);
+  assert_eq!(shared.items.len(), 2);
+  assert!(shared.sources.is_empty());
+  assert!(shared
+    .resolve(
+      &[references::Reference {
+        kind: "base".into(),
+        id: other.to_string()
+      }],
+      true
+    )
+    .is_err());
+  task.join().unwrap();
+  assert_eq!(requests.lock().unwrap()[2].1["knowledge_ids"], json!([doc]));
+}
+
+#[tokio::test]
 async fn ask_ai_library_catalog_search_read_and_revocation_use_cloud_permissions() {
   let uid = Uuid::new_v4();
   let wid = Uuid::new_v4();
@@ -62,24 +192,18 @@ async fn ask_ai_library_catalog_search_read_and_revocation_use_cloud_permissions
     agent_library::catalog_with_state(&client, &session, "cloud-token", wid, &state, &config)
       .await
       .unwrap();
-  assert!(
-    catalog
-      .items
-      .iter()
-      .any(|item| item["kind"] == "base" && item["id"] == bid)
-  );
-  assert!(
-    catalog
-      .items
-      .iter()
-      .any(|item| item["kind"] == "file" && item["id"] == doc)
-  );
-  assert!(
-    !catalog
-      .items
-      .iter()
-      .any(|item| item["id"] == private || item["id"] == foreign || item["id"] == pending)
-  );
+  assert!(catalog
+    .items
+    .iter()
+    .any(|item| item["kind"] == "base" && item["id"] == bid));
+  assert!(catalog
+    .items
+    .iter()
+    .any(|item| item["kind"] == "file" && item["id"] == doc));
+  assert!(!catalog
+    .items
+    .iter()
+    .any(|item| item["id"] == private || item["id"] == foreign || item["id"] == pending));
   assert_eq!(catalog.sources.len(), 2);
   let selected = catalog
     .resolve(
@@ -130,12 +254,10 @@ async fn ask_ai_library_catalog_search_read_and_revocation_use_cloud_permissions
     .unwrap();
   assert_eq!(search.1["knowledge_ids"], json!([doc]));
   assert_eq!(search.1["skip_context_enrichment"], true);
-  assert!(
-    search
-      .0
-      .to_ascii_lowercase()
-      .contains("x-api-key: service-secret")
-  );
+  assert!(search
+    .0
+    .to_ascii_lowercase()
+    .contains("x-api-key: service-secret"));
   assert!(!found.to_string().contains("service-secret"));
 
   config["bases"][&bid]["visibility"] = json!("private");
@@ -146,17 +268,15 @@ async fn ask_ai_library_catalog_search_read_and_revocation_use_cloud_permissions
       .unwrap();
   agent_library::retain_grant(&mut revoked, &selected);
   assert!(revoked.sources.is_empty());
-  assert!(
-    revoked
-      .resolve(
-        &[references::Reference {
-          kind: "file".into(),
-          id: doc.clone()
-        }],
-        true
-      )
-      .is_err()
-  );
+  assert!(revoked
+    .resolve(
+      &[references::Reference {
+        kind: "file".into(),
+        id: doc.clone()
+      }],
+      true
+    )
+    .is_err());
   assert_eq!(
     library::status(
       &agent_library::execute_with_state(
@@ -173,18 +293,16 @@ async fn ask_ai_library_catalog_search_read_and_revocation_use_cloud_permissions
     ),
     403
   );
-  assert!(
-    agent_library::catalog_with_state(
-      &client,
-      &session,
-      "cloud-token",
-      Uuid::new_v4(),
-      &state,
-      &config
-    )
-    .await
-    .is_err()
-  );
+  assert!(agent_library::catalog_with_state(
+    &client,
+    &session,
+    "cloud-token",
+    Uuid::new_v4(),
+    &state,
+    &config
+  )
+  .await
+  .is_err());
   task.join().unwrap();
 }
 
@@ -197,7 +315,7 @@ async fn ask_ai_library_search_batches_document_filters_without_widening_the_tur
     .map(|_| {
       (
         Uuid::new_v4().to_string(),
-        json!({"title":"Document","library_id":bid}),
+        json!({"title":"Document","library_id":bid,"workspace_id":wid}),
       )
     })
     .collect();
@@ -245,11 +363,9 @@ async fn ask_ai_library_search_batches_document_filters_without_widening_the_tur
     .flat_map(|(_, body)| body["knowledge_ids"].as_array().unwrap().clone())
     .collect::<Vec<_>>();
   assert_eq!(sent.len(), 21);
-  assert!(
-    sent
-      .iter()
-      .all(|id| allowed.contains_key(id.as_str().unwrap()))
-  );
+  assert!(sent
+    .iter()
+    .all(|id| allowed.contains_key(id.as_str().unwrap())));
 }
 
 #[tokio::test]
@@ -708,6 +824,86 @@ async fn web_import_v2_preserves_explicit_choices_and_rejects_untrusted_settings
   assert_eq!(base["chunking_config"]["chunk_overlap"], 80);
 }
 
+#[tokio::test]
+async fn note_reference_catalog_preserves_space_visibility_across_subtree_requests() {
+  for (private, expected) in [
+    (Some(true), Some("private")),
+    (Some(false), Some("shared")),
+    (None, None),
+  ] {
+    let uid = Uuid::new_v4();
+    let wid = Uuid::new_v4();
+    let space = Uuid::new_v4();
+    let folder = Uuid::new_v4();
+    let note = Uuid::new_v4();
+    let account = json!({"email":"test@example.test","password":"test-password","user_id":"user","tenant_id":7,"workspaces":{}});
+    let (client, task) = mock(vec![
+      ("GET /gotrue/user".into(), 200, json!({"id":uid})),
+      (
+        "GET /api/workspace ".into(),
+        200,
+        json!({"data":[{"workspace_id":wid}]}),
+      ),
+      (
+        format!("GET /api/workspace/{wid}/folder?depth=1&root_view_id={wid}"),
+        200,
+        json!({"data":{"view_id":wid,"name":"工作区","children":[{"view_id":space}]}}),
+      ),
+      (
+        format!("GET /api/workspace/{wid}/folder?depth=1&root_view_id={space}"),
+        200,
+        json!({"data":{"view_id":space,"name":"资料 / 空间","is_space":true,"is_private":private,"layout":0,"children":[{"view_id":folder}]}}),
+      ),
+      (
+        format!("GET /api/workspace/{wid}/folder?depth=1&root_view_id={folder}"),
+        200,
+        // Cloud starts a standalone non-space root with false, even under a private space.
+        json!({"data":{"view_id":folder,"name":"项目","is_private":private.map(|_|false),"layout":1,"children":[{"view_id":note}]}}),
+      ),
+      (
+        format!("GET /api/workspace/{wid}/folder?depth=1&root_view_id={note}"),
+        200,
+        json!({"data":{"view_id":note,"name":"私有协作笔记","layout":0,"children":[]}}),
+      ),
+      (
+        "POST /api/v1/auth/login".into(),
+        200,
+        json!({"token":"agent-token","user":{"id":"user"},"active_tenant":{"id":7}}),
+      ),
+    ]);
+    let scope = client
+      .conversation_scope(&account, uid, "cloud-token", wid)
+      .await
+      .unwrap();
+    assert_eq!(scope.notes.len(), 1);
+    assert_eq!(
+      scope.notes[&note.to_string()]["visibility"],
+      json!(expected)
+    );
+    let catalog = references::Catalog::notes(&scope);
+    assert_eq!(catalog.items.len(), 1);
+    let item = &catalog.items[0];
+    assert_eq!(item["kind"], "note");
+    assert_eq!(item["id"], note.to_string());
+    assert_eq!(item["visibility"], json!(expected));
+    assert_eq!(item["space_name"], "资料 / 空间");
+    assert_eq!(
+      item["subtitle"],
+      "工作区 / 资料 / 空间 / 项目 / 私有协作笔记"
+    );
+    assert!(catalog
+      .resolve(
+        &[references::Reference {
+          kind: "note".into(),
+          id: note.to_string(),
+        }],
+        true,
+      )
+      .is_ok());
+    task.join().unwrap();
+  }
+}
+
 #[test]
 fn reference_catalog_uses_live_notes_and_excludes_personal_knowledge_copies() {
   let note = Uuid::new_v4().to_string();
@@ -715,9 +911,13 @@ fn reference_catalog_uses_live_notes_and_excludes_personal_knowledge_copies() {
   let scope = agent::Scope {
     token: "session-token".into(),
     workspace_name: "Workspace".into(),
-    documents: std::collections::BTreeMap::from([(legacy.clone(), json!({"title":"Legacy personal copy","base_id":"personal-base"}))]),
+    documents: std::collections::BTreeMap::from([(
+      legacy.clone(),
+      json!({"title":"Legacy personal copy","base_id":"personal-base"}),
+    )]),
     notes: std::collections::BTreeMap::from([(
-      note.clone(), json!({"title":"Current note","path":"Private","visibility":"private","space_name":"My space","url":"ponynotes://open"})
+      note.clone(),
+      json!({"title":"Current note","path":"Private","visibility":"private","space_name":"My space","url":"ponynotes://open"}),
     )]),
   };
   let catalog = references::Catalog::notes(&scope);
@@ -726,9 +926,25 @@ fn reference_catalog_uses_live_notes_and_excludes_personal_knowledge_copies() {
   assert_eq!(catalog.items[0]["visibility"], "private");
   assert_eq!(catalog.items[0]["space_name"], "My space");
   assert!(catalog.sources.is_empty());
-  let selected = catalog.resolve(&[references::Reference {kind:"note".into(),id:note.clone()}], true).unwrap();
+  let selected = catalog
+    .resolve(
+      &[references::Reference {
+        kind: "note".into(),
+        id: note.clone(),
+      }],
+      true,
+    )
+    .unwrap();
   assert!(selected.contains_key(&format!("note:{note}")));
-  assert!(catalog.resolve(&[references::Reference {kind:"file".into(),id:legacy}], true).is_err());
+  assert!(catalog
+    .resolve(
+      &[references::Reference {
+        kind: "file".into(),
+        id: legacy
+      }],
+      true
+    )
+    .is_err());
 }
 
 #[tokio::test]
@@ -783,7 +999,7 @@ async fn smart_reasoning_uses_builtin_tuning_and_provisions_a_user_sandbox() {
     ),
   ]);
   let cfg = client
-    .agent_config("token", "smart-reasoning", "own-model", false, false)
+    .agent_config("token", "smart-reasoning", "own-model", true, false)
     .await
     .unwrap();
   assert_eq!(cfg["sandbox_config_id"], "isolated-docker");
@@ -797,7 +1013,7 @@ async fn smart_reasoning_uses_builtin_tuning_and_provisions_a_user_sandbox() {
   assert_eq!(cfg["max_completion_tokens"], 0);
   assert_eq!(
     cfg["allowed_tools"],
-    json!(["thinking", "ask_user"])
+    json!(["thinking", "search_knowledge", "ask_user"])
   );
   task.join().unwrap();
 }
@@ -820,10 +1036,12 @@ async fn quick_answer_keeps_rag_defaults_without_provisioning_a_sandbox() {
 }
 
 #[tokio::test]
-async fn agent_login_binds_identity_without_reading_personal_knowledge() {
+async fn agent_login_binds_identity_and_limits_knowledge_to_visible_pages() {
   let uid = Uuid::new_v4();
   let wid = Uuid::new_v4();
   let page = Uuid::new_v4();
+  let hidden = Uuid::new_v4();
+  let entry = |id: Uuid| json!({"id":id,"knowledge_base_id":"kb","title":"笔记","channel":format!("pn:{}","a".repeat(40)),"metadata":{"content":format!("ponynotes://open?viewId={id}&workspaceId={wid}")}});
   let account = json!({"email":"test@example.test","password":"test-password","user_id":"user","tenant_id":7,"api_key":"sync-key","workspaces":{wid.to_string():{"id":"kb"}}});
   let (client, task) = mock(vec![
     ("GET /gotrue/user".into(), 200, json!({"id":uid})),
@@ -840,12 +1058,17 @@ async fn agent_login_binds_identity_without_reading_personal_knowledge() {
     (
       format!("GET /api/workspace/{wid}/folder?depth=1&root_view_id={page}"),
       200,
-      json!({"data":{"view_id":page,"name":"note","layout":0,"children":[]}}),
+      json!({"data":{"view_id":page,"name":"note","children":[]}}),
     ),
     (
       "POST /api/v1/auth/login".into(),
       200,
       json!({"token":"agent-token","user":{"id":"user"},"active_tenant":{"id":7}}),
+    ),
+    (
+      "GET /api/v1/knowledge-bases/kb/knowledge?".into(),
+      200,
+      json!({"data":[entry(page),entry(hidden)],"total":2}),
     ),
   ]);
   let scope = client
@@ -853,8 +1076,8 @@ async fn agent_login_binds_identity_without_reading_personal_knowledge() {
     .await
     .unwrap();
   assert_eq!(scope.token, "agent-token");
-  assert!(scope.documents.is_empty());
-  assert!(scope.notes.contains_key(&page.to_string()));
+  assert_eq!(scope.documents.len(), 1);
+  assert!(scope.documents.contains_key(&page.to_string()));
   task.join().unwrap();
 }
 
@@ -2135,38 +2358,6 @@ async fn library_models_save_into_the_existing_tenant_and_return_no_credentials(
     .is_none());
 }
 
-#[test]
-fn model_delete_rejects_other_workspaces_builtins_and_bound_models() {
-  assert!(crate::library::ACTIONS.contains(&"model_delete"));
-  let wid = Uuid::new_v4().to_string();
-  let other = Uuid::new_v4().to_string();
-  let model = json!({"id":"model-id","description":format!("PonyNotes library model {wid}")});
-  let models = vec![model.clone()];
-  assert!(crate::models::validate_delete(&models, &wid, "model-id", &json!({})).is_ok());
-  for (workspace, id, settings, expected) in [
-    (other.as_str(), "model-id", json!({}), 403),
-    (wid.as_str(), "missing-id", json!({}), 403),
-    (
-      wid.as_str(),
-      "model-id",
-      json!({"workspaces":{wid.clone():{"model_bindings":{"rerank_model_id":"model-id"}}}}),
-      409,
-    ),
-    (
-      wid.as_str(),
-      "model-id",
-      json!({"bases":{"base-id":{"model_bindings":{"summary_model_id":"model-id"}}}}),
-      409,
-    ),
-  ] {
-    let error = crate::models::validate_delete(&models, workspace, id, &settings).unwrap_err();
-    assert_eq!(crate::library::status(&error), expected);
-  }
-  let mut builtin = model;
-  builtin["is_builtin"] = json!(true);
-  assert!(crate::models::validate_delete(&[builtin], &wid, "model-id", &json!({})).is_err());
-}
-
 #[tokio::test]
 async fn agent_catalog_keeps_shared_identity_and_hides_runtime_and_secrets() {
   let private = Uuid::new_v4().to_string();
@@ -2272,4 +2463,36 @@ fn selected_agents_keep_specialist_tools_and_restrict_implicit_knowledge() {
     &json!({}),
     Some("allowed")
   ));
+}
+
+#[test]
+fn model_delete_rejects_other_workspaces_builtins_and_bound_models() {
+  assert!(crate::library::ACTIONS.contains(&"model_delete"));
+  let wid = Uuid::new_v4().to_string();
+  let other = Uuid::new_v4().to_string();
+  let model = json!({"id":"model-id","description":format!("PonyNotes library model {wid}")});
+  let models = vec![model.clone()];
+  assert!(crate::models::validate_delete(&models, &wid, "model-id", &json!({})).is_ok());
+  for (workspace, id, settings, expected) in [
+    (other.as_str(), "model-id", json!({}), 403),
+    (wid.as_str(), "missing-id", json!({}), 403),
+    (
+      wid.as_str(),
+      "model-id",
+      json!({"workspaces":{wid.clone():{"model_bindings":{"rerank_model_id":"model-id"}}}}),
+      409,
+    ),
+    (
+      wid.as_str(),
+      "model-id",
+      json!({"bases":{"base-id":{"model_bindings":{"summary_model_id":"model-id"}}}}),
+      409,
+    ),
+  ] {
+    let error = crate::models::validate_delete(&models, workspace, id, &settings).unwrap_err();
+    assert_eq!(crate::library::status(&error), expected);
+  }
+  let mut builtin = model;
+  builtin["is_builtin"] = json!(true);
+  assert!(crate::models::validate_delete(&[builtin], &wid, "model-id", &json!({})).is_err());
 }

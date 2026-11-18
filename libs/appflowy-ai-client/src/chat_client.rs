@@ -87,9 +87,8 @@ impl ChatClient {
         .unwrap_or_else(|_| String::new()),
       deepseek_web_search_bot_model: deepseek_web_search_bot,
       qwen_api_key,
-      qwen_api_base: std::env::var("AI_CHAT_QWEN_API_BASE").unwrap_or_else(|_| {
-        "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()
-      }),
+      qwen_api_base: std::env::var("AI_CHAT_QWEN_API_BASE")
+        .unwrap_or_else(|_| "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()),
       qwen3_vl_plus_model: std::env::var("AI_CHAT_QWEN3_VL_PLUS_MODEL")
         .unwrap_or_else(|_| "qwen3-vl-plus".to_string()),
       qwen_search_model,
@@ -396,7 +395,10 @@ impl ChatClient {
       // Bot API 第一个 SSE chunk 包含巨大的 references 数组（搜索引用），
       // 会导致 Flutter SSE 客户端因 chunk 过大而无法解析，从而卡死。
       // 通过转换函数剥离 references/metadata，只保留标准 OpenAI 格式内容。
-      return Ok(Self::convert_stream(response.bytes_stream(), Self::convert_deepseek_bot_to_openai));
+      return Ok(Self::convert_stream(
+        response.bytes_stream(),
+        Self::convert_deepseek_bot_to_openai,
+      ));
     }
 
     error!("[DeepSeek Bot] 重试 {} 次后仍失败：{}", max_retries, last_error);
@@ -548,11 +550,9 @@ impl ChatClient {
       info!("✅ [通义千问] API响应成功: {}", status);
     }
 
-    Ok(Box::pin(
-      response
-        .bytes_stream()
-        .map(|result| result.map_err(|e| anyhow!("Stream error: {}", e))),
-    ))
+    Ok(Box::pin(response.bytes_stream().map(|result| {
+      result.map_err(|e| anyhow!("Stream error: {}", e))
+    })))
   }
 
   /// 调用豆包 API（支持多模态）
@@ -641,11 +641,9 @@ impl ChatClient {
 
     info!("Doubao API response status: {}", status);
 
-    Ok(Box::pin(
-      response
-        .bytes_stream()
-        .map(|result| result.map_err(|e| anyhow!("Stream error: {}", e))),
-    ))
+    Ok(Box::pin(response.bytes_stream().map(|result| {
+      result.map_err(|e| anyhow!("Stream error: {}", e))
+    })))
   }
 
   /// 调用豆包 Responses API 进行文本联网搜索
@@ -701,7 +699,10 @@ impl ChatClient {
     info!("✅ [豆包联网] 响应状态: {}", status);
 
     // Responses API 返回 SSE 格式需要转换为 OpenAI 标准格式
-    Ok(Self::convert_stream(response.bytes_stream(), Self::convert_doubao_responses_to_openai))
+    Ok(Self::convert_stream(
+      response.bytes_stream(),
+      Self::convert_doubao_responses_to_openai,
+    ))
   }
 
   /// 调用豆包多模态 API（使用 /responses 接口）
@@ -750,7 +751,10 @@ impl ChatClient {
     info!("✅ [豆包多模态] API响应成功: {}", status);
 
     // 将豆包 /responses 接口的响应格式转换为 OpenAI 标准格式
-    Ok(Self::convert_stream(response.bytes_stream(), Self::convert_doubao_responses_to_openai))
+    Ok(Self::convert_stream(
+      response.bytes_stream(),
+      Self::convert_doubao_responses_to_openai,
+    ))
   }
 
   fn convert_stream(
@@ -766,7 +770,10 @@ impl ChatClient {
             Ok(bytes) => pending.extend_from_slice(&bytes),
           }
           if pending.len() > 1024 * 1024 {
-            return Some((Err(anyhow!("Provider SSE event too large")), (source, Vec::new())));
+            return Some((
+              Err(anyhow!("Provider SSE event too large")),
+              (source, Vec::new()),
+            ));
           }
           // Normalize only complete lines: HTTP chunks can split a UTF-8 character or usage JSON.
           if let Some(end) = pending.iter().rposition(|byte| *byte == b'\n') {
@@ -830,7 +837,7 @@ impl ChatClient {
                   output.push_str(&format!("data: {}\n\n", openai_json));
                   debug!("🔄 [豆包多模态] 转换内容增量: {}", delta);
                 }
-              }
+              },
               // 处理响应完成
               "response.done" | "response.completed" => {
                 if let Some(usage) = json_value.pointer("/response/usage").or_else(|| json_value.get("usage")) {
@@ -838,11 +845,11 @@ impl ChatClient {
                 }
                 output.push_str("data: [DONE]\n\n");
                 info!("✅ [豆包多模态] 响应完成");
-              }
+              },
               // 忽略其他事件类型（reasoning、created等）
               _ => {
                 debug!("⏭️ [豆包多模态] 跳过事件类型: {}", event_type);
-              }
+              },
             }
           }
         }
@@ -858,7 +865,10 @@ impl ChatClient {
   }
 
   /// 构建消息列表 (OpenAI兼容格式，支持历史对话、多模态和文件)
-  fn build_messages_for_openai_compatible(&self, params: &ChatRequestParams) -> Vec<serde_json::Value> {
+  fn build_messages_for_openai_compatible(
+    &self,
+    params: &ChatRequestParams,
+  ) -> Vec<serde_json::Value> {
     let mut messages = Vec::new();
 
     // 添加历史消息
@@ -920,7 +930,10 @@ impl ChatClient {
   }
 
   /// 构建豆包多模态 API 的 input 字段
-  fn build_input_for_doubao_multimodal(&self, params: &ChatRequestParams) -> Vec<serde_json::Value> {
+  fn build_input_for_doubao_multimodal(
+    &self,
+    params: &ChatRequestParams,
+  ) -> Vec<serde_json::Value> {
     let mut input = Vec::new();
 
     // 添加历史消息（如果有）
@@ -1211,7 +1224,7 @@ mod tests {
       let chunks: Vec<_> = input.as_bytes().chunks(1)
         .map(|chunk| Ok(Bytes::copy_from_slice(chunk))).collect();
       let result = futures::executor::block_on(
-        ChatClient::convert_stream(futures::stream::iter(chunks), convert).collect::<Vec<_>>()
+        ChatClient::convert_stream(futures::stream::iter(chunks), convert).collect::<Vec<_>>(),
       );
       let bytes: Vec<u8> = result.into_iter().flat_map(|chunk| chunk.unwrap().to_vec()).collect();
       let text = std::str::from_utf8(&bytes).unwrap();
@@ -1221,4 +1234,3 @@ mod tests {
     }
   }
 }
-

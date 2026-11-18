@@ -3,6 +3,7 @@ pub mod agent;
 pub mod agent_catalog;
 pub mod agent_library;
 pub mod attachments;
+pub mod conversations;
 mod data_source;
 pub mod embedding;
 pub mod library;
