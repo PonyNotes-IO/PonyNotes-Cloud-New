@@ -235,6 +235,7 @@ impl Client {
       "knowledge identity mismatch"
     );
     let token = text(&login, "token")?.to_owned();
+    // Keep legacy note IDs for existing history authorization; library retrieval uses Cloud.
     let kb = account["workspaces"][&wid]["id"].as_str();
     let documents = if let Some(kb) = kb {
       visible_documents(
@@ -246,9 +247,23 @@ impl Client {
     } else {
       BTreeMap::new()
     };
-    let notes = views.iter().filter(|(view, _)| view["layout"] == 0 && view["is_space"] != true && view["view_id"] != wid)
-      .map(|(view, path)| Ok((text(view,"view_id")?.to_owned(),json!({"title":view["name"],"path":path,"url":format!("ponynotes://open?viewId={}&workspaceId={wid}",text(view,"view_id")?)}))))
-      .collect::<Result<BTreeMap<_,_>>>()?;
+    let notes = views
+      .iter()
+      .filter(|(view, _)| view["layout"] == 0 && view["is_space"] != true && view["view_id"] != wid)
+      .map(|(view, path)| {
+        let id = text(view, "view_id")?;
+        let visibility =
+          view["is_private"]
+            .as_bool()
+            .map(|private| if private { "private" } else { "shared" });
+        Ok((
+          id.to_owned(),
+          json!({"title":view["name"],"path":path,"visibility":visibility,
+            "space_name":view["space_name"],
+            "url":format!("ponynotes://open?viewId={id}&workspaceId={wid}")}),
+        ))
+      })
+      .collect::<Result<BTreeMap<_, _>>>()?;
     let workspace_name = views
       .iter()
       .find(|(view, _)| view["view_id"] == wid)
