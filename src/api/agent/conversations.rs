@@ -6,6 +6,7 @@ use actix_web::{error, web, FromRequest, HttpRequest, HttpResponse, Scope};
 use appflowy_collaborate::ws2::WorkspaceCollabInstanceCache;
 use base64::Engine;
 use futures_util::{stream, StreamExt};
+use ponynotes_weknora::agent_catalog::{metadata as agent_metadata, Selection};
 use ponynotes_weknora::references::{restore_reference_input, Catalog, Reference};
 use ponynotes_weknora::{agent, Client};
 use redis::AsyncCommands;
@@ -61,6 +62,35 @@ pub(super) async fn reference_catalog(
     HttpResponse::Ok()
       .insert_header(("Cache-Control", "no-store"))
       .json(json!({"items":catalog.items})),
+  )
+}
+
+pub(super) async fn agent_catalog(
+  auth: Authorization,
+  workspace: web::Path<Uuid>,
+  state: web::Data<AppState>,
+  client: web::Data<Client>,
+) -> actix_web::Result<HttpResponse> {
+  let uid = workspace_user(&auth, *workspace, &state).await?;
+  if !ponynotes_weknora::enabled() {
+    return Err(error::ErrorServiceUnavailable("知识库尚未启用"));
+  }
+  let account = knowledge_account(&auth, &state).await?;
+  let scope = client
+    .conversation_scope(&account, auth.uuid()?, &auth.token, *workspace)
+    .await
+    .map_err(unavailable)?;
+  let runtime_ids: Vec<String> = sqlx::query_scalar(
+    "SELECT state->>'agent_id' FROM af_weknora_agent_sessions WHERE uid=$1 AND state->>'agent_id' IS NOT NULL")
+    .bind(uid).fetch_all(&state.pg_pool).await.map_err(unavailable)?;
+  let items = client
+    .agent_catalog(&scope.token, &runtime_ids)
+    .await
+    .map_err(unavailable)?;
+  Ok(
+    HttpResponse::Ok()
+      .insert_header(("Cache-Control", "no-store"))
+      .json(json!({"items":items})),
   )
 }
 
@@ -495,7 +525,7 @@ async fn history(
     HttpResponse::Ok()
       .insert_header(("Cache-Control", "no-store"))
       .json(json!({
-    "messages":messages,"sources":ctx.scope.documents,"scope_changed":changed,"mode":record["mode"],"cloud_artifacts":artifacts,
+    "messages":messages,"sources":ctx.scope.documents,"scope_changed":changed,"mode":record["mode"],"selected_agent":record["selected_agent"],"cloud_artifacts":artifacts,
     "active_message_id":active_message(&messages).and_then(|m|m["id"].as_str())})),
   )
 }
@@ -620,6 +650,8 @@ struct Send {
   #[serde(default = "default_mode")]
   mode: String,
   #[serde(default)]
+  agent: Option<Selection>,
+  #[serde(default)]
   attachments: Vec<Value>,
   #[serde(default)]
   references: Vec<Reference>,
@@ -670,6 +702,7 @@ fn validate(payload: &Send) -> actix_web::Result<()> {
       .len()
       != payload.references.len()
     || !matches!(payload.mode.as_str(), "smart-reasoning" | "quick-answer")
+    || payload.agent.as_ref().is_some_and(|agent| !agent.valid())
   {
     return Err(error::ErrorBadRequest("问题、模型或附件参数无效"));
   }
@@ -715,7 +748,12 @@ fn validate(payload: &Send) -> actix_web::Result<()> {
       return Err(error::ErrorBadRequest("图片格式无效或超过 5 MB"));
     }
   }
-  if !payload.model.is_internal {
+  if !payload.model.is_internal
+    && !payload
+      .agent
+      .as_ref()
+      .is_some_and(|agent| agent.source_tenant_id.is_some())
+  {
     let url = reqwest::Url::parse(&payload.model.base_url)
       .map_err(|_| error::ErrorBadRequest("自定义模型地址无效"))?;
     if url.scheme() != "https"
@@ -743,6 +781,19 @@ async fn send(
 ) -> actix_web::Result<HttpResponse> {
   validate(&payload)?;
   let mut ctx = context(&auth, &path, &state, &client).await?;
+  let selection = payload.agent.clone().unwrap_or_else(|| Selection {
+    id: format!("builtin-{}", payload.mode),
+    source_tenant_id: None,
+  });
+  let preset = client
+    .selected_agent(&ctx.scope.token, &selection)
+    .await
+    .map_err(|_| error::ErrorForbidden("智能体已停用、删除或无权访问，请重新选择"))?;
+  let selected_agent = agent_metadata(&preset, selection.source_tenant_id).map_err(unavailable)?;
+  if selected_agent["mode"] != payload.mode {
+    return Err(error::ErrorBadRequest("智能体模式已变化，请重新选择"));
+  }
+  let shared_agent = selection.source_tenant_id.is_some();
   let mut selected_ids = None;
   let mut mentioned_items = vec![];
   let mut query = payload.query.clone();
@@ -827,7 +878,30 @@ async fn send(
   if query.chars().count() > 100_000 {
     return Err(error::ErrorBadRequest("问题与检索资料过长，请缩小范围"));
   }
-  let note_channel = if payload.mode == "smart-reasoning" {
+  if !shared_agent && selected_ids.is_none() {
+    let wid = ctx.workspace.to_string();
+    let managed_base = ctx.account["workspaces"][&wid]["id"].as_str();
+    selected_ids = Some(
+      ctx
+        .scope
+        .documents
+        .iter()
+        .filter(|(id, source)| {
+          !id.starts_with("note:")
+            && ponynotes_weknora::agent_catalog::permits_document(
+              &preset["config"],
+              source,
+              managed_base,
+            )
+            && (payload.mode != "quick-answer"
+              || payload.note_search_status.is_empty()
+              || source["base_id"].is_string())
+        })
+        .map(|(id, _)| id.clone())
+        .collect(),
+    );
+  }
+  let note_channel = if payload.mode == "smart-reasoning" && !shared_agent {
     Some(
       super::note_tools::channel(
         &state,
@@ -887,7 +961,7 @@ async fn send(
     .unwrap_or_default();
   note_sources.extend(local_note_sources.clone());
   record["note_sources"] = json!(note_sources);
-  if payload.mode == "smart-reasoning" && record["mcp_id"].is_null() {
+  if payload.mode == "smart-reasoning" && !shared_agent && record["mcp_id"].is_null() {
     let services = client
       .agent_request(&ctx.scope.token, "mcp-services", Method::GET, None)
       .await
@@ -914,98 +988,63 @@ async fn send(
       ));
     }
   }
-  let base;
-  let credential;
-  if payload.model.is_internal {
-    let gw = gateway(&state)?;
-    let key = gw.key_for_user(&state, ctx.uid).await?;
-    let available = gw.get("models", &key).await?;
-    if !available["data"]
-      .as_array()
-      .is_some_and(|models| models.iter().any(|m| m["id"] == payload.model.model_name))
-    {
-      return Err(error::ErrorBadRequest("所选内部模型已不可用"));
+  let agent_id = if shared_agent {
+    // Let the engine resolve the verified share, including its private prompt,
+    // source models and read-only resource policy. Never overwrite the owner.
+    selection.id.clone()
+  } else {
+    let base;
+    let credential;
+    if payload.model.is_internal {
+      let gw = gateway(&state)?;
+      let key = gw.key_for_user(&state, ctx.uid).await?;
+      let available = gw.get("models", &key).await?;
+      if !available["data"]
+        .as_array()
+        .is_some_and(|models| models.iter().any(|m| m["id"] == payload.model.model_name))
+      {
+        return Err(error::ErrorBadRequest("所选内部模型已不可用"));
+      }
+      base = client.model_base_url();
+      super::revoke_conversation_model(&state, ctx.uid, ctx.workspace, ctx.document).await?;
+      credential = issue_session_token(&state, ctx.uid).await?;
+      let _: () = state
+        .redis_connection_manager
+        .clone()
+        .set_ex(
+          super::conversation_model_key(ctx.uid, ctx.workspace, ctx.document),
+          &credential,
+          super::SESSION_SECONDS,
+        )
+        .await
+        .map_err(unavailable)?;
+    } else {
+      base = payload
+        .model
+        .base_url
+        .trim_end_matches('/')
+        .trim_end_matches("/chat/completions")
+        .to_owned();
+      credential = payload.model.api_key.clone();
     }
-    base = client.model_base_url();
-    super::revoke_conversation_model(&state, ctx.uid, ctx.workspace, ctx.document).await?;
-    credential = issue_session_token(&state, ctx.uid).await?;
-    let _: () = state
-      .redis_connection_manager
-      .clone()
-      .set_ex(
-        super::conversation_model_key(ctx.uid, ctx.workspace, ctx.document),
-        &credential,
-        super::SESSION_SECONDS,
-      )
-      .await
-      .map_err(unavailable)?;
-  } else {
-    base = payload
-      .model
-      .base_url
-      .trim_end_matches('/')
-      .trim_end_matches("/chat/completions")
-      .to_owned();
-    credential = payload.model.api_key.clone();
-  }
-  let model_payload = json!({"name":payload.model.model_name,"display_name":format!("小马笔记 · {}",ctx.document),"type":"KnowledgeQA","source":"remote",
+    let model_payload = json!({"name":payload.model.model_name,"display_name":format!("小马笔记 · {}",ctx.document),"type":"KnowledgeQA","source":"remote",
     "parameters":{"base_url":base,"api_key":credential,"provider":"generic","interface_type":"openai","supports_vision":true,"context_window":128000,"max_output_tokens":8192,"spec":{"reasoning":payload.model.supports_reasoning,"context_window":128000,"max_output_tokens":8192}}});
-  let model_id = if let Some(id) = record["model_id"].as_str() {
-    client
-      .agent_request(
-        &ctx.scope.token,
-        &format!("models/{id}"),
-        Method::PUT,
-        Some(&model_payload),
-      )
-      .await
-      .map_err(unavailable)?;
-    client
-      .agent_request(
-        &ctx.scope.token,
-        &format!("models/{id}/credentials"),
-        Method::PUT,
-        Some(&json!({"api_key":credential})),
-      )
-      .await
-      .map_err(unavailable)?;
-    id.to_owned()
-  } else {
-    let created = client
-      .agent_request(
-        &ctx.scope.token,
-        "models",
-        Method::POST,
-        Some(&model_payload),
-      )
-      .await
-      .map_err(unavailable)?;
-    created["data"]["id"]
-      .as_str()
-      .ok_or_else(|| unavailable("missing model"))?
-      .to_owned()
-  };
-  record["model_id"] = json!(model_id);
-  save(&ctx, &record, &mut connection).await?;
-  let mcp_id = if let Some(note_channel) = note_channel {
-    let mcp_base = client.model_base_url();
-    let mcp_payload = json!({"name":format!("小马笔记工具-{}",ctx.document),"description":"小马 Agent 的笔记与数据库操作；客户端在执行边界检查权限并审批写入。","usage_instructions":format!("当前工作区 ID：{}。当前问 AI 文档 ID：{}。笔记工具覆盖查找、读取、创建和编辑笔记、块与数据库；操作当前工作区，页面 ID 先查询。",ctx.workspace,ctx.document),"enabled":true,"transport_type":"http-streamable","url":format!("{}/note-tools",mcp_base.trim_end_matches('/')),"auth_config":{"auth_type":"bearer","token":note_channel},"advanced_config":{"timeout":150,"retry_count":0,"retry_delay":1}});
-    let mcp_id = if let Some(id) = record["mcp_id"].as_str() {
+    let model_id = if let Some(id) = record["model_id"].as_str() {
       client
         .agent_request(
           &ctx.scope.token,
-          &format!("mcp-services/{id}"),
+          &format!("models/{id}"),
           Method::PUT,
-          Some(&mcp_payload),
+          Some(&model_payload),
         )
         .await
         .map_err(unavailable)?;
       client
         .agent_request(
           &ctx.scope.token,
-          &format!("mcp-services/{id}/credentials"),
+          &format!("models/{id}/credentials"),
           Method::PUT,
-          Some(&json!({"token":note_channel})),
+          Some(&json!({"api_key":credential})),
         )
         .await
         .map_err(unavailable)?;
@@ -1014,95 +1053,156 @@ async fn send(
       let created = client
         .agent_request(
           &ctx.scope.token,
-          "mcp-services",
+          "models",
           Method::POST,
-          Some(&mcp_payload),
+          Some(&model_payload),
         )
         .await
         .map_err(unavailable)?;
       created["data"]["id"]
         .as_str()
-        .ok_or_else(|| unavailable("missing note service"))?
+        .ok_or_else(|| unavailable("missing model"))?
         .to_owned()
     };
-    record["mcp_id"] = json!(mcp_id);
+    record["model_id"] = json!(model_id);
     save(&ctx, &record, &mut connection).await?;
-    client
-      .agent_request(
+    let mcp_id = if let Some(note_channel) = note_channel {
+      let mcp_base = client.model_base_url();
+      let mcp_payload = json!({"name":format!("小马笔记工具-{}",ctx.document),"description":"小马 Agent 的笔记与数据库操作；客户端在执行边界检查权限并审批写入。","usage_instructions":format!("当前工作区 ID：{}。当前问 AI 文档 ID：{}。笔记工具覆盖查找、读取、创建和编辑笔记、块与数据库；操作当前工作区，页面 ID 先查询。",ctx.workspace,ctx.document),"enabled":true,"transport_type":"http-streamable","url":format!("{}/note-tools",mcp_base.trim_end_matches('/')),"auth_config":{"auth_type":"bearer","token":note_channel},"advanced_config":{"timeout":150,"retry_count":0,"retry_delay":1}});
+      let mcp_id = if let Some(id) = record["mcp_id"].as_str() {
+        client
+          .agent_request(
+            &ctx.scope.token,
+            &format!("mcp-services/{id}"),
+            Method::PUT,
+            Some(&mcp_payload),
+          )
+          .await
+          .map_err(unavailable)?;
+        client
+          .agent_request(
+            &ctx.scope.token,
+            &format!("mcp-services/{id}/credentials"),
+            Method::PUT,
+            Some(&json!({"token":note_channel})),
+          )
+          .await
+          .map_err(unavailable)?;
+        id.to_owned()
+      } else {
+        let created = client
+          .agent_request(
+            &ctx.scope.token,
+            "mcp-services",
+            Method::POST,
+            Some(&mcp_payload),
+          )
+          .await
+          .map_err(unavailable)?;
+        created["data"]["id"]
+          .as_str()
+          .ok_or_else(|| unavailable("missing note service"))?
+          .to_owned()
+      };
+      record["mcp_id"] = json!(mcp_id);
+      save(&ctx, &record, &mut connection).await?;
+      client
+        .agent_request(
+          &ctx.scope.token,
+          &format!("mcp-services/{mcp_id}/metadata/refresh"),
+          Method::POST,
+          Some(&json!({})),
+        )
+        .await
+        .map_err(unavailable)?;
+      Some(mcp_id)
+    } else {
+      None
+    };
+    let mut config = client
+      .agent_config_from(
         &ctx.scope.token,
-        &format!("mcp-services/{mcp_id}/metadata/refresh"),
-        Method::POST,
-        Some(&json!({})),
+        &preset["config"],
+        &model_id,
+        selected_ids.as_ref().map_or(
+          ctx
+            .scope
+            .documents
+            .keys()
+            .any(|id| !id.starts_with("note:")),
+          |ids| !ids.is_empty(),
+        ),
+        payload.web_search,
       )
       .await
       .map_err(unavailable)?;
-    Some(mcp_id)
-  } else {
-    None
-  };
-  let mut config = client
-    .agent_config(
-      &ctx.scope.token,
-      &payload.mode,
-      &model_id,
-      selected_ids.as_ref().map_or(
+    // Wiki and tabular tools need KB identities. Only expose complete native
+    // libraries from the authorized catalog, never the managed note-copy KB.
+    let bases: HashSet<&str> = selected_ids
+      .as_ref()
+      .into_iter()
+      .flatten()
+      .filter_map(|id| {
         ctx
           .scope
           .documents
-          .keys()
-          .any(|id| !id.starts_with("note:")),
-        |ids| !ids.is_empty(),
-      ),
-      payload.web_search,
-    )
-    .await
-    .map_err(unavailable)?;
-  // Keep the user's query intact for native RAG rewriting and retrieval.
-  if !note_material.is_empty() {
-    config["system_prompt"] = json!(format!(
-      "{}\n{note_material}",
-      config["system_prompt"].as_str().unwrap_or("")
-    ));
-    config["fallback_prompt"] = json!(format!(
+          .get(id)
+          .and_then(|source| source["base_id"].as_str())
+      })
+      .collect();
+    if !bases.is_empty() {
+      config["kb_selection_mode"] = json!("selected");
+      config["knowledge_bases"] = json!(bases);
+    }
+    // Keep the user's query intact for native RAG rewriting and retrieval.
+    if !note_material.is_empty() {
+      config["system_prompt"] = json!(format!(
+        "{}\n{note_material}",
+        config["system_prompt"].as_str().unwrap_or("")
+      ));
+      config["fallback_prompt"] = json!(format!(
       "{}\n你是小马笔记的小马 Agent。知识库本轮未命中时，仍应结合独立检索的笔记资料回答并标注笔记来源；笔记也没有相关资料时明确说明，不编造来源。\n{note_material}",
       config["fallback_prompt"].as_str().unwrap_or("")
     ));
-    // A direct FAQ answer would skip the independently retrieved notes.
-    if !payload.note_context.is_empty() {
-      config["faq_priority_enabled"] = json!(false);
+      // A direct FAQ answer would skip the independently retrieved notes.
+      if !payload.note_context.is_empty() {
+        config["faq_priority_enabled"] = json!(false);
+      }
     }
-  }
-  if payload.mode == "smart-reasoning" {
-    config["mcp_selection_mode"] = json!("selected");
-    config["mcp_services"] = json!([mcp_id.unwrap()]);
-  }
-  let agent_id = if let Some(id) = record["agent_id"].as_str() {
-    client
+    if payload.mode == "smart-reasoning" {
+      config["mcp_selection_mode"] = json!("selected");
+      config["mcp_services"] = json!([mcp_id.unwrap()]);
+    }
+    let agent_id = if let Some(id) = record["agent_id"].as_str() {
+      client
       .agent_request(
         &ctx.scope.token,
         &format!("agents/{id}"),
         Method::PUT,
-        Some(&json!({"name":"小马 Agent","config":config})),
+        Some(&json!({"name":preset["name"],"description":format!("PonyNotes conversation:{}",ctx.document),"config":config})),
       )
       .await
       .map_err(unavailable)?;
-    id.to_owned()
-  } else {
-    let created = client
+      id.to_owned()
+    } else {
+      let created = client
       .agent_request(
         &ctx.scope.token,
         "agents",
         Method::POST,
-        Some(&json!({"name":"小马 Agent","config":config})),
+        Some(&json!({"name":preset["name"],"description":format!("PonyNotes conversation:{}",ctx.document),"config":config})),
       )
       .await
       .map_err(unavailable)?;
-    created["data"]["id"]
-      .as_str()
-      .ok_or_else(|| unavailable("missing agent"))?
-      .to_owned()
+      created["data"]["id"]
+        .as_str()
+        .ok_or_else(|| unavailable("missing agent"))?
+        .to_owned()
+    };
+    record["agent_id"] = json!(agent_id);
+    agent_id
   };
-  record["agent_id"] = json!(agent_id);
+  record["selected_agent"] = selected_agent;
   save(&ctx, &record, &mut connection).await?;
   if !scope_matches(&ctx, &record) || record["session_id"].is_null() {
     if let Some(previous) = record["session_id"].as_str() {
@@ -1179,7 +1279,8 @@ async fn send(
       .documents
       .iter()
       .filter(|(id, source)| {
-        !id.starts_with("note:")
+        !shared_agent
+          && !id.starts_with("note:")
           && (payload.mode != "quick-answer"
             || payload.note_search_status.is_empty()
             || source["base_id"].is_string())
@@ -1189,7 +1290,8 @@ async fn send(
   });
   // Expand a selected base to authorized document IDs; raw bases could expose hidden note copies.
   let request = json!({"query":query,"mentioned_items":mentioned_items,"agent_id":agent_id,"agent_enabled":payload.mode == "smart-reasoning","knowledge_ids":knowledge_ids,
-    "knowledge_base_ids":[],"images":payload.images,"attachment_ids":attachment_ids,"reasoning_effort":if payload.model.supports_reasoning {payload.reasoning_effort.as_str()}else{"off"},"web_search_enabled":payload.web_search,"channel":"api"});
+    "agent_source_tenant_id":selection.source_tenant_id,
+    "knowledge_base_ids":[],"images":payload.images,"attachment_ids":attachment_ids,"reasoning_effort":if shared_agent {""}else if payload.model.supports_reasoning {payload.reasoning_effort.as_str()}else{"off"},"web_search_enabled":payload.web_search,"channel":"api"});
   let upstream = client
     .agent_stream(
       &ctx.scope.token,
@@ -1494,6 +1596,7 @@ mod tests {
       initial_request: false,
       client_id: Uuid::new_v4(),
       mode: default_mode(),
+      agent: None,
       attachments: vec![],
       references: vec![],
       note_context: vec![],

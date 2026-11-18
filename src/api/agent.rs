@@ -194,6 +194,10 @@ pub fn agent_scope() -> Scope {
         .route(web::post().to(note_tools::rpc)),
     )
     .route(
+      "/conversations/{workspace_id}/agents",
+      web::get().to(conversations::agent_catalog),
+    )
+    .route(
       "/conversations/{workspace_id}/references",
       web::get().to(conversations::reference_catalog),
     )
