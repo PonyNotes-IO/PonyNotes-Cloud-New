@@ -1976,6 +1976,7 @@ async fn library_models_save_into_the_existing_tenant_and_return_no_credentials(
 
 #[test]
 fn model_delete_rejects_other_workspaces_builtins_and_bound_models() {
+  assert!(crate::library::ACTIONS.contains(&"model_delete"));
   let wid = Uuid::new_v4().to_string();
   let other = Uuid::new_v4().to_string();
   let model = json!({"id":"model-id","description":format!("PonyNotes library model {wid}")});
