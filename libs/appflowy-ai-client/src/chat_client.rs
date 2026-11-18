@@ -37,25 +37,51 @@ pub struct ChatClient {
 impl ChatClient {
   pub fn from_env() -> Result<Self> {
     // 读取环境变量
-    let deepseek_api_key = std::env::var("AI_CHAT_DEEPSEEK_API_KEY")
-      .unwrap_or_else(|_| String::new());
-    let qwen_api_key = std::env::var("AI_CHAT_QWEN_API_KEY")
-      .unwrap_or_else(|_| String::new());
-    let doubao_api_key = std::env::var("AI_CHAT_DOUBAO_API_KEY")
-      .unwrap_or_else(|_| String::new());
+    let deepseek_api_key =
+      std::env::var("AI_CHAT_DEEPSEEK_API_KEY").unwrap_or_else(|_| String::new());
+    let qwen_api_key = std::env::var("AI_CHAT_QWEN_API_KEY").unwrap_or_else(|_| String::new());
+    let doubao_api_key = std::env::var("AI_CHAT_DOUBAO_API_KEY").unwrap_or_else(|_| String::new());
 
-    let deepseek_web_search_bot = std::env::var("AI_CHAT_DEEPSEEK_WEB_SEARCH_MODEL")
-      .unwrap_or_else(|_| String::new());
-    let qwen_search_model = std::env::var("AI_CHAT_QWEN_SEARCH_MODEL")
-      .unwrap_or_else(|_| "qwen-plus".to_string());
+    let deepseek_web_search_bot =
+      std::env::var("AI_CHAT_DEEPSEEK_WEB_SEARCH_MODEL").unwrap_or_else(|_| String::new());
+    let qwen_search_model =
+      std::env::var("AI_CHAT_QWEN_SEARCH_MODEL").unwrap_or_else(|_| "qwen-plus".to_string());
 
     // 详细日志：环境变量加载情况
     info!("ChatClient initialization:");
-    info!("  - DeepSeek API Key: {} bytes", if deepseek_api_key.is_empty() { 0 } else { deepseek_api_key.len() });
-    info!("  - DeepSeek Web Search Bot: {}", if deepseek_web_search_bot.is_empty() { "未配置" } else { &deepseek_web_search_bot });
-    info!("  - Qwen API Key: {} bytes", if qwen_api_key.is_empty() { 0 } else { qwen_api_key.len() });
+    info!(
+      "  - DeepSeek API Key: {} bytes",
+      if deepseek_api_key.is_empty() {
+        0
+      } else {
+        deepseek_api_key.len()
+      }
+    );
+    info!(
+      "  - DeepSeek Web Search Bot: {}",
+      if deepseek_web_search_bot.is_empty() {
+        "未配置"
+      } else {
+        &deepseek_web_search_bot
+      }
+    );
+    info!(
+      "  - Qwen API Key: {} bytes",
+      if qwen_api_key.is_empty() {
+        0
+      } else {
+        qwen_api_key.len()
+      }
+    );
     info!("  - Qwen Search Model: {}", qwen_search_model);
-    info!("  - Doubao API Key: {} bytes", if doubao_api_key.is_empty() { 0 } else { doubao_api_key.len() });
+    info!(
+      "  - Doubao API Key: {} bytes",
+      if doubao_api_key.is_empty() {
+        0
+      } else {
+        doubao_api_key.len()
+      }
+    );
 
     if deepseek_api_key.is_empty() && qwen_api_key.is_empty() && doubao_api_key.is_empty() {
       error!("WARNING: All AI provider API keys are empty! Chat functionality will not work.");
@@ -115,8 +141,10 @@ impl ChatClient {
       .as_object_mut()
       .ok_or_else(|| anyhow!("Expected a completion object"))?;
     object.insert("model".into(), json!(name));
-    object.remove("reasoning_effort");
-    if model != AIModel::Qwen3VlPlus {
+    let effort = object.remove("reasoning_effort").unwrap_or(json!("off"));
+    if model == AIModel::Qwen3VlPlus {
+      Self::apply_qwen_thinking(&mut body, effort.as_str().unwrap_or_default())?;
+    } else {
       body["thinking"] = json!({"type": if thinking { "enabled" } else { "disabled" }});
     }
     if body["stream"] == true {
@@ -131,6 +159,26 @@ impl ChatClient {
         .send()
         .await?,
     )
+  }
+
+  // Qwen3-VL uses a token budget, not OpenAI's reasoning_effort enum.
+  fn apply_qwen_thinking(body: &mut Value, effort: &str) -> Result<()> {
+    let budget = match effort {
+      "off" | "max" => None,
+      "minimal" => Some(512),
+      "low" => Some(2048),
+      "medium" => Some(8192),
+      "high" => Some(16384),
+      "xhigh" => Some(32768),
+      _ => return Err(anyhow!("Invalid Qwen reasoning effort")),
+    };
+    body["enable_thinking"] = json!(effort != "off");
+    body.as_object_mut().unwrap().remove("thinking");
+    body.as_object_mut().unwrap().remove("thinking_budget");
+    if let Some(budget) = budget {
+      body["thinking_budget"] = json!(budget);
+    }
+    Ok(())
   }
 
   fn agent_provider(&self, model: AIModel, thinking: bool) -> (&str, &str, &str) {
@@ -185,7 +233,7 @@ impl ChatClient {
         };
         json!({"id":model.to_str(),"name":name,"provider_name":provider,
         "upstream_model":upstream,"reasoning_model":reasoning,
-        "supports_reasoning":model != AIModel::Qwen3VlPlus,
+        "supports_reasoning":true,
         "supports_vision":model != AIModel::DeepSeek})
       })
       .collect()
@@ -262,7 +310,10 @@ impl ChatClient {
 
     // 深度思考模式：切换到推理模型（如 DeepSeek-R1），否则使用默认模型
     let model_to_use = if params.enable_thinking && !self.deepseek_reasoner_model.is_empty() {
-      info!("[DeepSeek] 深度思考模式：切换到推理模型 {}", self.deepseek_reasoner_model);
+      info!(
+        "[DeepSeek] 深度思考模式：切换到推理模型 {}",
+        self.deepseek_reasoner_model
+      );
       self.deepseek_reasoner_model.as_str()
     } else {
       self.deepseek_model.as_str()
@@ -283,8 +334,14 @@ impl ChatClient {
     }
 
     info!("[DeepSeek] 请求URL: {}", url);
-    info!("[DeepSeek] 模型: {}, enable_thinking: {}, enable_web_search: {}", model_to_use, params.enable_thinking, params.enable_web_search);
-    debug!("[DeepSeek] 请求体: {}", serde_json::to_string_pretty(&body)?);
+    info!(
+      "[DeepSeek] 模型: {}, enable_thinking: {}, enable_web_search: {}",
+      model_to_use, params.enable_thinking, params.enable_web_search
+    );
+    debug!(
+      "[DeepSeek] 请求体: {}",
+      serde_json::to_string_pretty(&body)?
+    );
 
     // 最多重试3次（应对 429 Too Many Requests / ServerOverloaded）
     let max_retries = 3;
@@ -313,7 +370,9 @@ impl ChatClient {
         let error_text = response.text().await.unwrap_or_default();
         warn!(
           "[DeepSeek] 429 Too Many Requests（服务过载），attempt={}/{}: {}",
-          attempt + 1, max_retries, error_text
+          attempt + 1,
+          max_retries,
+          error_text
         );
         last_error = format!("DeepSeek 服务繁忙（429），请稍后重试。{}", error_text);
         continue; // 重试
@@ -356,8 +415,14 @@ impl ChatClient {
     });
 
     info!("[DeepSeek Bot] 联网搜索请求URL: {}", url);
-    info!("[DeepSeek Bot] Bot ID: {}", self.deepseek_web_search_bot_model);
-    debug!("[DeepSeek Bot] 请求体: {}", serde_json::to_string_pretty(&body)?);
+    info!(
+      "[DeepSeek Bot] Bot ID: {}",
+      self.deepseek_web_search_bot_model
+    );
+    debug!(
+      "[DeepSeek Bot] 请求体: {}",
+      serde_json::to_string_pretty(&body)?
+    );
 
     // Bot 接口也做 429 重试
     let max_retries = 3;
@@ -365,7 +430,10 @@ impl ChatClient {
     for attempt in 0..max_retries {
       if attempt > 0 {
         let wait_secs = 1u64 << attempt;
-        warn!("[DeepSeek Bot] 第 {} 次重试，等待 {}s...", attempt, wait_secs);
+        warn!(
+          "[DeepSeek Bot] 第 {} 次重试，等待 {}s...",
+          attempt, wait_secs
+        );
         sleep(Duration::from_secs(wait_secs)).await;
       }
 
@@ -381,14 +449,23 @@ impl ChatClient {
       let status = response.status();
       if status.as_u16() == 429 {
         let error_text = response.text().await.unwrap_or_default();
-        warn!("[DeepSeek Bot] 429 服务过载 attempt={}/{}: {}", attempt + 1, max_retries, error_text);
+        warn!(
+          "[DeepSeek Bot] 429 服务过载 attempt={}/{}: {}",
+          attempt + 1,
+          max_retries,
+          error_text
+        );
         last_error = format!("DeepSeek 联网搜索服务繁忙，请稍后重试。{}", error_text);
         continue;
       }
       if !status.is_success() {
         let error_text = response.text().await?;
         error!("[DeepSeek Bot] API error: {} - {}", status, error_text);
-        return Err(anyhow!("DeepSeek Bot API error: {} - {}", status, error_text));
+        return Err(anyhow!(
+          "DeepSeek Bot API error: {} - {}",
+          status,
+          error_text
+        ));
       }
 
       info!("[DeepSeek Bot] 联网搜索响应状态: {}", status);
@@ -401,7 +478,10 @@ impl ChatClient {
       ));
     }
 
-    error!("[DeepSeek Bot] 重试 {} 次后仍失败：{}", max_retries, last_error);
+    error!(
+      "[DeepSeek Bot] 重试 {} 次后仍失败：{}",
+      max_retries, last_error
+    );
     Err(anyhow!("{}", last_error))
   }
 
@@ -468,7 +548,8 @@ impl ChatClient {
     }
 
     // 检查是否有图片（多模态支持）
-    let has_images = params.has_images && params.images.is_some() && !params.images.as_ref().unwrap().is_empty();
+    let has_images =
+      params.has_images && params.images.is_some() && !params.images.as_ref().unwrap().is_empty();
 
     // 联网搜索 + 无图片：切换到文本搜索模型（qwen3-vl-plus 不支持联网搜索）
     // 原因：qwen3-vl-plus 是多模态视觉模型，enable_search 对其无效
@@ -483,7 +564,8 @@ impl ChatClient {
       model_name
     };
 
-    info!("🤖 [通义千问] 模型: {}, has_images: {}, images_count: {}, web_search: {}",
+    info!(
+      "🤖 [通义千问] 模型: {}, has_images: {}, images_count: {}, web_search: {}",
       actual_model,
       params.has_images,
       params.images.as_ref().map(|v| v.len()).unwrap_or(0),
@@ -514,18 +596,27 @@ impl ChatClient {
       });
     }
 
-    // qwen3-vl-plus 是多模态视觉模型，不支持 enable_thinking 参数
-    // 深度思考只在纯文本 Qwen3 模型上支持
-    if params.enable_thinking && !has_images && !actual_model.contains("vl") {
-      body["enable_thinking"] = json!(true);
-    }
+    Self::apply_qwen_thinking(
+      &mut body,
+      if params.enable_thinking {
+        "medium"
+      } else {
+        "off"
+      },
+    )?;
 
     info!("🎨 [通义千问] 请求URL: {}", url);
     info!("🎨 [通义千问] 模型: {}", actual_model);
     if has_images {
-      info!("🎨 [通义千问] 请求体（多模态）: {}", serde_json::to_string_pretty(&body)?);
+      info!(
+        "🎨 [通义千问] 请求体（多模态）: {}",
+        serde_json::to_string_pretty(&body)?
+      );
     } else {
-      debug!("💬 [通义千问] 请求体: {}", serde_json::to_string_pretty(&body)?);
+      debug!(
+        "💬 [通义千问] 请求体: {}",
+        serde_json::to_string_pretty(&body)?
+      );
     }
 
     let response = self
@@ -564,9 +655,11 @@ impl ChatClient {
       return Err(anyhow!("Doubao API key not configured"));
     }
 
-    let has_images = params.has_images && params.images.is_some() && !params.images.as_ref().unwrap().is_empty();
+    let has_images =
+      params.has_images && params.images.is_some() && !params.images.as_ref().unwrap().is_empty();
 
-    info!("🤖 [豆包] has_images: {}, images_count: {}, web_search: {}",
+    info!(
+      "🤖 [豆包] has_images: {}, images_count: {}, web_search: {}",
       params.has_images,
       params.images.as_ref().map(|v| v.len()).unwrap_or(0),
       params.enable_web_search
@@ -621,7 +714,10 @@ impl ChatClient {
     });
 
     debug!("Doubao chat request URL: {}", url);
-    debug!("Doubao chat request body: {}", serde_json::to_string_pretty(&body)?);
+    debug!(
+      "Doubao chat request body: {}",
+      serde_json::to_string_pretty(&body)?
+    );
 
     let response = self
       .http_client
@@ -677,8 +773,15 @@ impl ChatClient {
     });
 
     info!("🔍 [豆包联网] 请求URL: {}", url);
-    info!("🔍 [豆包联网] 模型: {}, 消息数: {}", self.doubao_model, input_messages.len());
-    debug!("🔍 [豆包联网] 请求体: {}", serde_json::to_string_pretty(&body)?);
+    info!(
+      "🔍 [豆包联网] 模型: {}, 消息数: {}",
+      self.doubao_model,
+      input_messages.len()
+    );
+    debug!(
+      "🔍 [豆包联网] 请求体: {}",
+      serde_json::to_string_pretty(&body)?
+    );
 
     let response = self
       .http_client
@@ -693,7 +796,11 @@ impl ChatClient {
     if !status.is_success() {
       let error_text = response.text().await?;
       error!("❌ [豆包联网] API错误: {} - {}", status, error_text);
-      return Err(anyhow!("Doubao web search API error: {} - {}", status, error_text));
+      return Err(anyhow!(
+        "Doubao web search API error: {} - {}",
+        status,
+        error_text
+      ));
     }
 
     info!("✅ [豆包联网] 响应状态: {}", status);
@@ -706,7 +813,7 @@ impl ChatClient {
   }
 
   /// 调用豆包多模态 API（使用 /responses 接口）
-  /// 
+  ///
   /// 豆包 /responses 接口返回的SSE格式与OpenAI不同，需要转换：
   /// - 豆包格式：`event: response.output_text.delta\ndata: {"delta":"内容",...}`
   /// - OpenAI格式：`data: {"choices":[{"delta":{"content":"内容"}}]}`
@@ -730,7 +837,10 @@ impl ChatClient {
 
     info!("🎨 [豆包多模态] 请求URL: {}", url);
     info!("🎨 [豆包多模态] 模型: {}", self.doubao_model);
-    info!("🎨 [豆包多模态] 请求体: {}", serde_json::to_string_pretty(&body)?);
+    info!(
+      "🎨 [豆包多模态] 请求体: {}",
+      serde_json::to_string_pretty(&body)?
+    );
 
     let response = self
       .http_client
@@ -745,7 +855,11 @@ impl ChatClient {
     if !status.is_success() {
       let error_text = response.text().await?;
       error!("❌ [豆包多模态] API错误: {} - {}", status, error_text);
-      return Err(anyhow!("Doubao multimodal API error: {} - {}", status, error_text));
+      return Err(anyhow!(
+        "Doubao multimodal API error: {} - {}",
+        status,
+        error_text
+      ));
     }
 
     info!("✅ [豆包多模态] API响应成功: {}", status);
@@ -790,13 +904,13 @@ impl ChatClient {
   }
 
   /// 将豆包 /responses 接口的SSE格式转换为 OpenAI 标准格式
-  /// 
+  ///
   /// 输入格式（豆包）：
   /// ```
   /// event: response.output_text.delta
   /// data: {"type":"response.output_text.delta","delta":"内容","..."}
   /// ```
-  /// 
+  ///
   /// 输出格式（OpenAI）：
   /// ```
   /// data: {"choices":[{"delta":{"content":"内容"}}]}
@@ -804,20 +918,20 @@ impl ChatClient {
   fn convert_doubao_responses_to_openai(bytes: &Bytes) -> Bytes {
     let text = String::from_utf8_lossy(bytes);
     let mut output = String::new();
-    
+
     // 按行处理SSE数据
     for line in text.lines() {
       let line = line.trim();
-      
+
       // 跳过空行和event行
       if line.is_empty() || line.starts_with("event:") {
         continue;
       }
-      
+
       // 处理data行
       if let Some(data_str) = line.strip_prefix("data:") {
         let data_str = data_str.trim();
-        
+
         // 尝试解析JSON
         if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(data_str) {
           // 获取type字段
@@ -840,8 +954,14 @@ impl ChatClient {
               },
               // 处理响应完成
               "response.done" | "response.completed" => {
-                if let Some(usage) = json_value.pointer("/response/usage").or_else(|| json_value.get("usage")) {
-                  output.push_str(&format!("data: {}\n\n", json!({"choices": [], "usage": usage})));
+                if let Some(usage) = json_value
+                  .pointer("/response/usage")
+                  .or_else(|| json_value.get("usage"))
+                {
+                  output.push_str(&format!(
+                    "data: {}\n\n",
+                    json!({"choices": [], "usage": usage})
+                  ));
                 }
                 output.push_str("data: [DONE]\n\n");
                 info!("✅ [豆包多模态] 响应完成");
@@ -855,7 +975,7 @@ impl ChatClient {
         }
       }
     }
-    
+
     if output.is_empty() {
       // 如果没有转换出任何内容，返回空bytes
       Bytes::new()
@@ -880,8 +1000,8 @@ impl ChatClient {
     }
 
     // 判断是否需要使用多模态格式 (图片或文件)
-    let has_multimodal = (params.has_images && params.images.is_some()) 
-                      || (params.has_files && params.files.is_some());
+    let has_multimodal = (params.has_images && params.images.is_some())
+      || (params.has_files && params.files.is_some());
 
     if has_multimodal {
       // 多模态消息
@@ -965,7 +1085,11 @@ impl ChatClient {
             "image_url": image_url,
           }));
         } else {
-          error!("❌ [豆包多模态] 图片 {} 不是URL格式（长度: {}），跳过", idx, image_url.len());
+          error!(
+            "❌ [豆包多模态] 图片 {} 不是URL格式（长度: {}），跳过",
+            idx,
+            image_url.len()
+          );
           // 跳过非URL格式的图片
         }
       }
@@ -973,7 +1097,10 @@ impl ChatClient {
 
     // 添加文本（豆包格式：type: "input_text", text: "内容"）
     let text_content = self.build_message_text_with_files(params);
-    info!("💬 [豆包多模态] 添加文本内容（长度: {}）", text_content.len());
+    info!(
+      "💬 [豆包多模态] 添加文本内容（长度: {}）",
+      text_content.len()
+    );
     content.push(json!({
       "type": "input_text",
       "text": text_content,
@@ -985,15 +1112,18 @@ impl ChatClient {
       "content": content,
     }));
 
-    info!("📦 [豆包多模态] 构建完成，content包含 {} 个元素", content.len());
-    
+    info!(
+      "📦 [豆包多模态] 构建完成，content包含 {} 个元素",
+      content.len()
+    );
+
     input
   }
 
   /// 构建包含文件内容的消息文本
   fn build_message_text_with_files(&self, params: &ChatRequestParams) -> String {
     let mut text = params.message.clone();
-    
+
     // 添加文件内容到消息中
     if let Some(files) = &params.files {
       if !files.is_empty() {
@@ -1002,7 +1132,7 @@ impl ChatClient {
           text.push_str(&format!("\n📄 文件名: {}\n", file.file_name));
           text.push_str(&format!("文件类型: {}\n", file.file_type));
           text.push_str(&format!("文件大小: {} 字节\n", file.file_size));
-          
+
           match &file.file_data {
             crate::dto::FileData::Text(content) => {
               text.push_str("文件内容:\n```\n");
@@ -1036,7 +1166,7 @@ impl ChatClient {
         }
       }
     }
-    
+
     text
   }
 
@@ -1044,10 +1174,34 @@ impl ChatClient {
   fn is_text_file_type(file_type: &str) -> bool {
     matches!(
       file_type.to_lowercase().as_str(),
-      "txt" | "md" | "markdown" | "json" | "xml" | "html" | "css" | "js" 
-      | "ts" | "jsx" | "tsx" | "py" | "rs" | "go" | "java" | "c" | "cpp" 
-      | "h" | "hpp" | "sh" | "bash" | "yaml" | "yml" | "toml" | "ini" 
-      | "log" | "csv" | "sql"
+      "txt"
+        | "md"
+        | "markdown"
+        | "json"
+        | "xml"
+        | "html"
+        | "css"
+        | "js"
+        | "ts"
+        | "jsx"
+        | "tsx"
+        | "py"
+        | "rs"
+        | "go"
+        | "java"
+        | "c"
+        | "cpp"
+        | "h"
+        | "hpp"
+        | "sh"
+        | "bash"
+        | "yaml"
+        | "yml"
+        | "toml"
+        | "ini"
+        | "log"
+        | "csv"
+        | "sql"
     )
   }
 
@@ -1115,11 +1269,9 @@ mod tests {
         let request = String::from_utf8(request).unwrap();
         let (headers, body) = request.split_once("\r\n\r\n").unwrap();
         assert!(headers.starts_with("POST /chat/completions "));
-        assert!(
-          headers
-            .to_lowercase()
-            .contains("authorization: bearer test-provider-key")
-        );
+        assert!(headers
+          .to_lowercase()
+          .contains("authorization: bearer test-provider-key"));
         serde_json::from_str::<Value>(body).unwrap()
       });
       let mut client = ChatClient::from_env().unwrap();
@@ -1146,14 +1298,12 @@ mod tests {
         .iter()
         .any(|entry| entry.to_string().contains("test-provider-key")));
       let input = json!({"model":model.to_str(),"messages":[{"role":"tool","tool_call_id":"call-1","content":"note"}],"tools":[{"type":"function","function":{"name":"read_note","parameters":{"type":"object"}}}],"reasoning_effort":"high","stream":true});
-      assert!(
-        client
-          .agent_completion(model, input.clone())
-          .await
-          .unwrap()
-          .status()
-          .is_success()
-      );
+      assert!(client
+        .agent_completion(model, input.clone())
+        .await
+        .unwrap()
+        .status()
+        .is_success());
       let body = server.join().unwrap();
       assert_eq!(body["messages"], input["messages"]);
       assert_eq!(body["tools"], input["tools"]);
@@ -1168,6 +1318,10 @@ mod tests {
       assert_eq!(body["model"], advertised["reasoning_model"]);
       assert_eq!(body["stream_options"]["include_usage"], true);
       assert!(body.get("reasoning_effort").is_none());
+      if model == AIModel::Qwen3VlPlus {
+        assert_eq!(body["enable_thinking"], true);
+        assert_eq!(body["thinking_budget"], 16384);
+      }
       assert_eq!(
         body["thinking"],
         if model == AIModel::Qwen3VlPlus {
@@ -1177,6 +1331,40 @@ mod tests {
         }
       );
     }
+  }
+
+  #[test]
+  fn qwen_thinking_levels_set_distinct_budgets_and_can_be_disabled() {
+    let mut body = json!({
+      "messages": [{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,test"}}]}],
+      "tools": [{"type":"function","function":{"name":"read_note"}}],
+      "max_tokens": 8192,
+      "thinking": {"type":"enabled"},
+      "thinking_budget": 1,
+    });
+    let original = body.clone();
+    for (level, budget) in [
+      ("minimal", 512),
+      ("low", 2048),
+      ("medium", 8192),
+      ("high", 16384),
+      ("xhigh", 32768),
+    ] {
+      ChatClient::apply_qwen_thinking(&mut body, level).unwrap();
+      assert_eq!(body["enable_thinking"], true);
+      assert_eq!(body["thinking_budget"], budget);
+      assert!(body.get("thinking").is_none());
+      assert_eq!(body["messages"], original["messages"]);
+      assert_eq!(body["tools"], original["tools"]);
+      assert_eq!(body["max_tokens"], original["max_tokens"]);
+    }
+    ChatClient::apply_qwen_thinking(&mut body, "max").unwrap();
+    assert_eq!(body["enable_thinking"], true);
+    assert!(body.get("thinking_budget").is_none());
+    ChatClient::apply_qwen_thinking(&mut body, "off").unwrap();
+    assert_eq!(body["enable_thinking"], false);
+    assert!(body.get("thinking_budget").is_none());
+    assert!(ChatClient::apply_qwen_thinking(&mut body, "unlimited").is_err());
   }
 
   #[test]
@@ -1199,7 +1387,7 @@ mod tests {
     assert_eq!(models[2]["provider_name"], "火山引擎");
     assert_eq!(models[0]["reasoning_model"], "configured-reasoner");
     assert_eq!(models[0]["supports_vision"], false);
-    assert_eq!(models[1]["supports_reasoning"], false);
+    assert_eq!(models[1]["supports_reasoning"], true);
     assert_eq!(models[2]["supports_reasoning"], true);
     assert!(!serde_json::to_string(&models).unwrap().contains("private-"));
     client.qwen3_vl_plus_model.clear();
@@ -1221,12 +1409,18 @@ mod tests {
     ];
     for (input, convert) in cases {
       // A byte per HTTP chunk forces splits inside JSON fields and Chinese characters.
-      let chunks: Vec<_> = input.as_bytes().chunks(1)
-        .map(|chunk| Ok(Bytes::copy_from_slice(chunk))).collect();
+      let chunks: Vec<_> = input
+        .as_bytes()
+        .chunks(1)
+        .map(|chunk| Ok(Bytes::copy_from_slice(chunk)))
+        .collect();
       let result = futures::executor::block_on(
         ChatClient::convert_stream(futures::stream::iter(chunks), convert).collect::<Vec<_>>(),
       );
-      let bytes: Vec<u8> = result.into_iter().flat_map(|chunk| chunk.unwrap().to_vec()).collect();
+      let bytes: Vec<u8> = result
+        .into_iter()
+        .flat_map(|chunk| chunk.unwrap().to_vec())
+        .collect();
       let text = std::str::from_utf8(&bytes).unwrap();
       assert!(text.contains("你好") && text.ends_with("data: [DONE]\n\n"));
       assert!(!text.contains("private-reference"));
