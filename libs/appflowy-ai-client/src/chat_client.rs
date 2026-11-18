@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use reqwest::Client;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::pin::Pin;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -99,6 +99,59 @@ impl ChatClient {
       doubao_model: std::env::var("AI_CHAT_DOUBAO_MODEL")
         .unwrap_or_else(|_| "ep-m-20250814175607-b77g6".to_string()),
     })
+  }
+
+  /// Forward the Agent's OpenAI messages and tool calls using the existing provider configuration.
+  pub async fn agent_completion(
+    &self,
+    model: AIModel,
+    mut body: Value,
+  ) -> Result<reqwest::Response> {
+    if !self.is_model_available(model) {
+      return Err(anyhow!("Model unavailable"));
+    }
+    let thinking = body["reasoning_effort"].as_str().unwrap_or("off") != "off";
+    let (base, key, name) = match model {
+      AIModel::DeepSeek => (
+        &self.deepseek_api_base,
+        &self.deepseek_api_key,
+        if thinking && !self.deepseek_reasoner_model.is_empty() {
+          &self.deepseek_reasoner_model
+        } else {
+          &self.deepseek_model
+        },
+      ),
+      AIModel::Qwen3VlPlus => (
+        &self.qwen_api_base,
+        &self.qwen_api_key,
+        &self.qwen3_vl_plus_model,
+      ),
+      AIModel::Doubao => (
+        &self.doubao_api_base,
+        &self.doubao_api_key,
+        &self.doubao_model,
+      ),
+    };
+    let object = body
+      .as_object_mut()
+      .ok_or_else(|| anyhow!("Expected a completion object"))?;
+    object.insert("model".into(), json!(name));
+    object.remove("reasoning_effort");
+    if model != AIModel::Qwen3VlPlus {
+      body["thinking"] = json!({"type": if thinking { "enabled" } else { "disabled" }});
+    }
+    if body["stream"] == true {
+      body["stream_options"] = json!({"include_usage": true});
+    }
+    Ok(
+      self
+        .http_client
+        .post(format!("{}/chat/completions", base.trim_end_matches('/')))
+        .bearer_auth(key)
+        .json(&body)
+        .send()
+        .await?,
+    )
   }
 
   /// 统一的流式聊天接口
@@ -979,6 +1032,101 @@ impl ChatClient {
 mod tests {
   use super::*;
   use crate::usage::ChatUsage;
+
+  #[tokio::test]
+  async fn agent_requests_reuse_provider_config_and_preserve_tools() {
+    use std::{
+      io::{Read, Write},
+      net::TcpListener,
+    };
+    for model in [AIModel::DeepSeek, AIModel::Qwen3VlPlus, AIModel::Doubao] {
+      let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+      let base = format!("http://{}", listener.local_addr().unwrap());
+      let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+          .set_read_timeout(Some(Duration::from_secs(5)))
+          .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0; 4096];
+        loop {
+          let size = socket.read(&mut buffer).unwrap();
+          assert!(size > 0);
+          request.extend_from_slice(&buffer[..size]);
+          let text = String::from_utf8_lossy(&request);
+          if let Some((headers, body)) = text.split_once("\r\n\r\n") {
+            let length: usize = headers
+              .lines()
+              .find_map(|line| {
+                line
+                  .to_lowercase()
+                  .strip_prefix("content-length: ")
+                  .map(str::to_owned)
+              })
+              .unwrap()
+              .parse()
+              .unwrap();
+            if body.len() >= length {
+              break;
+            }
+          }
+        }
+        socket
+          .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+          .unwrap();
+        let request = String::from_utf8(request).unwrap();
+        let (headers, body) = request.split_once("\r\n\r\n").unwrap();
+        assert!(headers.starts_with("POST /chat/completions "));
+        assert!(
+          headers
+            .to_lowercase()
+            .contains("authorization: bearer test-provider-key")
+        );
+        serde_json::from_str::<Value>(body).unwrap()
+      });
+      let mut client = ChatClient::from_env().unwrap();
+      client.deepseek_api_base = base.clone();
+      client.qwen_api_base = base.clone();
+      client.doubao_api_base = base;
+      client.deepseek_api_key = "test-provider-key".into();
+      client.qwen_api_key = "test-provider-key".into();
+      client.doubao_api_key = "test-provider-key".into();
+      client.deepseek_reasoner_model.clear();
+      client.deepseek_model = "configured-deepseek".into();
+      client.qwen3_vl_plus_model = "configured-qwen".into();
+      client.doubao_model = "configured-doubao".into();
+      let input = json!({"model":model.to_str(),"messages":[{"role":"tool","tool_call_id":"call-1","content":"note"}],"tools":[{"type":"function","function":{"name":"read_note","parameters":{"type":"object"}}}],"reasoning_effort":"high","stream":true});
+      assert!(
+        client
+          .agent_completion(model, input.clone())
+          .await
+          .unwrap()
+          .status()
+          .is_success()
+      );
+      let body = server.join().unwrap();
+      assert_eq!(body["messages"], input["messages"]);
+      assert_eq!(body["tools"], input["tools"]);
+      assert_eq!(
+        body["model"],
+        match model {
+          AIModel::DeepSeek => "configured-deepseek",
+          AIModel::Qwen3VlPlus => "configured-qwen",
+          AIModel::Doubao => "configured-doubao",
+        }
+      );
+      assert_eq!(body["stream_options"]["include_usage"], true);
+      assert!(body.get("reasoning_effort").is_none());
+      assert_eq!(
+        body["thinking"],
+        if model == AIModel::Qwen3VlPlus {
+          Value::Null
+        } else {
+          json!({"type":"enabled"})
+        }
+      );
+    }
+  }
 
   #[test]
   fn converted_streams_preserve_split_utf8_and_actual_usage() {

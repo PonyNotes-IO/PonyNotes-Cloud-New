@@ -641,6 +641,13 @@ async fn list_chat_models_handler(
 ) -> actix_web::Result<Json<AppResponse<AvailableModelsResponse>>> {
   trace!("List all available chat models (public endpoint, no auth required)");
   
+  Ok(AppResponse::Ok().with_data(AvailableModelsResponse {
+    models: chat_models(&state),
+    current_plan: "public".to_string(),
+  }).into())
+}
+
+pub(super) fn chat_models(state: &AppState) -> Vec<AIModelInfo> {
   // 获取所有实际配置的可用模型
   let available_models = state.chat_client.get_available_models();
   
@@ -676,14 +683,11 @@ async fn list_chat_models_handler(
     });
   }
   
-  Ok(AppResponse::Ok().with_data(AvailableModelsResponse {
-    models,
-    current_plan: "public".to_string(), // 公开接口，无订阅计划
-  }).into())
+  models
 }
 
 /// 检查用户剩余AI调用次数（按uid检查）
-async fn check_ai_remaining_by_uid(
+pub(super) async fn check_ai_remaining_by_uid(
   state: &AppState,
   uid: i64,
 ) -> Result<i64, AppError> {
@@ -709,6 +713,14 @@ async fn get_resource_owner_uid(
 ) -> actix_web::Result<i64> {
   let uid = state.user_cache.get_user_uid(user_uuid).await
     .map_err(actix_web::error::ErrorInternalServerError)?;
+  resource_owner_uid(state, uid, workspace_id_str).await
+}
+
+pub(super) async fn resource_owner_uid(
+  state: &AppState,
+  uid: i64,
+  workspace_id_str: Option<&str>,
+) -> actix_web::Result<i64> {
   let Some(ws_id_str) = workspace_id_str else {
     return Ok(uid);
   };
@@ -727,7 +739,7 @@ async fn get_resource_owner_uid(
   .ok_or_else(|| actix_web::error::ErrorForbidden("No access to workspace"))
 }
 
-fn account_chat_tokens(
+pub(super) fn account_chat_tokens(
   stream: Pin<Box<dyn Stream<Item = anyhow::Result<Bytes>> + Send>>,
   pool: sqlx::PgPool,
   owner_uid: i64,
@@ -754,7 +766,7 @@ fn account_chat_tokens(
 }
 
 /// 记录AI聊天使用情况（按uid记录）
-async fn record_ai_chat_usage_by_uid(
+pub(super) async fn record_ai_chat_usage_by_uid(
   state: &AppState,
   uid: i64,
 ) -> Result<(), AppError> {
