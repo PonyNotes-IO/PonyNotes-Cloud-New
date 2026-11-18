@@ -50,6 +50,21 @@ pub struct Catalog {
 }
 
 impl Catalog {
+  /// Shared conversations use the speaker's visible workspace notes, never
+  /// unrelated private libraries belonging to the conversation's engine owner.
+  pub fn workspace_notes(account: &Value, wid: Uuid, scope: &Scope) -> Self {
+    let mut items = scope.notes.iter().map(|(id, note)| {
+      json!({"kind":"note","id":id,"name":note["title"],"subtitle":note["path"],"knowledge_ids":[],"url":note["url"]})
+    }).collect::<Vec<_>>();
+    if let Some(kb) = account["workspaces"][wid.to_string()]["id"].as_str() {
+      items.push(json!({"kind":"base","id":kb,"name":scope.workspace_name,"subtitle":"当前空间笔记","visibility":"shared","knowledge_ids":scope.documents.keys().collect::<Vec<_>>()}));
+    }
+    Self {
+      items,
+      sources: scope.documents.clone(),
+    }
+  }
+
   pub fn resolve(&self, references: &[Reference], strict: bool) -> Result<BTreeMap<String, Value>> {
     let mut sources = BTreeMap::new();
     for reference in references {
@@ -222,6 +237,43 @@ impl Client {
 #[cfg(test)]
 mod tests {
   use super::*;
+  #[test]
+  fn shared_catalog_only_resolves_the_current_speakers_workspace_scope() {
+    let wid = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    let account = json!({"workspaces":{
+      wid.to_string():{"id":"current-base"},
+      other.to_string():{"id":"unrelated-private-base"}
+    }});
+    let scope = Scope {
+      token: String::new(),
+      documents: BTreeMap::from([("visible-copy".into(), json!({"title":"共享笔记"}))]),
+      notes: BTreeMap::from([("visible-note".into(), json!({"title":"可访问笔记"}))]),
+      workspace_name: "当前空间".into(),
+    };
+    let catalog = Catalog::workspace_notes(&account, wid, &scope);
+    assert_eq!(catalog.items.len(), 2);
+    let base = Reference {
+      kind: "base".into(),
+      id: "current-base".into(),
+    };
+    assert_eq!(catalog.resolve(&[base], true).unwrap(), scope.documents);
+    for (kind, id) in [
+      ("base", "unrelated-private-base"),
+      ("file", "hidden-copy"),
+      ("note", "hidden-note"),
+    ] {
+      assert!(catalog
+        .resolve(
+          &[Reference {
+            kind: kind.into(),
+            id: id.into()
+          }],
+          true
+        )
+        .is_err());
+    }
+  }
   #[test]
   fn history_restores_only_cloud_generated_context_and_keeps_reference_labels() {
     let record = json!({"input_contexts":[{"id":"server-nonce","query":"总结笔记","mentioned_items":[{"name":"会议记录"}]}]});
