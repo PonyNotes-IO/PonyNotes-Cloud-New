@@ -1,5 +1,15 @@
 # 小马 Agent 的服务端执行链路
 
+## 智能体选择映射
+
+`GET /api/ai/agent/conversations/{workspace_id}/agents` 在工作区鉴权后，使用当前用户的 WeKnora 登录态读取 `agents` 和 `shared-agents`。列表返回名称、描述、模式及能力摘要，按内置、私有自定义、协作分组；已停用的条目和 PonyNotes 内部生成的会话智能体不会出现在列表中，不返回提示词、模型绑定或凭据。
+
+四个常用内置条目的稳定 ID 为：快速问答 `builtin-quick-answer`、智能推理 `builtin-smart-reasoning`、维基问答 `builtin-wiki-researcher`、数据分析师 `builtin-data-analyst`。其他内置条目也随上游目录返回。私有条目使用真实 UUID，协作条目使用 `(id, source_tenant_id)`；同名条目不按名称合并，不生成演示条目。
+
+提交消息的可选 `agent` 对象携带 `id` 和 `source_tenant_id`。Cloud 每轮复查目录与共享关系，并校验模式。内置和私有配置在保留角色提示与专用工具后，继续应用 PonyNotes 的模型、笔记权限和资料范围；原始智能体配置不被更新。协作智能体由 WeKnora 原生共享执行路径解析完整提示词、来源模型及只读资源策略，客户端显示“共享方模型”；不复制列表中被隐藏的提示词，也不使用接收方的模型选择覆盖共享方配置。历史接口的 `selected_agent` 恢复已提交的选择；客户端已选择的下一轮智能体优先于迟到的历史响应。
+
+客户端和 Rust Cloud 需要一起更新；未部署本次改动的服务器没有智能体目录接口。
+
 「问 AI」默认打开独立会话界面：桌面中间栏显示历史与「新建对话」，手机使用历史抽屉。新建不产生 AI 文档或「我的AI会话」空间，首页和会话内提供快问快答／智能推理选择。默认智能推理由 WeKnora Go 服务及其 Docker 沙箱执行，Flutter 不启动 Node/pi，也不执行本机命令。模型选择、积分、附件、笔记工具、写入审批和修改前后预览沿用现有能力。
 
 原型阶段提供「旧对话（保留）」入口，既有 Chat 和 Agent 文档继续可用。旧 Agent 文档仍可切换快问快答／智能推理；服务端分别读取 `builtin-quick-answer`、`builtin-smart-reasoning` 两种内置配置。侧栏隐藏旧的 AI 空间入口，不删除既有文档或历史数据。
