@@ -182,10 +182,12 @@ async fn list(
     .map(|row| {
       let id: Uuid = row.get("id");
       let origin: Uuid = row.get("workspace_id");
+      let creator: i64 = row.get("creator_uid");
       let mut model: Value = row.get("config");
       model["id"] = json!(format!("custom:{id}"));
       model["workspace_id"] = json!(origin);
       model["creator_name"] = json!(row.get::<String, _>("creator_name"));
+      model["show_creator"] = json!(!manage && creator != uid);
       model["is_builtin"] = json!(false);
       model["can_edit"] = json!(manage && origin == workspace);
       model
