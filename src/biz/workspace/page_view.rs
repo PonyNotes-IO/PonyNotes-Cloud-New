@@ -1253,41 +1253,171 @@ async fn create_document_page(
     None => prepare_default_document_collab_param(client_id, collab_id).await,
   }?;
   let view_id = view_id_override.unwrap_or(collab_id);
-  let mut folder = state.ws_server.get_folder(workspace_id).await?;
-  let folder_update = add_new_view_to_folder(
-    user.uid,
-    parent_view_id,
-    &view_id,
-    &mut folder,
-    name,
-    collab_folder::ViewLayout::Document,
-  )
-  .await?;
-  let mut transaction = state.pg_pool.begin().await?;
-  let start = Instant::now();
-  let action = format!("Create new collab: {}", view_id);
-  state
-    .collab_storage
-    .upsert_new_collab_with_transaction(
-      workspace_id,
-      &user.uid,
-      new_document_collab_params,
-      &mut transaction,
-      &action,
-    )
-    .await?;
-  transaction.commit().await?;
-
-  update_workspace_folder_data(
-    &state.metrics.appflowy_web_metrics,
-    &state.ws_server,
+  store_document_page(
+    state,
     user,
     workspace_id,
-    folder_update,
+    parent_view_id,
+    view_id,
+    name,
+    new_document_collab_params,
+    false,
   )
-  .await?;
-  state.metrics.collab_metrics.observe_pg_tx(start.elapsed());
-  Ok(Page { view_id })
+  .await
+}
+
+pub(crate) fn is_private_root_page(folder: &Folder, uid: i64, workspace: Uuid, id: &str) -> bool {
+    folder
+        .get_view(id, uid)
+        .is_some_and(|view| view.parent_view_id == workspace.to_string())
+        && folder
+            .get_my_private_sections(uid)
+            .iter()
+            .any(|item| item.id == id)
+        && !folder
+            .get_all_trash_sections(uid)
+            .iter()
+            .any(|item| item.id == id)
+}
+
+fn insert_document_view(folder: &mut Folder, view: View, uid: i64, private_root: bool) -> Vec<u8> {
+    let id = view.id.clone();
+    let mut txn = folder.collab.transact_mut();
+    folder.body.views.insert(&mut txn, view, None, uid);
+    if private_root {
+        folder
+            .body
+            .views
+            .update_view(&mut txn, &id, |update| update.set_private(true).done(), uid);
+    }
+    txn.encode_update_v1()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn store_document_page(
+    state: &AppState,
+    user: RealtimeUser,
+    workspace_id: Uuid,
+    parent_view_id: &Uuid,
+    view_id: Uuid,
+    name: Option<&str>,
+    new_document_collab_params: CollabParams,
+    private_root: bool,
+) -> Result<Page, AppError> {
+    let mut folder = state.ws_server.get_folder(workspace_id).await?;
+    let view = NestedChildViewBuilder::new(user.uid, parent_view_id.to_string())
+        .with_view_id(&view_id)
+        .with_name(name.unwrap_or_default())
+        .with_layout(collab_folder::ViewLayout::Document)
+        .build()
+        .view;
+    if private_root
+        && (parent_view_id != &workspace_id
+            || folder.get_view(&view.id, user.uid).is_some()
+            || folder
+                .get_all_trash_sections(user.uid)
+                .iter()
+                .any(|item| item.id == view.id))
+    {
+        return Err(AppError::InvalidRequest("Sync destination changed".into()));
+    }
+    let folder_update = insert_document_view(&mut folder, view, user.uid, private_root);
+    let mut transaction = state.pg_pool.begin().await?;
+    let start = Instant::now();
+    let action = format!("Create new collab: {}", view_id);
+    state
+        .collab_storage
+        .upsert_new_collab_with_transaction(
+            workspace_id,
+            &user.uid,
+            new_document_collab_params,
+            &mut transaction,
+            &action,
+        )
+        .await?;
+    transaction.commit().await?;
+
+    update_workspace_folder_data(
+        &state.metrics.appflowy_web_metrics,
+        &state.ws_server,
+        user,
+        workspace_id,
+        folder_update,
+    )
+    .await?;
+    state.metrics.collab_metrics.observe_pg_tx(start.elapsed());
+    Ok(Page { view_id })
+}
+
+#[cfg(test)]
+#[test]
+fn synced_document_is_a_private_workspace_root_page() {
+    use collab::preclude::updates::decoder::Decode;
+    use collab_folder::{FolderData, Workspace};
+
+    let uid = 1;
+    let workspace = Uuid::new_v4();
+    let root = workspace.to_string();
+    let id = Uuid::new_v4();
+    let collab = Collab::new_with_options(
+        CollabOrigin::Empty,
+        CollabOptions::new(root.clone(), default_client_id()),
+    )
+    .unwrap();
+    let mut folder = Folder::create(
+        collab,
+        None,
+        FolderData::new(uid, Workspace::new(root.clone(), "Test".into(), uid)),
+    );
+    let snapshot = folder.encode_collab().unwrap();
+    let view = NestedChildViewBuilder::new(uid, root.clone())
+        .with_view_id(&id)
+        .with_name("Wiki note")
+        .with_layout(collab_folder::ViewLayout::Document)
+        .build()
+        .view;
+    let update = insert_document_view(&mut folder, view, uid, true);
+    let mut replica = Folder::from_collab_doc_state(
+        CollabOrigin::Empty,
+        snapshot.into(),
+        &root,
+        default_client_id(),
+    )
+    .unwrap();
+    replica
+        .collab
+        .transact_mut()
+        .apply_update(yrs::Update::decode_v1(&update).unwrap())
+        .unwrap();
+    assert!(is_private_root_page(
+        &replica,
+        uid,
+        workspace,
+        &id.to_string()
+    ));
+    assert!(!is_private_root_page(
+        &replica,
+        uid + 1,
+        workspace,
+        &id.to_string()
+    ));
+    for (user, expected) in [(uid, true), (uid + 1, false)] {
+        let view = crate::biz::collab::folder_view::collab_folder_to_folder_view(
+            workspace,
+            &workspace,
+            &replica,
+            1,
+            &HashSet::new(),
+            user,
+        )
+        .unwrap();
+        assert_eq!(
+            view.children
+                .iter()
+                .any(|item| item.view_id == id && item.is_private && !item.is_space),
+            expected
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

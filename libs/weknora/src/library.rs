@@ -21,6 +21,7 @@ pub const ACTIONS: &[&str] = &[
   "web_import_options",
   "import_url",
   "data_source",
+  "workspace_sync",
   "models",
   "model_providers",
   "model_save",
@@ -150,7 +151,7 @@ impl Session {
       .ok_or_else(|| anyhow!(Rejected(403)))
   }
 
-  fn can_write(&self, wid: &str) -> Result<()> {
+  pub(crate) fn can_write(&self, wid: &str) -> Result<()> {
     require(
       matches!(
         self.workspace(wid)?["role"].as_str(),

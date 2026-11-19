@@ -219,6 +219,9 @@ impl Client {
               &format!("workspace/v1/{wid}/collab/{oid}/json?collab_type=0"),
             )
             .await?;
+          if doc["collab"][crate::note_source::WORKSPACE_SYNC_SNAPSHOT].is_string() {
+            continue;
+          }
           notes.extend(note_parts(
             wid,
             "document",

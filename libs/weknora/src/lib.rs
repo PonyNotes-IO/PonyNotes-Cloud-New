@@ -8,6 +8,7 @@ mod data_source;
 pub mod embedding;
 pub mod library;
 mod models;
+pub mod note_source;
 mod notes;
 pub mod references;
 pub mod sync;

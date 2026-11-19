@@ -26,26 +26,13 @@ pub fn private_space_and_trash_view_ids(
   let mut view_ids_in_trash = HashSet::new();
   let mut my_private_space_ids = HashSet::new();
   let mut other_private_space_ids = HashSet::new();
-  for private_section in folder.get_my_private_sections(uid) {
-    match folder.get_view(&private_section.id, uid) {
-      Some(private_view) if check_if_view_is_space(&private_view) => {
-        let section_id = Uuid::parse_str(&private_section.id)?;
-        my_private_space_ids.insert(section_id);
-      },
-      _ => (),
-    }
+  for section in folder.get_my_private_sections(uid) {
+    my_private_space_ids.insert(Uuid::parse_str(&section.id)?);
   }
-
-  for private_section in folder.get_all_private_sections(uid) {
-    let private_section_id = Uuid::parse_str(&private_section.id)?;
-    match folder.get_view(&private_section.id, uid) {
-      Some(private_view)
-        if check_if_view_is_space(&private_view)
-          && !my_private_space_ids.contains(&private_section_id) =>
-      {
-        other_private_space_ids.insert(private_section_id);
-      },
-      _ => (),
+  for section in folder.get_all_private_sections(uid) {
+    let id = Uuid::parse_str(&section.id)?;
+    if !my_private_space_ids.contains(&id) {
+      other_private_space_ids.insert(id);
     }
   }
   for trash_view in folder.get_all_trash_sections(uid) {
@@ -149,10 +136,9 @@ fn to_folder_view(
   }
 
   let view_is_space = check_if_view_is_space(&view);
-  // There is currently a bug, which a document that is not a space ended up as child
-  // of the workspace
+  // Direct private notes belong to the workspace root. Ignore other malformed root documents.
   let parent_is_workspace = Some(&workspace_id) == parent_view_id;
-  if !view_is_space && parent_is_workspace {
+  if !view_is_space && parent_is_workspace && !is_my_private_space {
     return None;
   }
 

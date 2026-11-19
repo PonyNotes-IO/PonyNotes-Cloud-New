@@ -1,4 +1,6 @@
 use crate::biz::authentication::jwt::Authorization;
+
+mod note_sync;
 use crate::biz::subscription::ops::record_usage;
 use crate::state::AppState;
 use access_control::act::Action;
@@ -37,6 +39,7 @@ fn failure(status: u16) -> HttpResponse {
 
 async fn knowledge(
   auth: Authorization,
+  request: HttpRequest,
   action: web::Path<String>,
   payload: web::Json<Value>,
   state: web::Data<AppState>,
@@ -61,6 +64,7 @@ async fn knowledge(
         | "import_url"
         | "web_import_options"
         | "data_source"
+        | "workspace_sync"
         | "model_save"
         | "model_delete"
         | "model_bind"
@@ -80,6 +84,34 @@ async fn knowledge(
   }
   let result = async {
     let session = library::Session::authenticate(&client, uuid, uid, &auth.token).await?;
+    if action.as_str() == "workspace_sync" {
+      let sources = ponynotes_weknora::note_source::WorkspaceNoteSources::open(
+        &state.pg_pool,
+        &client,
+        &session,
+        &payload,
+      )
+      .await?;
+      return match payload["operation"].as_str() {
+        Some("note_sync") => {
+          let source = sources.source(&payload).await?;
+          let user = super::util::realtime_user_for_web_request(request.headers(), uid)?;
+          note_sync::start(state.clone(), user, &payload, source).await
+        },
+        Some("list") => {
+          let mut result = sources.execute(&payload).await?;
+          let workspace = library::uuid(&payload, "workspace_id")?;
+          if let Some(sources) = result["sources"].as_array_mut() {
+            for source in sources {
+              let id = library::uuid(source, "id")?;
+              source["note_sync"] = note_sync::status(&state, uid, workspace, id).await?;
+            }
+          }
+          Ok(result)
+        },
+        _ => sources.execute(&payload).await,
+      };
+    }
     library::execute(
       &state.pg_pool,
       &client,
