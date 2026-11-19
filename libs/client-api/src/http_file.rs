@@ -171,7 +171,28 @@ impl Client {
     &self,
     file_path: &Path,
   ) -> Result<CreateImportTaskResponse, AppResponseError> {
-    let url = format!("{}/api/import/create", self.base_url);
+    self.create_import_at(file_path, "/api/import/create").await
+  }
+
+  pub async fn create_private_space_import(
+    &self,
+    file_path: &Path,
+    workspace_id: &Uuid,
+  ) -> Result<CreateImportTaskResponse, AppResponseError> {
+    self
+      .create_import_at(
+        file_path,
+        &format!("/api/import/create-private-space/{workspace_id}"),
+      )
+      .await
+  }
+
+  async fn create_import_at(
+    &self,
+    file_path: &Path,
+    endpoint: &str,
+  ) -> Result<CreateImportTaskResponse, AppResponseError> {
+    let url = format!("{}{}", self.base_url, endpoint);
     let file_name = file_path
       .file_stem()
       .map(|s| s.to_string_lossy().to_string())

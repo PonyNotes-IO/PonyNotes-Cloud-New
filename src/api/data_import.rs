@@ -13,7 +13,7 @@ use crate::biz::workspace::ops::{create_empty_workspace, create_upload_task, num
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use database::user::select_name_and_email_from_uuid;
-use database::workspace::select_import_task_by_state;
+use database::workspace::{select_import_task_by_state, select_workspace_member};
 use database_entity::dto::{CreateImportTask, CreateImportTaskResponse};
 use futures_util::StreamExt;
 use infra::env_util::get_env_var;
@@ -36,6 +36,10 @@ pub fn data_import_scope() -> Scope {
         .route(web::get().to(get_import_detail_handler)),
     )
     .service(web::resource("/create").route(web::post().to(create_import_handler)))
+    .service(
+      web::resource("/create-private-space/{workspace_id}")
+        .route(web::post().to(create_private_space_import_handler)),
+    )
 }
 
 #[instrument(level = "debug", skip_all)]
@@ -45,10 +49,44 @@ async fn create_import_handler(
   payload: Json<CreateImportTask>,
   req: HttpRequest,
 ) -> actix_web::Result<JsonAppResponse<CreateImportTaskResponse>> {
-  let params = payload.into_inner();
+  create_import_task(user_uuid, state, payload.into_inner(), req, None).await
+}
+
+async fn create_private_space_import_handler(
+  user_uuid: UserUuid,
+  state: Data<AppState>,
+  payload: Json<CreateImportTask>,
+  req: HttpRequest,
+  workspace_id: web::Path<Uuid>,
+) -> actix_web::Result<JsonAppResponse<CreateImportTaskResponse>> {
+  create_import_task(
+    user_uuid,
+    state,
+    payload.into_inner(),
+    req,
+    Some(workspace_id.into_inner()),
+  )
+  .await
+}
+
+async fn create_import_task(
+  user_uuid: UserUuid,
+  state: Data<AppState>,
+  params: CreateImportTask,
+  req: HttpRequest,
+  target_workspace_id: Option<Uuid>,
+) -> actix_web::Result<JsonAppResponse<CreateImportTaskResponse>> {
   params.validate().map_err(AppError::from)?;
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
   check_maximum_task(&state, uid).await?;
+  if let Some(workspace_id) = target_workspace_id {
+    if !select_workspace_member(&state.pg_pool, uid, &workspace_id)
+      .await?
+      .is_some_and(|member| member.role.can_create_collab())
+    {
+      return Err(AppError::NotEnoughPermissions.into());
+    }
+  }
   let s3_key = format!("import_presigned_url_{}", Uuid::new_v4());
 
   // Generate presigned url with 10 minutes expiration
@@ -60,26 +98,31 @@ async fn create_import_handler(
 
   let (user_name, user_email) = select_name_and_email_from_uuid(&state.pg_pool, &user_uuid).await?;
   let host = get_host_from_request(&req);
-  let workspace = create_empty_workspace(
-    &state.pg_pool,
-    state.workspace_access_control.clone(),
-    &state.collab_storage,
-    &state.metrics.collab_metrics,
-    &user_uuid,
-    uid,
-    &params.workspace_name,
-  )
-  .await?;
-
-  let workspace_id = workspace.workspace_id.to_string();
+  let (workspace_id, task_kind) = match target_workspace_id {
+    Some(id) => (id, "notionPrivateSpace"),
+    None => {
+      let workspace = create_empty_workspace(
+        &state.pg_pool,
+        state.workspace_access_control.clone(),
+        &state.collab_storage,
+        &state.metrics.collab_metrics,
+        &user_uuid,
+        uid,
+        &params.workspace_name,
+      )
+      .await?;
+      (workspace.workspace_id, "notion")
+    },
+  };
+  let workspace_id = workspace_id.to_string();
   info!(
-    "User:{} import new workspace:{}, name:{}",
-    uid, workspace_id, params.workspace_name,
+    "User:{} import into workspace:{}, name:{}",
+    uid, workspace_id, params.workspace_name
   );
   let timestamp = chrono::Utc::now().timestamp();
   let task_id = Uuid::new_v4();
   let task = json!({
-      "notion": {
+      (task_kind): {
          "uid": uid,
          "user_name": user_name,
          "user_email": user_email.unwrap_or_default(),

@@ -10,19 +10,25 @@ use crate::s3_client::S3Client;
 use bytes::Bytes;
 use collab::core::origin::CollabOrigin;
 use collab::entity::{EncodedCollab, EncoderVersion};
+use collab::preclude::{Collab, ReadTxn};
 use collab_database::workspace_database::WorkspaceDatabase;
+use collab_document::document::Document;
+use collab_document::document_data::default_document_data;
 use collab_entity::CollabType;
-use collab_folder::{Folder, View, ViewLayout};
+use collab_folder::hierarchy_builder::{NestedChildViewBuilder, ParentChildViews};
+use collab_folder::{Folder, SpacePermission, View, ViewLayout};
 use collab_importer::imported_collab::ImportType;
 use collab_importer::notion::page::CollabResource;
 use collab_importer::notion::NotionImporter;
 use collab_importer::util::FileId;
+use collab_stream::model::{CollabStreamUpdate, UpdateFlags, UpdateStreamMessage};
+use collab_stream::stream_router::FromRedisStream;
 use database::collab::{insert_into_af_collab_bulk_for_user, select_blob_from_af_collab};
 use database::resource_usage::{insert_blob_metadata_bulk, BulkInsertMeta};
 use database::workspace::{
   delete_from_workspace, select_import_task, select_workspace_database_storage_id,
-  update_import_task_status, update_updated_at_of_workspace_with_uid, update_workspace_status,
-  ImportTaskState,
+  select_workspace_member, update_import_task_status, update_updated_at_of_workspace_with_uid,
+  update_workspace_status, ImportTaskState,
 };
 use database_entity::dto::CollabParams;
 
@@ -39,7 +45,7 @@ use redis::streams::{
   StreamClaimOptions, StreamClaimReply, StreamId, StreamPendingReply, StreamReadOptions,
   StreamReadReply,
 };
-use redis::{AsyncCommands, RedisResult, Value};
+use redis::{AsyncCommands, FromRedisValue, RedisResult, Value};
 
 use collab::core::collab::default_client_id;
 use database::pg_row::AFImportTask;
@@ -276,7 +282,23 @@ async fn consume_task(
   group_name: &str,
   entry_id: String,
 ) -> Result<(), ImportError> {
-  if let ImportTask::Notion(task) = &mut import_task {
+  let private_space = matches!(&import_task, ImportTask::NotionPrivateSpace(_));
+  if let ImportTask::Notion(task) | ImportTask::NotionPrivateSpace(task) = &mut import_task {
+    if private_space
+      && select_import_task(&context.pg_pool, &task.task_id)
+        .await
+        .is_ok_and(|record| record.status == ImportTaskState::Completed as i16)
+    {
+      delete_task(
+        &mut context.redis_client,
+        stream_name,
+        group_name,
+        &entry_id,
+      )
+      .await?;
+      return Ok(());
+    }
+
     // If no created_at timestamp, proceed directly to processing
     if task.created_at.is_none() {
       return process_and_ack_task(context, import_task, stream_name, group_name, &entry_id).await;
@@ -298,6 +320,7 @@ async fn consume_task(
               &mut context,
               &import_record,
               task,
+              private_space,
               stream_name,
               group_name,
               &entry_id,
@@ -326,6 +349,7 @@ async fn consume_task(
           &mut context,
           &import_record,
           task,
+          private_space,
           stream_name,
           group_name,
           &entry_id,
@@ -369,6 +393,7 @@ async fn handle_failed_task(
   context: &mut TaskContext,
   import_record: &AFImportTask,
   task: &NotionImportTask,
+  private_space: bool,
   stream_name: &str,
   group_name: &str,
   entry_id: &str,
@@ -386,8 +411,9 @@ async fn handle_failed_task(
       error!("Failed to update import task status: {:?}", e);
       ImportError::Internal(e.into())
     })?;
-  remove_workspace(&import_record.workspace_id, &context.pg_pool).await;
-  info!("[Import]: deleted workspace {}", task.workspace_id);
+  if !private_space {
+    remove_workspace(&import_record.workspace_id, &context.pg_pool).await;
+  }
 
   if let Err(err) = context.s3_client.delete_blob(task.s3_key.as_str()).await {
     error!(
@@ -551,8 +577,9 @@ async fn process_task(
 
   info!("[Import]: Processing task: {}", import_task);
 
+  let private_space = matches!(&import_task, ImportTask::NotionPrivateSpace(_));
   match import_task {
-    ImportTask::Notion(task) => {
+    ImportTask::Notion(task) | ImportTask::NotionPrivateSpace(task) => {
       // 1. download zip file
       let unzip_result = download_and_unzip_file_retry(
         &context.storage_dir,
@@ -575,6 +602,7 @@ async fn process_task(
           // 2. process unzip file
           let result = process_unzip_file(
             &task,
+            private_space,
             &unzip_dir_path,
             &context.pg_pool,
             &mut context.redis_client,
@@ -582,13 +610,8 @@ async fn process_task(
           )
           .await;
 
-          // If there is any errors when processing the unzip file, we will remove the workspace and notify the user.
           if result.is_err() {
-            info!(
-              "[Import]: failed to import notion file, delete workspace:{}",
-              task.workspace_id
-            );
-            remove_workspace(&task.workspace_id, &context.pg_pool).await;
+            fail_notion_import(&task, private_space, &context.pg_pool).await;
           }
 
           clean_up(&context.s3_client, &task).await;
@@ -609,11 +632,7 @@ async fn process_task(
           });
         },
         Err(err) => {
-          // If there is any errors when download or unzip the file, we will remove the file from S3 and notify the user.
-          if let Err(err) = &context.s3_client.delete_blob(task.s3_key.as_str()).await {
-            error!("Failed to delete zip file from S3: {:?}", err);
-          }
-          remove_workspace(&task.workspace_id, &context.pg_pool).await;
+          fail_notion_import(&task, private_space, &context.pg_pool).await;
           clean_up(&context.s3_client, &task).await;
           notify_user(&task, Err(err), context.notifier, &context.metrics).await?;
         },
@@ -871,14 +890,17 @@ fn buffer_size_from_content_length(content_length: Option<i64>) -> usize {
 
 async fn process_unzip_file(
   import_task: &NotionImportTask,
+  private_space: bool,
   unzip_dir_path: &PathBuf,
   pg_pool: &PgPool,
   redis_client: &mut ConnectionManager,
   s3_client: &Arc<dyn S3Client>,
 ) -> Result<(), ImportError> {
   let client_id = default_client_id();
-  let _ =
-    Uuid::parse_str(&import_task.workspace_id).map_err(|err| ImportError::Internal(err.into()))?;
+  let workspace_id = Uuid::parse_str(&import_task.workspace_id)?;
+  if private_space {
+    check_import_membership(pg_pool, import_task.uid, &workspace_id).await?;
+  }
   let notion_importer = NotionImporter::new(
     import_task.uid,
     unzip_dir_path,
@@ -895,6 +917,7 @@ async fn process_unzip_file(
     .import()
     .await
     .map_err(ImportError::ImportCollabError)?;
+  let has_directory_roots = imported.views().iter().any(|view| view.is_dir);
   let nested_views = imported.build_nested_views().await;
   trace!(
     "[Import]: {} imported nested views:{}",
@@ -902,38 +925,43 @@ async fn process_unzip_file(
     nested_views
   );
 
-  // 1. Open the workspace folder
-  let workspace_id = Uuid::parse_str(&imported.workspace_id)?;
-  let folder_collab = get_encode_collab_from_bytes(
-    &workspace_id,
-    &workspace_id,
-    &CollabType::Folder,
-    pg_pool,
-    s3_client,
-  )
-  .await?;
-  let mut folder = Folder::from_collab_doc_state(
-    CollabOrigin::Server,
-    folder_collab.into(),
-    &imported.workspace_id,
-    client_id,
-  )
-  .map_err(|err| ImportError::CannotOpenWorkspace(err.to_string()))?;
-
-  // 2. Insert collabs' views into the folder
-  trace!(
-    "[Import]: {} insert views:{} to folder",
-    import_task.workspace_id,
-    nested_views.len()
-  );
-  folder.insert_nested_views(nested_views.into_inner(), import_task.uid);
-
-  let mut resources = vec![];
   let mut collab_params_list = vec![];
+  let space_id = import_task.task_id;
+  let space_view_id = space_id.to_string();
+  let mut views = nested_views.into_inner();
+  let mut synthetic_view_id = None;
+  if private_space {
+    if !has_directory_roots {
+      if let Some(wrapper) = views.pop() {
+        synthetic_view_id = Some(wrapper.view.id);
+        views = wrapper.children;
+      }
+    }
+    views = private_space_tree(import_task, views);
+    let document = Document::create(
+      &space_view_id,
+      default_document_data(&space_view_id),
+      client_id,
+    )
+    .map_err(|err| anyhow!("Failed to create private import space: {err}"))?;
+    let encoded = document
+      .encode_collab()
+      .map_err(|err| anyhow!("Failed to encode private import space: {err}"))?;
+    let encoded = encoded
+      .encode_to_bytes()
+      .map_err(|err| anyhow!("Failed to serialize private import space: {err}"))?;
+    collab_params_list.push(CollabParams {
+      object_id: space_id,
+      collab_type: CollabType::Document,
+      encoded_collab_v1: encoded.into(),
+      updated_at: None,
+    });
+  }
+  let mut resources = vec![];
   let mut database_view_ids_by_database_id: HashMap<String, Vec<String>> = HashMap::new();
   let mut orphan_view_ids = HashSet::new();
 
-  // 3. Collect all collabs and resources
+  // Collect all imported collabs and resources.
   let mut stream = imported.into_collab_stream().await;
   let updated_at = Utc::now();
   while let Some(imported_collab_info) = stream.next().await {
@@ -947,6 +975,7 @@ async fn process_unzip_file(
       imported_collab_info
         .imported_collabs
         .into_iter()
+        .filter(|collab| synthetic_view_id.as_deref() != Some(collab.object_id.as_str()))
         .map(|imported_collab| CollabParams {
           object_id: imported_collab.object_id.parse().unwrap(),
           collab_type: imported_collab.collab_type,
@@ -968,6 +997,84 @@ async fn process_unzip_file(
       ImportType::Document => {
         // do nothing
       },
+    }
+  }
+
+  let upload_resources = process_resources(resources).await;
+
+  // Upload private-space attachments before making any imported pages visible.
+  let resource_meta = upload_resources
+    .iter()
+    .map(|res| res.meta.clone())
+    .collect::<Vec<_>>();
+  let resource_count = upload_resources.len();
+  let remaining_resources = if private_space {
+    batch_upload_files_to_s3(&import_task.workspace_id, s3_client, upload_resources).await?;
+    check_import_membership(pg_pool, import_task.uid, &workspace_id).await?;
+    Vec::new()
+  } else {
+    upload_resources
+  };
+
+  // Read pending updates before opening the snapshots so updates trimmed by a
+  // concurrent snapshot are still present in one of the two sources.
+  let pending = if private_space {
+    let stream_key = UpdateStreamMessage::stream_key(&workspace_id);
+    let reply: StreamReadReply = redis_client
+      .xread(&[&stream_key], &["0-0"])
+      .await
+      .map_err(|err| anyhow!("Failed to read workspace updates for import: {err}"))?;
+    reply.keys.into_iter().flat_map(|key| key.ids).collect()
+  } else {
+    Vec::new()
+  };
+
+  // Open the workspace folder after staging the imported content.
+  let folder_collab = get_encode_collab_from_bytes(
+    &workspace_id,
+    &workspace_id,
+    &CollabType::Folder,
+    pg_pool,
+    s3_client,
+  )
+  .await?;
+  let mut folder = Folder::from_collab_doc_state(
+    CollabOrigin::Server,
+    folder_collab.into(),
+    &import_task.workspace_id,
+    client_id,
+  )
+  .map_err(|err| ImportError::CannotOpenWorkspace(err.to_string()))?;
+
+  apply_pending_updates(&mut folder.collab, &workspace_id, &pending)?;
+
+  // Insert the imported views into the folder.
+  trace!(
+    "[Import]: {} insert views:{} to folder",
+    import_task.workspace_id,
+    views.len()
+  );
+  let mut updates = Vec::new();
+  // The existing folder/database are live CRDTs. Publish import deltas through
+  // the collaboration stream instead of overwriting their stored snapshots.
+  let folder_before = folder.collab.transact().state_vector();
+  folder.insert_nested_views(views, import_task.uid);
+  if private_space {
+    {
+      let mut txn = folder.collab.transact_mut();
+      folder.body.views.update_view(
+        &mut txn,
+        &space_view_id,
+        |update| update.set_private(true).done(),
+        import_task.uid,
+      );
+    }
+    if !folder
+      .get_my_private_sections(import_task.uid)
+      .iter()
+      .any(|item| item.id == space_view_id)
+    {
+      return Err(anyhow!("Failed to add Notion space to the private section").into());
     }
   }
 
@@ -997,48 +1104,61 @@ async fn process_unzip_file(
       client_id,
     )
     .map_err(|err| ImportError::CannotOpenWorkspace(err.to_string()))?;
+    apply_pending_updates(&mut w_database.collab, &w_database_id, &pending)?;
+    let database_before = w_database.collab.transact().state_vector();
     w_database.batch_add_database(database_view_ids_by_database_id);
 
-    let w_database_collab = w_database.encode_collab_v1().map_err(|err| {
-      ImportError::Internal(anyhow!(
-        "Failed to encode workspace database collab: {:?}",
-        err
-      ))
-    })?;
+    if private_space {
+      updates.push((
+        w_database_id,
+        CollabType::WorkspaceDatabase,
+        w_database
+          .collab
+          .transact()
+          .encode_diff_v1(&database_before),
+      ));
+    } else {
+      let w_database_collab = w_database.encode_collab_v1().map_err(|err| {
+        ImportError::Internal(anyhow!(
+          "Failed to encode workspace database collab: {:?}",
+          err
+        ))
+      })?;
 
-    match w_database_collab.encode_to_bytes() {
-      Ok(bytes) => {
-        if let Err(err) = redis_client
-          .set_ex::<String, Vec<u8>, Value>(
-            encode_collab_key(w_database_id.to_string()),
-            bytes,
-            2592000, // WorkspaceDatabase => 1 month
-          )
-          .await
-        {
-          warn!(
-            "[Import] Failed to insert workspace database to Redis: {}",
-            err
-          );
-        }
-      },
-      Err(err) => warn!(
-        "[Import] Failed to encode workspace database collab payload: {}",
-        err
-      ),
+      match w_database_collab.encode_to_bytes() {
+        Ok(bytes) => {
+          if let Err(err) = redis_client
+            .set_ex::<String, Vec<u8>, Value>(
+              encode_collab_key(w_database_id.to_string()),
+              bytes,
+              2592000, // WorkspaceDatabase => 1 month
+            )
+            .await
+          {
+            warn!(
+              "[Import] Failed to insert workspace database to Redis: {}",
+              err
+            );
+          }
+        },
+        Err(err) => warn!(
+          "[Import] Failed to encode workspace database collab payload: {}",
+          err
+        ),
+      }
+
+      trace!(
+        "[Import]: {} did encode workspace database collab",
+        import_task.workspace_id
+      );
+      let w_database_collab_params = CollabParams {
+        object_id: w_database_id,
+        collab_type: CollabType::WorkspaceDatabase,
+        encoded_collab_v1: Bytes::from(w_database_collab.encode_to_bytes().unwrap()),
+        updated_at: Some(updated_at),
+      };
+      collab_params_list.push(w_database_collab_params);
     }
-
-    trace!(
-      "[Import]: {} did encode workspace database collab",
-      import_task.workspace_id
-    );
-    let w_database_collab_params = CollabParams {
-      object_id: w_database_id,
-      collab_type: CollabType::WorkspaceDatabase,
-      encoded_collab_v1: Bytes::from(w_database_collab.encode_to_bytes().unwrap()),
-      updated_at: Some(updated_at),
-    };
-    collab_params_list.push(w_database_collab_params);
   }
 
   // 5. Insert orphan view to folder
@@ -1048,44 +1168,66 @@ async fn process_unzip_file(
       View::orphan_view(&orphan_view_id, ViewLayout::Document, Some(import_task.uid))
     })
     .collect::<Vec<_>>();
-  if !orphan_views.is_empty() {
+  if private_space {
+    // Row detail documents belong to the private space without becoming sidebar pages.
+    let mut txn = folder.collab.transact_mut();
+    for view in orphan_views {
+      let id = view.id.clone();
+      folder
+        .body
+        .views
+        .insert(&mut txn, view, None, import_task.uid);
+      folder.body.views.update_view(
+        &mut txn,
+        &id,
+        |update| update.set_bid(&space_view_id).done(),
+        import_task.uid,
+      );
+    }
+  } else if !orphan_views.is_empty() {
     folder.insert_views(orphan_views, import_task.uid);
   }
 
-  // 6. Encode Folder
-  let folder_collab = folder
-    .encode_collab_v1(|collab| CollabType::Folder.validate_require_data(collab))
-    .map_err(|err| ImportError::Internal(err.into()))?;
+  // 6. Encode the update for an existing workspace, or the initial snapshot for a new one.
+  if private_space {
+    updates.push((
+      workspace_id,
+      CollabType::Folder,
+      folder.collab.transact().encode_diff_v1(&folder_before),
+    ));
+  } else {
+    let folder_collab = folder
+      .encode_collab_v1(|collab| CollabType::Folder.validate_require_data(collab))
+      .map_err(|err| ImportError::Internal(err.into()))?;
 
-  match folder_collab.encode_to_bytes() {
-    Ok(bytes) => {
-      if let Err(err) = redis_client
-        .set_ex::<String, Vec<u8>, Value>(
-          encode_collab_key(&import_task.workspace_id),
-          bytes,
-          604800, // Folder => 1 week
-        )
-        .await
-      {
-        warn!("[Import] Failed to insert folder collab to Redis: {}", err);
-      }
-    },
-    Err(err) => warn!("[Import] Failed to encode folder collab payload: {}", err),
+    match folder_collab.encode_to_bytes() {
+      Ok(bytes) => {
+        if let Err(err) = redis_client
+          .set_ex::<String, Vec<u8>, Value>(
+            encode_collab_key(&import_task.workspace_id),
+            bytes,
+            604800, // Folder => 1 week
+          )
+          .await
+        {
+          warn!("[Import] Failed to insert folder collab to Redis: {}", err);
+        }
+      },
+      Err(err) => warn!("[Import] Failed to encode folder collab payload: {}", err),
+    }
+
+    let folder_collab_params = CollabParams {
+      object_id: workspace_id,
+      collab_type: CollabType::Folder,
+      encoded_collab_v1: Bytes::from(folder_collab.encode_to_bytes().unwrap()),
+      updated_at: Some(updated_at),
+    };
+    trace!(
+      "[Import]: {} did encode folder collab",
+      import_task.workspace_id
+    );
+    collab_params_list.push(folder_collab_params);
   }
-
-  let folder_collab_params = CollabParams {
-    object_id: workspace_id,
-    collab_type: CollabType::Folder,
-    encoded_collab_v1: Bytes::from(folder_collab.encode_to_bytes().unwrap()),
-    updated_at: Some(updated_at),
-  };
-  trace!(
-    "[Import]: {} did encode folder collab",
-    import_task.workspace_id
-  );
-  collab_params_list.push(folder_collab_params);
-
-  let upload_resources = process_resources(resources).await;
 
   // 7. Start a transaction to insert all collabs
   let mut transaction = pg_pool.begin().await.map_err(|err| {
@@ -1115,75 +1257,72 @@ async fn process_unzip_file(
     ))
   })?;
 
-  trace!(
-    "[Import]: {} update task:{} status to completed",
-    import_task.workspace_id,
-    import_task.task_id,
-  );
-  update_import_task_status(
-    &import_task.task_id,
-    ImportTaskState::Completed,
-    transaction.deref_mut(),
-  )
-  .await
-  .map_err(|err| {
-    ImportError::Internal(anyhow!(
-      "Failed to update import task status when importing data: {:?}",
-      err
-    ))
-  })?;
-
-  trace!(
-    "[Import]: {} set is_initialized to true",
-    import_task.workspace_id,
-  );
-  update_workspace_status(transaction.deref_mut(), &workspace_id, true)
+  if !private_space {
+    trace!(
+      "[Import]: {} update task:{} status to completed",
+      import_task.workspace_id,
+      import_task.task_id,
+    );
+    update_import_task_status(
+      &import_task.task_id,
+      ImportTaskState::Completed,
+      transaction.deref_mut(),
+    )
     .await
     .map_err(|err| {
       ImportError::Internal(anyhow!(
-        "Failed to update workspace status when importing data: {:?}",
+        "Failed to update import task status when importing data: {:?}",
         err
       ))
     })?;
 
-  // Set the workspace's updated_at to the earliest possible timestamp, as it is created by an import task
-  // and not actively updated by a user. This ensures that when sorting workspaces by updated_at to find
-  // the most recent, the imported workspace doesn't appear as the most recently visited workspace.
-  let updated_at = DateTime::from_timestamp(0, 0).unwrap_or_else(Utc::now);
-  update_updated_at_of_workspace_with_uid(
-    transaction.deref_mut(),
-    import_task.uid,
-    &workspace_id,
-    updated_at,
-  )
-  .await
-  .map_err(|err| {
-    ImportError::Internal(anyhow!(
-      "Failed to update workspace updated_at when importing data: {:?}",
-      err
-    ))
-  })?;
+    trace!(
+      "[Import]: {} set is_initialized to true",
+      import_task.workspace_id,
+    );
+    update_workspace_status(transaction.deref_mut(), &workspace_id, true)
+      .await
+      .map_err(|err| {
+        ImportError::Internal(anyhow!(
+          "Failed to update workspace status when importing data: {:?}",
+          err
+        ))
+      })?;
+
+    // Set the workspace's updated_at to the earliest possible timestamp, as it is created by an import task
+    // and not actively updated by a user. This ensures that when sorting workspaces by updated_at to find
+    // the most recent, the imported workspace doesn't appear as the most recently visited workspace.
+    let updated_at = DateTime::from_timestamp(0, 0).unwrap_or_else(Utc::now);
+    update_updated_at_of_workspace_with_uid(
+      transaction.deref_mut(),
+      import_task.uid,
+      &workspace_id,
+      updated_at,
+    )
+    .await
+    .map_err(|err| {
+      ImportError::Internal(anyhow!(
+        "Failed to update workspace updated_at when importing data: {:?}",
+        err
+      ))
+    })?;
+  }
 
   // insert metadata into database
-  let metas = upload_resources
-    .iter()
-    .map(|res| res.meta.clone())
-    .collect::<Vec<_>>();
-  let affected_rows = insert_blob_metadata_bulk(transaction.deref_mut(), &workspace_id, metas)
-    .await
-    .map_err(|err| {
-      ImportError::Internal(anyhow!(
-        "Failed to insert blob metadata into database when importing data: {:?}",
-        err
-      ))
-    })?;
+  let affected_rows =
+    insert_blob_metadata_bulk(transaction.deref_mut(), &workspace_id, resource_meta)
+      .await
+      .map_err(|err| {
+        ImportError::Internal(anyhow!(
+          "Failed to insert blob metadata into database when importing data: {:?}",
+          err
+        ))
+      })?;
 
-  if affected_rows != upload_resources.len() as u64 {
+  if affected_rows != resource_count as u64 {
     warn!(
       "[Import]: {}, Affected rows: {}, upload resources: {}",
-      import_task.workspace_id,
-      affected_rows,
-      upload_resources.len()
+      import_task.workspace_id, affected_rows, resource_count
     );
   }
 
@@ -1195,20 +1334,130 @@ async fn process_unzip_file(
   });
 
   if result.is_err() {
-    let _: RedisResult<Value> = redis_client.del(encode_collab_key(w_database_id)).await;
-    let _: RedisResult<Value> = redis_client
-      .del(encode_collab_key(&import_task.workspace_id))
-      .await;
+    if !private_space {
+      let _: RedisResult<Value> = redis_client.del(encode_collab_key(w_database_id)).await;
+      let _: RedisResult<Value> = redis_client
+        .del(encode_collab_key(&import_task.workspace_id))
+        .await;
+    }
 
     return result;
   }
 
+  if private_space {
+    let stream_key = UpdateStreamMessage::stream_key(&workspace_id);
+    let mut pipeline = redis::pipe();
+    pipeline.atomic();
+    for (object_id, collab_type, update) in updates {
+      pipeline
+        .add_command(UpdateStreamMessage::prepare_command(
+          &stream_key,
+          &object_id,
+          collab_type,
+          &CollabOrigin::Server,
+          update,
+          UpdateFlags::default(),
+        ))
+        .ignore();
+    }
+    pipeline
+      .query_async::<()>(redis_client)
+      .await
+      .map_err(|err| anyhow!("Failed to publish private Notion import: {err}"))?;
+    if let Err(err) =
+      update_import_task_status(&import_task.task_id, ImportTaskState::Completed, pg_pool).await
+    {
+      // The space is already visible. A failure to record its status must not
+      // turn a successful import into a failure notification.
+      error!(
+        "Failed to update status of completed Notion import {}: {err}",
+        import_task.task_id
+      );
+    }
+    return Ok(());
+  }
+
   // 9. after inserting all collabs, upload all files to S3
   trace!("[Import]: {} upload files to s3", import_task.workspace_id,);
-  batch_upload_files_to_s3(&import_task.workspace_id, s3_client, upload_resources)
+  batch_upload_files_to_s3(&import_task.workspace_id, s3_client, remaining_resources)
     .await
     .map_err(|err| ImportError::Internal(anyhow!("Failed to upload files to S3: {:?}", err)))?;
   Ok(())
+}
+
+fn apply_pending_updates(
+  collab: &mut Collab,
+  object_id: &Uuid,
+  pending: &[StreamId],
+) -> Result<(), ImportError> {
+  for entry in pending {
+    let oid = entry
+      .map
+      .get("oid")
+      .and_then(|value| Uuid::from_redis_value(value).ok());
+    if oid.as_ref() == Some(object_id) {
+      let message = UpdateStreamMessage::from_redis_stream(&entry.id, &entry.map)?;
+      let update = CollabStreamUpdate::from(message)
+        .into_update()
+        .map_err(|err| anyhow!("Invalid pending update for {object_id}: {err}"))?;
+      collab
+        .apply_update(update)
+        .map_err(|err| anyhow!("Failed to apply pending update for {object_id}: {err}"))?;
+    }
+  }
+  Ok(())
+}
+
+fn private_space_tree(
+  task: &NotionImportTask,
+  mut children: Vec<ParentChildViews>,
+) -> Vec<ParentChildViews> {
+  let space_id = task.task_id.to_string();
+  for child in &mut children {
+    child.view.parent_view_id.clone_from(&space_id);
+    // The legacy importer can mark directory roots as public spaces.
+    child.view.extra = None;
+  }
+  vec![
+    NestedChildViewBuilder::new(task.uid, task.workspace_id.clone())
+      .with_view_id(space_id)
+      .with_name(&task.workspace_name)
+      .with_extra(|builder| {
+        builder
+          .is_space(true)
+          .with_space_permission(SpacePermission::Private)
+          .build()
+      })
+      .with_children(children)
+      .build(),
+  ]
+}
+
+async fn check_import_membership(
+  pg_pool: &PgPool,
+  uid: i64,
+  workspace_id: &Uuid,
+) -> Result<(), ImportError> {
+  if !select_workspace_member(pg_pool, uid, workspace_id)
+    .await
+    .map_err(|err| anyhow!("Failed to check import workspace permissions: {err}"))?
+    .is_some_and(|member| member.role.can_create_collab())
+  {
+    return Err(anyhow!("User cannot import into workspace {workspace_id}").into());
+  }
+  Ok(())
+}
+
+async fn fail_notion_import(task: &NotionImportTask, private_space: bool, pg_pool: &PgPool) {
+  if private_space {
+    if let Err(err) =
+      update_import_task_status(&task.task_id, ImportTaskState::Failed, pg_pool).await
+    {
+      error!("Failed to record private Notion import failure: {err}");
+    }
+  } else {
+    remove_workspace(&task.workspace_id, pg_pool).await;
+  }
 }
 
 async fn clean_up(s3_client: &Arc<dyn S3Client>, task: &NotionImportTask) {
@@ -1505,13 +1754,15 @@ impl Display for NotionImportTask {
 pub enum ImportTask {
   // boxing the large fields to reduce the total size of the enum
   Notion(Box<NotionImportTask>),
+  // A distinct tag prevents an older worker from deleting an existing workspace on failure.
+  NotionPrivateSpace(Box<NotionImportTask>),
   Custom(serde_json::Value),
 }
 
 impl Display for ImportTask {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match self {
-      ImportTask::Notion(task) => write!(
+      ImportTask::Notion(task) | ImportTask::NotionPrivateSpace(task) => write!(
         f,
         "NotionImportTask {{ workspace_id: {}, workspace_name: {} }}",
         task.workspace_id, task.workspace_name

@@ -5,6 +5,8 @@ use collab_folder::ViewLayout;
 
 use collab_database::database::get_inline_view_id;
 use collab_document::blocks::BlockType;
+use database_entity::dto::AFRole;
+use shared_entity::dto::workspace_dto::CreateWorkspaceParam;
 use std::path::PathBuf;
 use std::time::Duration;
 use uuid::Uuid;
@@ -186,6 +188,74 @@ async fn imported_workspace_do_not_become_latest_visit_workspace_test() {
     user_workspace.visiting_workspace.workspace_id,
     visiting_workspace_id,
   );
+}
+
+#[tokio::test]
+async fn import_notion_into_current_workspace_as_private_space() {
+  let client = TestClient::new_user().await;
+  let workspace_id = client.workspace_id().await;
+  client
+    .api_client
+    .create_workspace(CreateWorkspaceParam {
+      workspace_name: Some("Second workspace".into()),
+      workspace_icon: None,
+    })
+    .await
+    .unwrap();
+  let original_workspaces = client.api_client.get_workspaces().await.unwrap().len();
+  let member = TestClient::new_user().await;
+  client
+    .invite_and_accepted_workspace_member(&workspace_id, &member, AFRole::Member)
+    .await
+    .unwrap();
+
+  let path = PathBuf::from("tests/workspace/asset/project&task.zip");
+  let task = client
+    .api_client
+    .create_private_space_import(&path, &workspace_id)
+    .await
+    .unwrap();
+  let space_id = Uuid::parse_str(&task.task_id).unwrap();
+  client
+    .api_client
+    .upload_import_file(&path, &task.presigned_url)
+    .await
+    .unwrap();
+  wait_until_num_import_task_complete(&client, 1).await;
+  assert_eq!(
+    client.api_client.get_workspaces().await.unwrap().len(),
+    original_workspaces
+  );
+
+  let folder = client
+    .api_client
+    .get_workspace_folder(&workspace_id, Some(3), None)
+    .await
+    .unwrap();
+  let space = folder
+    .children
+    .iter()
+    .find(|view| view.view_id == space_id)
+    .unwrap();
+  assert_eq!(space.name, "project&task");
+  assert!(space.is_space && space.is_private);
+  let page = space
+    .children
+    .iter()
+    .find(|view| view.name == "Projects & Tasks")
+    .unwrap();
+  assert!(page.children.iter().any(|view| view.name == "Projects"));
+  assert!(page.children.iter().any(|view| view.name == "Tasks"));
+
+  let member_folder = member
+    .api_client
+    .get_workspace_folder(&workspace_id, Some(3), None)
+    .await
+    .unwrap();
+  assert!(member_folder
+    .children
+    .iter()
+    .all(|view| view.view_id != space_id));
 }
 
 #[allow(dead_code)]
