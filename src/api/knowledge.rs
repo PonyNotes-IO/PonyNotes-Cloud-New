@@ -94,6 +94,14 @@ async fn knowledge(
       .await?;
       return match payload["operation"].as_str() {
         Some("note_sync") => {
+          let access = &state.config.access_control;
+          anyhow::ensure!(
+            access.is_enabled
+              && access.enable_collab_access_control
+              && access.enable_workspace_access_control
+              && access.enable_realtime_access_control,
+            "workspace sync requires document access control"
+          );
           let source = sources.source(&payload).await?;
           let user = super::util::realtime_user_for_web_request(request.headers(), uid)?;
           note_sync::start(state.clone(), user, &payload, source).await

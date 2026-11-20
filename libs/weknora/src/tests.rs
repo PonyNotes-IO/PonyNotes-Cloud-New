@@ -1114,7 +1114,7 @@ fn mock(responses: Vec<(String, u16, Value)>) -> (Client, thread::JoinHandle<()>
 }
 
 type Requests = std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>;
-fn mock_recorded(
+pub(super) fn mock_recorded(
   responses: Vec<(String, u16, Value)>,
 ) -> (Client, thread::JoinHandle<()>, Requests) {
   let listener = TcpListener::bind("127.0.0.1:0").unwrap();

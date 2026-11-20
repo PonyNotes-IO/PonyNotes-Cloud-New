@@ -21,12 +21,15 @@ use database::collab::GetCollabOrigin;
 use database_entity::dto::CollabParams;
 use ponynotes_weknora::{
   library::uuid,
-  note_source::{FeishuNote, FeishuNoteSource, WORKSPACE_SYNC_SNAPSHOT},
+  note_source::{WorkspaceNote, WorkspaceNoteSource, WORKSPACE_SYNC_SNAPSHOT},
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 use uuid::Uuid;
+
+// Keep the stored key for pages already imported by the Feishu MVP.
+const WORKSPACE_SYNC_REVISION: &str = "ponynotes_feishu_revision";
 
 pub(super) async fn status(
   state: &AppState,
@@ -58,7 +61,7 @@ pub(super) async fn start(
   state: web::Data<AppState>,
   user: RealtimeUser,
   payload: &Value,
-  source: FeishuNoteSource,
+  source: WorkspaceNoteSource,
 ) -> Result<Value> {
   let workspace = uuid(payload, "workspace_id")?;
   let source_id = uuid(payload, "source_id")?;
@@ -74,7 +77,7 @@ pub(super) async fn start(
     actix_web::rt::spawn(async move {
       let mut result = match tokio::time::timeout(
         Duration::from_secs(600),
-        sync(&state, user, workspace, source_id, source),
+        sync(&state, user, workspace, source),
       )
       .await
       {
@@ -107,20 +110,13 @@ async fn sync(
   state: &AppState,
   user: RealtimeUser,
   workspace: Uuid,
-  source_id: Uuid,
-  source: FeishuNoteSource,
+  source: WorkspaceNoteSource,
 ) -> Result<Value> {
   source.refresh().await?;
   let notes = source.notes().await?;
-  if notes.is_empty() {
-    return Ok(json!({"status":"success", "saved":0, "failed":0}));
-  }
-  // ponytail: bound one manual run; partition large Wiki selections across connections.
+  // ponytail: bound one manual run; use smaller selections for large sources.
   ensure!(notes.len() <= 100, "too many notes in one sync");
-  let namespace = Uuid::new_v5(
-    &workspace,
-    format!("feishu-wiki:{}:{source_id}", user.uid).as_bytes(),
-  );
+  let namespace = source.page_namespace(workspace, user.uid);
   let mut first_page = None;
   let mut saved = 0;
   let mut unchanged = 0;
@@ -169,7 +165,7 @@ async fn save_note(
   user: &RealtimeUser,
   workspace: Uuid,
   id: Uuid,
-  note: &FeishuNote,
+  note: &WorkspaceNote,
   markdown: String,
 ) -> Result<bool> {
   state
@@ -185,10 +181,10 @@ async fn save_note(
       .any(|item| item.id == id_string),
     "note is in trash"
   );
-  let original = format!(
-    "[在飞书打开](https://feishu.cn/wiki/{})\n\n{markdown}",
-    note.external_id
-  );
+  let original = match &note.source_link {
+    Some(link) => format!("{link}\n\n{markdown}"),
+    None => markdown,
+  };
   let revision = digest(&original);
   if folder.get_view(&id_string, user.uid).is_some() {
     ensure!(
@@ -224,7 +220,7 @@ async fn save_note(
     {
       let mut txn = document.transact_mut();
       root.insert(&mut txn, WORKSPACE_SYNC_SNAPSHOT, hash);
-      root.insert(&mut txn, "ponynotes_feishu_revision", revision);
+      root.insert(&mut txn, WORKSPACE_SYNC_REVISION, revision);
     }
     let params = CollabParams {
       object_id: id,
@@ -256,13 +252,15 @@ fn refresh_document(
   let (mut collab, mut body) = document.split();
   let root = collab.data.clone();
   let mut txn = collab.transact_mut();
-  let expected: String = root.get_with_txn(&txn, WORKSPACE_SYNC_SNAPSHOT).unwrap_or_default();
+  let expected: String = root
+    .get_with_txn(&txn, WORKSPACE_SYNC_SNAPSHOT)
+    .unwrap_or_default();
   ensure!(
     expected == digest_data(&body.get_document_data(&txn)?)?,
     "note was edited locally"
   );
   let previous: String = root
-    .get_with_txn(&txn, "ponynotes_feishu_revision")
+    .get_with_txn(&txn, WORKSPACE_SYNC_REVISION)
     .unwrap_or_default();
   if revision == previous {
     return Ok(None);
@@ -270,9 +268,10 @@ fn refresh_document(
   body.reset_with_data(&mut txn, Some(parse(id, markdown)?))?;
   let hash = digest_data(&body.get_document_data(&txn)?)?;
   root.insert(&mut txn, WORKSPACE_SYNC_SNAPSHOT, hash);
-  root.insert(&mut txn, "ponynotes_feishu_revision", revision);
+  root.insert(&mut txn, WORKSPACE_SYNC_REVISION, revision);
   Ok(Some(txn.encode_update_v1()))
 }
+
 fn digest(content: &str) -> String {
   format!("{:x}", Sha256::digest(content.as_bytes()))
 }
@@ -347,7 +346,7 @@ mod tests {
     {
       let mut txn = document.transact_mut();
       root.insert(&mut txn, WORKSPACE_SYNC_SNAPSHOT, hash);
-      root.insert(&mut txn, "ponynotes_feishu_revision", digest(original));
+      root.insert(&mut txn, WORKSPACE_SYNC_REVISION, digest(original));
     }
     let snapshot = document.encode_collab().unwrap();
     let open = || {

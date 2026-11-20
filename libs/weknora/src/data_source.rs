@@ -127,6 +127,24 @@ fn source_info(source: &Value) -> Value {
     "resource_ids":source["config"].get("resource_ids").filter(|v|v.is_array()).cloned().unwrap_or(json!([])),
     "settings":Value::Object(settings),
   });
+  if source["type"] == "gitlab" {
+    // Return only the public project scope, never arbitrary connector metadata.
+    if let Some(projects) = source["config"]["settings"]["projects"].as_array() {
+      result["config"]["settings"]["projects"] = json!(projects
+        .iter()
+        .filter_map(|project| {
+          let id = project["project_id"].as_str()?;
+          let branch = project["ref"].as_str().unwrap_or("");
+          let paths: Vec<_> = project["paths"]
+            .as_array()?
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+          Some(json!({"project_id":id, "ref":branch, "paths":paths}))
+        })
+        .collect::<Vec<_>>());
+    }
+  }
   result["credentials_configured"] =
     json!(source["credentials"]["credentials"]["configured"] == true);
   result["latest_sync_log"] = if source["latest_sync_log"].is_object() {
