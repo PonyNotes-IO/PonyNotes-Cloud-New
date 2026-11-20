@@ -10,13 +10,41 @@ use database_entity::dto::AFAccessLevel;
 use tracing::instrument;
 use uuid::Uuid;
 
-async fn has_collab_read_policy(
+async fn can_access_collab(
   access_control: &AccessControl,
+  workspace_id: &Uuid,
   uid: &i64,
   oid: &Uuid,
+  requested_action: Action,
 ) -> Result<bool, AppError> {
+  let workspace_action = match requested_action {
+    Action::Read => Action::Read,
+    Action::Write | Action::Delete => Action::Write,
+  };
+  let object = ObjectType::Collab(oid.to_string());
+  if access_control
+    .enforce_immediately(uid, object.clone(), workspace_action.clone())
+    .await?
+  {
+    return Ok(true);
+  }
+  if (workspace_action != Action::Read
+    && access_control
+      .enforce_immediately(uid, object, Action::Read)
+      .await?)
+    || match &access_control.pg_pool {
+      Some(pool) => database::collab::requires_explicit_collab_access(pool, oid).await?,
+      None => false,
+    }
+  {
+    return Ok(false);
+  }
   access_control
-    .enforce_immediately(uid, ObjectType::Collab(oid.to_string()), Action::Read)
+    .enforce_immediately(
+      uid,
+      ObjectType::Workspace(workspace_id.to_string()),
+      workspace_action,
+    )
     .await
 }
 
@@ -40,45 +68,10 @@ impl CollabAccessControl for CollabAccessControlImpl {
     oid: &Uuid,
     action: Action,
   ) -> Result<(), AppError> {
-    let workspace_action = match action {
-      Action::Read => Action::Read,
-      Action::Write => Action::Write,
-      Action::Delete => Action::Write,
-    };
-
-    let collab_result = self
-      .access_control
-      .enforce_immediately(
-        uid,
-        ObjectType::Collab(oid.to_string()),
-        workspace_action.clone(),
-      )
-      .await;
-    match collab_result {
-      Ok(true) => return Ok(()),
-      Err(e) => return Err(e),
-      _ => {},
+    if can_access_collab(&self.access_control, workspace_id, uid, oid, action).await? {
+      return Ok(());
     }
-
-    if !matches!(workspace_action, Action::Read)
-      && has_collab_read_policy(&self.access_control, uid, oid).await?
-    {
-      return Err(AppError::NotEnoughPermissions);
-    }
-
-    let workspace_result = self
-      .access_control
-      .enforce_immediately(
-        uid,
-        ObjectType::Workspace(workspace_id.to_string()),
-        workspace_action,
-      )
-      .await;
-    match workspace_result {
-      Ok(true) => Ok(()),
-      Ok(false) => Err(AppError::NotEnoughPermissions),
-      Err(e) => Err(e),
-    }
+    Err(AppError::NotEnoughPermissions)
   }
 
   async fn enforce_access_level(
@@ -88,46 +81,11 @@ impl CollabAccessControl for CollabAccessControlImpl {
     oid: &Uuid,
     access_level: AFAccessLevel,
   ) -> Result<(), AppError> {
-    let workspace_action = match access_level {
-      AFAccessLevel::ReadOnly => Action::Read,
-      AFAccessLevel::ReadAndComment => Action::Read,
-      AFAccessLevel::ReadAndWrite => Action::Write,
-      AFAccessLevel::FullAccess => Action::Write,
+    let action = match access_level {
+      AFAccessLevel::ReadOnly | AFAccessLevel::ReadAndComment => Action::Read,
+      AFAccessLevel::ReadAndWrite | AFAccessLevel::FullAccess => Action::Write,
     };
-
-    let collab_result = self
-      .access_control
-      .enforce_immediately(
-        uid,
-        ObjectType::Collab(oid.to_string()),
-        workspace_action.clone(),
-      )
-      .await;
-    match collab_result {
-      Ok(true) => return Ok(()),
-      Err(e) => return Err(e),
-      _ => {},
-    }
-
-    if !matches!(workspace_action, Action::Read)
-      && has_collab_read_policy(&self.access_control, uid, oid).await?
-    {
-      return Err(AppError::NotEnoughPermissions);
-    }
-
-    let workspace_result = self
-      .access_control
-      .enforce_immediately(
-        uid,
-        ObjectType::Workspace(workspace_id.to_string()),
-        workspace_action,
-      )
-      .await;
-    match workspace_result {
-      Ok(true) => Ok(()),
-      Ok(false) => Err(AppError::NotEnoughPermissions),
-      Err(e) => Err(e),
-    }
+    self.enforce_action(workspace_id, uid, oid, action).await
   }
 
   #[instrument(level = "info", skip_all)]
@@ -169,56 +127,6 @@ impl RealtimeCollabAccessControlImpl {
   pub fn new(access_control: AccessControl) -> Self {
     Self { access_control }
   }
-
-  async fn can_perform_action(
-    &self,
-    workspace_id: &Uuid,
-    uid: &i64,
-    oid: &Uuid,
-    required_action: Action,
-  ) -> Result<bool, AppError> {
-    let workspace_action = match required_action {
-      Action::Read => Action::Read,
-      Action::Write => Action::Write,
-      Action::Delete => Action::Write,
-    };
-
-    // 【共享协作修复 2026-07-02】文档级显式授权优先(Google Docs/Notion 模型)。
-    // 旧逻辑对写操作先做 workspace 写权限短路(!can_write_workspace → return false),
-    // 被分享者(非文档所属 workspace 成员)即使持有 collab 级编辑授权也永远过不了,
-    // 其协作更新在 WS 层被静默丢弃——表现为"被分享者的编辑拥有者永远看不到"。
-    // 改为:① collab 级显式策略命中即放行;② 持有 collab 级策略但不足以执行写
-    // (被显式降权为只读)则拒绝,不得凭 workspace 角色重新升权(下方原有防御保留);
-    // ③ 无 collab 级策略者回退 workspace 角色判定(对普通成员与旧行为完全等价)。
-    let collab_result = self
-      .access_control
-      .enforce_immediately(
-        uid,
-        ObjectType::Collab(oid.to_string()),
-        workspace_action.clone(),
-      )
-      .await;
-    match collab_result {
-      Ok(true) => return Ok(true),
-      Err(e) => return Err(e),
-      _ => {},
-    }
-
-    if !matches!(workspace_action, Action::Read)
-      && has_collab_read_policy(&self.access_control, uid, oid).await?
-    {
-      return Ok(false);
-    }
-
-    self
-      .access_control
-      .enforce_immediately(
-        uid,
-        ObjectType::Workspace(workspace_id.to_string()),
-        workspace_action,
-      )
-      .await
-  }
 }
 
 #[async_trait]
@@ -229,9 +137,7 @@ impl RealtimeAccessControl for RealtimeCollabAccessControlImpl {
     uid: &i64,
     oid: &Uuid,
   ) -> Result<bool, AppError> {
-    self
-      .can_perform_action(workspace_id, uid, oid, Action::Write)
-      .await
+    can_access_collab(&self.access_control, workspace_id, uid, oid, Action::Write).await
   }
 
   async fn can_read_collab(
@@ -240,9 +146,7 @@ impl RealtimeAccessControl for RealtimeCollabAccessControlImpl {
     uid: &i64,
     oid: &Uuid,
   ) -> Result<bool, AppError> {
-    self
-      .can_perform_action(workspace_id, uid, oid, Action::Read)
-      .await
+    can_access_collab(&self.access_control, workspace_id, uid, oid, Action::Read).await
   }
 }
 
@@ -281,6 +185,106 @@ mod tests {
         .await
         .unwrap_or_else(|_| panic!("Failed to enforce action: {:?}", action));
     }
+  }
+
+  #[tokio::test]
+  #[ignore = "requires WORKSPACE_SYNC_TEST_DATABASE_URL"]
+  async fn synced_document_requires_an_explicit_grant() {
+    use sqlx::postgres::PgPoolOptions;
+    let pool = PgPoolOptions::new()
+      .max_connections(1)
+      .connect(&std::env::var("WORKSPACE_SYNC_TEST_DATABASE_URL").unwrap())
+      .await
+      .unwrap();
+    sqlx::query("CREATE TEMP TABLE af_collab (oid uuid PRIMARY KEY)")
+      .execute(&pool)
+      .await
+      .unwrap();
+    sqlx::query(include_str!(
+      "../../../../migrations/20261119000001_restrict_workspace_sync_collabs.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let workspace = Uuid::new_v4();
+    let oid = "50c290ef-2b37-5750-8cfb-60dc5ccd427c"
+      .parse::<Uuid>()
+      .unwrap();
+    let regular = "42b83f76-aecc-5b03-9736-449bee5bf49e"
+      .parse::<Uuid>()
+      .unwrap();
+    sqlx::query(
+      "INSERT INTO af_collab (oid, requires_explicit_access) VALUES ($1, true), ($2, false)",
+    )
+    .bind(oid)
+    .bind(regular)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let enforcer = test_enforcer_v2().await;
+    let owner = 1;
+    let teammate = 2;
+    enforcer
+      .update_policy(
+        SubjectType::User(teammate),
+        ObjectType::Workspace(workspace.to_string()),
+        AFRole::Member,
+      )
+      .await
+      .unwrap();
+    let mut access = AccessControl::with_enforcer(enforcer);
+    access.pg_pool = Some(pool);
+    let http = super::CollabAccessControlImpl::new(access.clone());
+    let realtime = super::RealtimeCollabAccessControlImpl::new(access);
+    http
+      .update_access_level_policy(&owner, &oid, AFAccessLevel::FullAccess)
+      .await
+      .unwrap();
+    assert!(http
+      .enforce_action(&workspace, &owner, &oid, Action::Read)
+      .await
+      .is_ok());
+    assert!(realtime
+      .can_write_collab(&workspace, &owner, &oid)
+      .await
+      .unwrap());
+    assert!(http
+      .enforce_action(&workspace, &teammate, &regular, Action::Read)
+      .await
+      .is_ok());
+    assert!(http
+      .enforce_action(&workspace, &teammate, &oid, Action::Read)
+      .await
+      .is_err());
+    assert!(!realtime
+      .can_read_collab(&workspace, &teammate, &oid)
+      .await
+      .unwrap());
+    assert!(!realtime
+      .can_write_collab(&workspace, &teammate, &oid)
+      .await
+      .unwrap());
+    http
+      .update_access_level_policy(&teammate, &oid, AFAccessLevel::ReadOnly)
+      .await
+      .unwrap();
+    assert!(http
+      .enforce_action(&workspace, &teammate, &oid, Action::Read)
+      .await
+      .is_ok());
+    assert!(realtime
+      .can_read_collab(&workspace, &teammate, &oid)
+      .await
+      .unwrap());
+    assert!(!realtime
+      .can_write_collab(&workspace, &teammate, &oid)
+      .await
+      .unwrap());
+    http.remove_access_level(&teammate, &oid).await.unwrap();
+    assert!(!realtime
+      .can_read_collab(&workspace, &teammate, &oid)
+      .await
+      .unwrap());
   }
 
   #[tokio::test]
@@ -331,7 +335,7 @@ mod tests {
   }
 
   #[tokio::test]
-  pub async fn test_realtime_workspace_guest_cannot_write_even_with_collab_write() {
+  pub async fn test_realtime_explicit_collab_write_applies_to_workspace_guests() {
     let enforcer = test_enforcer_v2().await;
     let uid = 1;
     let workspace_id = Uuid::new_v4();
@@ -360,7 +364,7 @@ mod tests {
       .can_read_collab(&workspace_id, &uid, &oid)
       .await
       .unwrap());
-    assert!(!realtime_access_control
+    assert!(realtime_access_control
       .can_write_collab(&workspace_id, &uid, &oid)
       .await
       .unwrap());

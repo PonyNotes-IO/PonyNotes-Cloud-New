@@ -1335,6 +1335,13 @@ pub(crate) async fn store_document_page(
             &action,
         )
         .await?;
+    if private_root {
+        sqlx::query("UPDATE af_collab SET requires_explicit_access = true WHERE oid = $1 AND workspace_id = $2")
+            .bind(view_id)
+            .bind(workspace_id)
+            .execute(&mut *transaction)
+            .await?;
+    }
     transaction.commit().await?;
 
     update_workspace_folder_data(

@@ -31,6 +31,7 @@ use tracing::trace;
 #[derive(Clone)]
 pub struct AccessControl {
   enforcer: Arc<AFEnforcerV2>,
+  pub(crate) pg_pool: Option<PgPool>,
   #[allow(dead_code)]
   access_control_metrics: Arc<AccessControlMetrics>,
 }
@@ -61,6 +62,7 @@ impl AccessControl {
     );
     Ok(Self {
       enforcer: Arc::new(enforcer),
+      pg_pool: Some(pg_pool),
       access_control_metrics,
     })
   }
@@ -70,6 +72,7 @@ impl AccessControl {
     let access_control_metrics = Arc::new(AccessControlMetrics::init());
     Self {
       enforcer: Arc::new(enforcer),
+      pg_pool: None,
       access_control_metrics,
     }
   }

@@ -97,6 +97,24 @@ impl CollabStoreImpl {
     Ok(())
   }
 
+  async fn grant_new_collab_access(
+    &self,
+    workspace_id: &Uuid,
+    uid: &i64,
+    oid: &Uuid,
+  ) -> AppResult<()> {
+    if oid.get_version_num() == 5 && self.cache.is_exist(workspace_id, oid).await? {
+      return self
+        .access_control
+        .enforce_action(workspace_id, uid, oid, Action::Write)
+        .await;
+    }
+    self
+      .access_control
+      .update_access_level_policy(uid, oid, AFAccessLevel::FullAccess)
+      .await
+  }
+
   pub fn metrics(&self) -> &CollabMetrics {
     self.cache.metrics()
   }
@@ -217,8 +235,7 @@ impl CollabStore for CollabStoreImpl {
       .check_write_workspace_permission(&workspace_id, uid)
       .await?;
     self
-      .access_control
-      .update_access_level_policy(uid, &params.object_id, AFAccessLevel::FullAccess)
+      .grant_new_collab_access(&workspace_id, uid, &params.object_id)
       .await?;
 
     match tokio::time::timeout(
@@ -253,8 +270,7 @@ impl CollabStore for CollabStoreImpl {
 
     for params in &params_list {
       self
-        .access_control
-        .update_access_level_policy(uid, &params.object_id, AFAccessLevel::FullAccess)
+        .grant_new_collab_access(&workspace_id, uid, &params.object_id)
         .await?;
     }
 
@@ -288,7 +304,7 @@ impl CollabStore for CollabStoreImpl {
         object_id
       );
       let collab_exists = self.cache.is_exist(workspace_id, object_id).await?;
-      if collab_exists {
+      if collab_exists || object_id.get_version_num() == 5 {
         self
           .access_control
           .enforce_action(workspace_id, &uid, object_id, Action::Read)
@@ -309,17 +325,39 @@ impl CollabStore for CollabStoreImpl {
 
   async fn batch_get_collab(
     &self,
-    _uid: &i64,
+    uid: &i64,
     workspace_id: Uuid,
     queries: Vec<QueryCollab>,
   ) -> HashMap<Uuid, QueryCollabResult> {
-    if queries.is_empty() {
-      return HashMap::new();
+    let mut allowed = Vec::with_capacity(queries.len());
+    let mut results = HashMap::new();
+    for query in queries {
+      if query.object_id.get_version_num() == 5
+        && self
+          .access_control
+          .enforce_action(&workspace_id, uid, &query.object_id, Action::Read)
+          .await
+          .is_err()
+      {
+        results.insert(
+          query.object_id,
+          QueryCollabResult::Failed {
+            error: AppError::NotEnoughPermissions.to_string(),
+          },
+        );
+      } else {
+        allowed.push(query);
+      }
     }
-    self
-      .cache
-      .batch_get_full_collab(&workspace_id, queries, None, EncoderVersion::V1)
-      .await
+    if !allowed.is_empty() {
+      results.extend(
+        self
+          .cache
+          .batch_get_full_collab(&workspace_id, allowed, None, EncoderVersion::V1)
+          .await,
+      );
+    }
+    results
   }
 
   async fn delete_collab(&self, workspace_id: &Uuid, uid: &i64, object_id: &Uuid) -> AppResult<()> {

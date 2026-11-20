@@ -19,6 +19,18 @@ use std::ops::DerefMut;
 use tracing::{error, instrument};
 use uuid::Uuid;
 
+/// Workspace-sync documents use stable v5 IDs. Ordinary v4 documents skip this lookup.
+pub async fn requires_explicit_collab_access(pool: &PgPool, oid: &Uuid) -> Result<bool, Error> {
+  if oid.get_version_num() != 5 {
+    return Ok(false);
+  }
+  let restricted = sqlx::query_scalar("SELECT requires_explicit_access FROM af_collab WHERE oid = $1")
+    .bind(oid)
+    .fetch_optional(pool)
+    .await?;
+  Ok(restricted.unwrap_or(false))
+}
+
 /// Inserts a new row into the `af_collab` table or updates an existing row if it matches the
 /// provided `object_id`.Additionally, if the row is being inserted for the first time, a corresponding
 /// entry will be added to the `af_collab_member` table.
@@ -57,21 +69,22 @@ pub async fn insert_into_af_collab(
     params.updated_at.map(|v| v.timestamp_millis())
   );
 
-  sqlx::query!(
-    r#"
-      INSERT INTO af_collab (oid, blob, len, partition_key, owner_uid, workspace_id, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, NOW())) ON CONFLICT (oid)
-      DO UPDATE SET blob = $2, len = $3, owner_uid = $5, updated_at = COALESCE($7, NOW()) WHERE excluded.workspace_id = af_collab.workspace_id;
-    "#,
-    params.object_id,
-    params.encoded_collab_v1.as_ref(),
-    params.encoded_collab_v1.len() as i32,
-    partition_key,
-    uid,
-    workspace_id,
-    params.updated_at
+  let owner_uid: Option<i64> = sqlx::query_scalar(
+    "INSERT INTO af_collab (oid, blob, len, partition_key, owner_uid, workspace_id, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, NOW())) ON CONFLICT (oid)
+     DO UPDATE SET blob = $2, len = $3,
+       owner_uid = CASE WHEN af_collab.requires_explicit_access THEN af_collab.owner_uid ELSE $5 END,
+       updated_at = COALESCE($7, NOW()) WHERE excluded.workspace_id = af_collab.workspace_id
+     RETURNING owner_uid",
   )
-  .execute(tx.deref_mut())
+  .bind(params.object_id)
+  .bind(params.encoded_collab_v1.as_ref())
+  .bind(params.encoded_collab_v1.len() as i32)
+  .bind(partition_key)
+  .bind(uid)
+  .bind(workspace_id)
+  .bind(params.updated_at)
+  .fetch_optional(tx.deref_mut())
   .await.map_err(|err| {
     AppError::Internal(anyhow!(
       "Update af_collab failed: workspace_id:{}, uid:{}, object_id:{}, collab_type:{}. error: {:?}",
@@ -79,7 +92,8 @@ pub async fn insert_into_af_collab(
     ))
   })?;
 
-  // Ensure the collab creator is a member of the collab (Owner permission).
+  let owner_uid = owner_uid.ok_or(AppError::NotEnoughPermissions)?;
+  // Ensure the collab owner has an explicit grant, including after a restart.
   // This mirrors previous DB stored-procedure behavior: insert owner into af_collab_member.
   // Use ON CONFLICT DO UPDATE to keep permission_id in sync if row exists.
   sqlx::query!(
@@ -92,7 +106,7 @@ pub async fn insert_into_af_collab(
       ON CONFLICT (uid, oid)
       DO UPDATE SET permission_id = excluded.permission_id;
     "#,
-    uid,
+    owner_uid,
     params.object_id.to_string(),
   )
   .execute(tx.deref_mut())

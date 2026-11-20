@@ -3828,6 +3828,20 @@ async fn post_workspace_invite_code_handler(
       .await?;
   Ok(Json(AppResponse::Ok().with_data(workspace_invite_link)))
 }
+async fn check_sync_document_share_owner(
+  state: &AppState,
+  workspace_id: Uuid,
+  view_id: Uuid,
+  uid: i64,
+) -> Result<(), AppError> {
+  if database::collab::requires_explicit_collab_access(&state.pg_pool, &view_id).await?
+    && select_collab_owner(&state.pg_pool, &workspace_id, &view_id).await? != uid
+  {
+    return Err(AppError::NotEnoughPermissions);
+  }
+  Ok(())
+}
+
 /// 添加协作成员到笔记
 ///
 /// 业务逻辑：
@@ -3855,6 +3869,7 @@ async fn create_share_link_invite_handler(
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
   tracing::info!("current user uid: {}", uid);
 
+  check_sync_document_share_owner(&state, workspace_id, view_id, uid).await?;
   // 获取视图名称和布局类型
   let folder = state.ws_server.get_folder(workspace_id).await?;
   let view_info = folder.get_view(&view_id.to_string(), uid);
@@ -4186,6 +4201,8 @@ async fn add_collab_member_handler(
     .as_ref()
     .map(|v| v.layout.is_database())
     .unwrap_or(false);
+
+  check_sync_document_share_owner(&state, workspace_id, view_id, uid).await?;
 
   // Step 1: 将被邀请者添加到文档协作成员列表
   tracing::info!("adding collab member: workspace_id={}, view_id={}, received_uid={}, permission_id={}, view_layout={}", 
