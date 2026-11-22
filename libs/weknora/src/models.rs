@@ -249,7 +249,7 @@ pub(crate) async fn execute(
   let wid = uuid(input, "workspace_id")?.to_string();
   let workspace = session.workspace(&wid)?;
   let can_manage = workspace["owner_uid"].as_i64() == Some(session.user_id);
-  if matches!(action, "model_save" | "model_delete") {
+  if matches!(action, "model_save" | "model_delete" | "model_test") {
     require(can_manage, 403)?;
   }
   let mut transaction = pool.begin().await?;
@@ -279,6 +279,17 @@ pub(crate) async fn execute(
     .iter()
     .filter(|m| visible(m, &wid, &state))
     .collect::<Vec<_>>();
+  if action == "model_test" {
+    let id = uuid(input, "id")?.to_string();
+    let model = models
+      .iter()
+      .find(|m| m["id"] == id && owned(m, &wid) && m["is_builtin"] != true)
+      .ok_or_else(|| anyhow!(crate::library::Rejected(403)))?;
+    // Release the catalog transaction before contacting the model provider.
+    transaction.commit().await?;
+    let available = test_connection(client, &login, model, Some(&id), None).await?;
+    return Ok(json!({"available": available}));
+  }
   if action == "model_delete" {
     let id = uuid(input, "id")?.to_string();
     validate_delete(all, &wid, &id, &settings)?;
@@ -425,6 +436,75 @@ pub(crate) fn validate_delete(
   Ok(())
 }
 
+fn connection_test_request(
+  model: &Value,
+  stored_id: Option<&str>,
+  api_key: Option<&str>,
+) -> Result<(&'static str, Value)> {
+  let path = match text(model, "type")? {
+    "KnowledgeQA" | "VLLM" => "initialization/remote/check",
+    "Embedding" => "initialization/embedding/test",
+    "Rerank" => "initialization/rerank/check",
+    "ASR" => "initialization/asr/check",
+    _ => return Err(anyhow!(crate::library::Rejected(400))),
+  };
+  let params = &model["parameters"];
+  let mut body = json!({
+    "modelName": text(model, "name")?,
+    "baseUrl": params["base_url"].as_str().unwrap_or_default().trim_end_matches('/').trim_end_matches("/chat/completions"),
+    "provider": params["provider"].as_str().unwrap_or("generic"),
+    "source": model["source"].as_str().unwrap_or("remote"),
+  });
+  if let Some(id) = stored_id {
+    // Let WeKnora resolve its own stored secrets and provider options by ID.
+    body["modelId"] = json!(id);
+  }
+  if let Some(key) = api_key {
+    // Shared chats use the generic OpenAI-compatible adapter at runtime.
+    body["provider"] = json!("generic");
+    body["apiKey"] = json!(key);
+  }
+  for (key, name) in [("interface_type", "interfaceType"), ("spec", "spec")] {
+    if let Some(value) = params.get(key) {
+      body[name] = value.clone();
+    }
+  }
+  if let Some(embedding) = params["embedding_parameters"].as_object() {
+    for (key, name) in [
+      ("dimension", "dimension"),
+      ("supports_dimension_override", "supportsDimensionOverride"),
+    ] {
+      if let Some(value) = embedding.get(key) {
+        body[name] = value.clone();
+      }
+    }
+  }
+  Ok((path, body))
+}
+
+async fn test_connection(
+  client: &Client,
+  login: &Value,
+  model: &Value,
+  stored_id: Option<&str>,
+  api_key: Option<&str>,
+) -> Result<bool> {
+  let (path, body) = connection_test_request(model, stored_id, api_key)?;
+  let result = sync::admin(client, login, path, Method::POST, Some(&body)).await?;
+  result["data"]["available"]
+    .as_bool()
+    .ok_or_else(|| anyhow!("invalid model test response"))
+}
+
+pub(crate) async fn test_shared_chat(
+  client: &Client,
+  model: &Value,
+  api_key: &str,
+) -> Result<bool> {
+  let login = sync::admin_login(client).await?;
+  test_connection(client, &login, model, None, Some(api_key)).await
+}
+
 pub(crate) async fn save_model(
   client: &Client,
   login: &Value,
@@ -534,6 +614,22 @@ mod tests {
   use super::*;
   fn model(kind: &str) -> Value {
     json!({"id":"model","name":"example","type":kind,"source":"remote","description":marker("workspace"),"parameters":{"base_url":"https://api.example/v1","api_key":"private-key","provider":"generic"}})
+  }
+  #[test]
+  fn tests_saved_models_with_their_capability_and_server_side_credentials() {
+    let mut embedding = model("Embedding");
+    embedding["parameters"]["embedding_parameters"] =
+      json!({"dimension":1024,"supports_dimension_override":true});
+    let (path, body) = connection_test_request(&embedding, Some("saved-id"), None).unwrap();
+    assert_eq!(path, "initialization/embedding/test");
+    assert_eq!(body["modelId"], "saved-id");
+    assert_eq!(body["dimension"], 1024);
+    assert!(body.get("apiKey").is_none());
+    let (path, body) =
+      connection_test_request(&model("KnowledgeQA"), None, Some("saved-key")).unwrap();
+    assert_eq!(path, "initialization/remote/check");
+    assert_eq!(body["apiKey"], "saved-key");
+    assert!(body.get("modelId").is_none());
   }
   #[test]
   fn model_categories_validate_their_own_fields_and_keep_secrets_out_of_responses() {

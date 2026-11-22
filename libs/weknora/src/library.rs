@@ -25,6 +25,7 @@ pub const ACTIONS: &[&str] = &[
   "models",
   "model_providers",
   "model_save",
+  "model_test",
   "model_delete",
   "model_settings",
   "model_bind",
@@ -196,7 +197,13 @@ pub async fn execute(
   require(payload.is_object(), 400)?;
   if matches!(
     action,
-    "models" | "model_providers" | "model_save" | "model_delete" | "model_settings" | "model_bind"
+    "models"
+      | "model_providers"
+      | "model_save"
+      | "model_test"
+      | "model_delete"
+      | "model_settings"
+      | "model_bind"
   ) {
     return crate::models::execute(pool, client, session, action, payload).await;
   }

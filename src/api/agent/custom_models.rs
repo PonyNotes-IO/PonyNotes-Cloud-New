@@ -19,6 +19,7 @@ pub fn scope() -> Scope {
     .app_data(web::JsonConfig::default().limit(32768))
     .route("", web::get().to(list))
     .route("", web::post().to(create))
+    .route("/{id}/test", web::post().to(test_connection))
     .route("/{id}", web::put().to(update))
     .route("/{id}", web::delete().to(delete))
 }
@@ -289,6 +290,32 @@ async fn delete(
     return Err(error::ErrorNotFound("模型不存在"));
   }
   Ok(HttpResponse::NoContent().finish())
+}
+
+async fn test_connection(
+  auth: Authorization,
+  path: web::Path<(Uuid, Uuid)>,
+  state: web::Data<AppState>,
+  client: web::Data<ponynotes_weknora::Client>,
+) -> actix_web::Result<HttpResponse> {
+  if !ponynotes_weknora::enabled() {
+    return Err(error::ErrorServiceUnavailable("模型测试服务未启用"));
+  }
+  let (workspace, id) = path.into_inner();
+  let uid = super::conversations::workspace_user(&auth, workspace, &state).await?;
+  let (model, key) = resolve(&state, uid, workspace, id).await?;
+  let available = client.test_shared_chat(&model, &key).await.map_err(|err| {
+    if ponynotes_weknora::library::status(&err) == 400 {
+      error::ErrorBadRequest("模型配置无法测试，请检查接口地址")
+    } else {
+      error::ErrorServiceUnavailable("模型测试服务暂不可用，请稍后重试")
+    }
+  })?;
+  Ok(
+    HttpResponse::Ok()
+      .insert_header(("Cache-Control", "no-store"))
+      .json(json!({"available": available})),
+  )
 }
 
 pub(super) async fn resolve(

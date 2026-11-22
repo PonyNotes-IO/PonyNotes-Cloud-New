@@ -96,6 +96,10 @@ impl Client {
     Ok(response)
   }
 
+  pub async fn test_shared_chat(&self, model: &Value, api_key: &str) -> Result<bool> {
+    models::test_shared_chat(self, model, api_key).await
+  }
+
   pub fn model_base_url(&self) -> String {
     std::env::var("PONYNOTES_WEKNORA_MODEL_BASE_URL")
       .unwrap_or_else(|_| format!("{}/api/ai/agent", self.cloud))
