@@ -389,7 +389,6 @@ pub async fn init_state(config: &Config) -> Result<AppState, Error> {
     redis_conn_manager.clone(),
   );
   let manager = CollabManager::new(
-    pg_pool.clone(),
     thread_pool.clone(),
     collab_access_control.clone(),
     workspace_access_control.clone(),

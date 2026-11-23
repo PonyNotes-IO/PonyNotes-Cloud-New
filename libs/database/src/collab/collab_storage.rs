@@ -3,7 +3,7 @@ use async_trait::async_trait;
 
 use database_entity::dto::{CollabParams, QueryCollab, QueryCollabResult};
 
-use appflowy_proto::TimestampedEncodedCollab;
+use appflowy_proto::{Rid, TimestampedEncodedCollab};
 use collab_entity::CollabType;
 use serde::{Deserialize, Serialize};
 use sqlx::Transaction;
@@ -37,6 +37,14 @@ pub trait CollabStore: Send + Sync + 'static {
     workspace_id: Uuid,
     uid: &i64,
     params: CollabParams,
+  ) -> AppResult<()>;
+
+  async fn record_document_history_edits(
+    &self,
+    workspace_id: Uuid,
+    object_id: Uuid,
+    first_edit: Rid,
+    last_edit: Rid,
   ) -> AppResult<()>;
 
   async fn upsert_collab_background(

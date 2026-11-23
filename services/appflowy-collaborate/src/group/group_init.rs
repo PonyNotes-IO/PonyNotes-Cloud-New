@@ -1154,11 +1154,12 @@ impl CollabPersister {
   async fn save_attempt(&self, snapshot: CollabSnapshot) -> Result<(), RealtimeError> {
     // try to acquire snapshot lease - it's possible that multiple web services will try to
     // perform snapshot at the same time, so we'll use lease to let only one of them atm.
-    let last_message_id = snapshot.applied_messages.last().cloned().ok_or_else(|| {
-      RealtimeError::CreateSnapshotFailed(
-        "only save snapshot after some updates were applied".into(),
-      )
-    })?;
+    let (first_message_id, last_message_id) = history_edit_window(&snapshot.applied_messages)
+      .ok_or_else(|| {
+        RealtimeError::CreateSnapshotFailed(
+          "only save snapshot after some updates were applied".into(),
+        )
+      })?;
     if let Some(mut lease) = self
       .collab_redis_stream
       .lease(&self.workspace_id.to_string(), &self.object_id.to_string())
@@ -1170,8 +1171,24 @@ impl CollabPersister {
       let doc_state_light = tx.encode_diff_v1(&StateVector::default());
       let state_vector = tx.state_vector();
       let light_len = doc_state_light.len();
+      if self.collab_type == CollabType::Document {
+        self
+          .storage
+          .record_document_history_edits(
+            self.workspace_id,
+            self.object_id,
+            first_message_id.into(),
+            last_message_id.into(),
+          )
+          .await
+          .map_err(|err| RealtimeError::Internal(err.into()))?;
+      }
       self
-        .write_collab(doc_state_light, state_vector, snapshot.rid.timestamp)
+        .write_collab(
+          doc_state_light,
+          state_vector,
+          snapshot.rid.timestamp.max(last_message_id.timestamp_ms),
+        )
         .await?;
 
       match self.collab_type {
@@ -1285,4 +1302,25 @@ pub struct CollabSnapshot {
   pub collab: Collab,
   pub rid: Rid,
   pub applied_messages: Vec<MessageId>,
+}
+
+fn history_edit_window(messages: &[MessageId]) -> Option<(MessageId, MessageId)> {
+  Some((*messages.first()?, *messages.last()?))
+}
+
+#[cfg(test)]
+mod history_tests {
+  use super::*;
+
+  #[test]
+  fn uses_first_and_last_real_updates_for_history_timing() {
+    let first = MessageId::new(120, 0);
+    let last = MessageId::new(360, 2);
+    assert_eq!(history_edit_window(&[]), None);
+    assert_eq!(history_edit_window(&[first]), Some((first, first)));
+    assert_eq!(
+      history_edit_window(&[first, MessageId::new(360, 1), last]),
+      Some((first, last)),
+    );
+  }
 }

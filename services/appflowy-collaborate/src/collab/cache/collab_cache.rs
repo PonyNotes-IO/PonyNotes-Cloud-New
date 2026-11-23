@@ -33,6 +33,7 @@ use yrs::updates::encoder::Encode;
 use yrs::{ReadTxn, StateVector, Update};
 
 pub struct CollabCache {
+  pg_pool: PgPool,
   thread_pool: Arc<ThreadPoolNoAbort>,
   disk_cache: CollabDiskCache,
   mem_cache: CollabMemCache,
@@ -71,6 +72,7 @@ impl CollabCache {
       .parse::<usize>()
       .unwrap_or(DECODE_SPAWN_THRESHOLD);
     Arc::new(Self {
+      pg_pool,
       thread_pool,
       disk_cache,
       mem_cache,
@@ -384,6 +386,63 @@ impl CollabCache {
       .mem_cache
       .get_workspace_updates(workspace_id, object_id, from, to)
       .await
+  }
+
+  /// Record accepted edits before either WebSocket protocol removes their Redis entries.
+  pub async fn record_document_history_edits(
+    &self,
+    workspace_id: Uuid,
+    windows: &[(Uuid, Rid, Rid)],
+  ) -> Result<(), AppError> {
+    if windows.is_empty() {
+      return Ok(());
+    }
+    let mut ids = Vec::with_capacity(windows.len());
+    let mut first_times = Vec::with_capacity(windows.len());
+    let mut last_times = Vec::with_capacity(windows.len());
+    let mut last_sequences = Vec::with_capacity(windows.len());
+    for &(oid, first, last) in windows {
+      ids.push(oid);
+      first_times.push(first.timestamp as i64);
+      last_times.push(last.timestamp as i64);
+      last_sequences.push(i32::from(last.seq_no));
+    }
+    sqlx::query(
+      "INSERT INTO af_document_version_pending AS pending
+         (workspace_id, oid, first_edit_ms, last_edit_ms, last_edit_seq)
+       SELECT $1, edit.oid, edit.first_ms, edit.last_ms, edit.last_seq
+       FROM UNNEST($2::uuid[], $3::bigint[], $4::bigint[], $5::integer[])
+         AS edit(oid, first_ms, last_ms, last_seq)
+       WHERE EXISTS (
+         SELECT 1 FROM af_workspace w
+         JOIN LATERAL (
+           SELECT p.version_history_days FROM af_user_subscriptions s
+           JOIN af_subscription_plans p ON p.id=s.plan_id
+           WHERE s.uid=w.owner_uid AND s.status='active'
+             AND s.start_date<=NOW() AND s.end_date>NOW()
+           ORDER BY s.end_date DESC, s.id DESC LIMIT 1
+         ) plan ON plan.version_history_days > 0
+         WHERE w.workspace_id=$1 AND w.deleted_at IS NULL
+       )
+       ORDER BY edit.oid
+       ON CONFLICT (workspace_id, oid) DO UPDATE
+         SET first_edit_ms=LEAST(pending.first_edit_ms,
+               GREATEST(pending.covered_edit_ms, EXCLUDED.first_edit_ms)),
+             last_edit_ms=EXCLUDED.last_edit_ms,
+             last_edit_seq=EXCLUDED.last_edit_seq
+         WHERE (EXCLUDED.last_edit_ms, EXCLUDED.last_edit_seq) >
+           (pending.covered_edit_ms, pending.covered_edit_seq)
+           AND (pending.last_edit_ms IS NULL OR (EXCLUDED.last_edit_ms, EXCLUDED.last_edit_seq) >
+                (pending.last_edit_ms, pending.last_edit_seq))",
+    )
+    .bind(workspace_id)
+    .bind(&ids)
+    .bind(&first_times)
+    .bind(&last_times)
+    .bind(&last_sequences)
+    .execute(&self.pg_pool)
+    .await?;
+    Ok(())
   }
 
   pub async fn get_document_history_state(

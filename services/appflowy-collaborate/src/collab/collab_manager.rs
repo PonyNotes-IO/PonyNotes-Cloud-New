@@ -28,7 +28,6 @@ use rayon::prelude::*;
 use redis::aio::ConnectionManager;
 use redis::streams::{StreamRangeReply, StreamTrimOptions, StreamTrimmingMode};
 use redis::AsyncCommands;
-use sqlx::PgPool;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -43,7 +42,6 @@ use yrs::updates::encoder::Encode;
 use yrs::{ReadTxn, StateVector, Update};
 
 pub struct CollabManager {
-  pg_pool: PgPool,
   collab_cache: Arc<CollabCache>,
   access_control: Arc<dyn CollabAccessControl>,
   workspace_access_control: Arc<dyn WorkspaceAccessControl>,
@@ -57,7 +55,6 @@ pub struct CollabManager {
 impl CollabManager {
   #[allow(clippy::too_many_arguments)]
   pub fn new(
-    pg_pool: PgPool,
     thread_pool: Arc<ThreadPoolNoAbort>,
     access_control: Arc<dyn CollabAccessControl>,
     workspace_access_control: Arc<dyn WorkspaceAccessControl>,
@@ -68,7 +65,6 @@ impl CollabManager {
     indexer_scheduler: Arc<IndexerScheduler>,
   ) -> Arc<Self> {
     Arc::new(Self {
-      pg_pool,
       access_control,
       workspace_access_control,
       collab_cache,
@@ -421,63 +417,22 @@ impl CollabManager {
             .map(|update| update.last_message_id);
           let first = timestamps.next()?;
           let last = timestamps.next_back().unwrap_or(first);
-          Some((task.object_id, (first.timestamp as i64, last)))
+          Some((task.object_id, (first, last)))
         })
         .collect();
       let processing_results = self.process_snapshot_tasks(snapshot_tasks)?;
-      let mut ids = Vec::new();
-      let mut first_times = Vec::new();
-      let mut last_times = Vec::new();
-      let mut last_sequences = Vec::new();
-      for snapshot in &processing_results {
-        if let Some(&(first, last)) = history_edits
-          .get(&snapshot.object_id)
-          .filter(|_| snapshot.content_updated)
-        {
-          ids.push(snapshot.object_id);
-          first_times.push(first);
-          last_times.push(last.timestamp as i64);
-          last_sequences.push(i32::from(last.seq_no));
-        }
-      }
-      if !ids.is_empty() {
-        // Record this window before trimming its Redis updates.
-        sqlx::query(
-          "INSERT INTO af_document_version_pending AS pending
-             (workspace_id, oid, first_edit_ms, last_edit_ms, last_edit_seq)
-           SELECT $1, edit.oid, edit.first_ms, edit.last_ms, edit.last_seq
-           FROM UNNEST($2::uuid[], $3::bigint[], $4::bigint[], $5::integer[])
-             AS edit(oid, first_ms, last_ms, last_seq)
-           WHERE EXISTS (
-             SELECT 1 FROM af_workspace w
-             JOIN LATERAL (
-               SELECT p.version_history_days FROM af_user_subscriptions s
-               JOIN af_subscription_plans p ON p.id=s.plan_id
-               WHERE s.uid=w.owner_uid AND s.status='active'
-                 AND s.start_date<=NOW() AND s.end_date>NOW()
-               ORDER BY s.end_date DESC, s.id DESC LIMIT 1
-             ) plan ON plan.version_history_days > 0
-             WHERE w.workspace_id=$1 AND w.deleted_at IS NULL
-           )
-           ORDER BY edit.oid
-           ON CONFLICT (workspace_id, oid) DO UPDATE
-             SET first_edit_ms=LEAST(pending.first_edit_ms,
-                   GREATEST(pending.covered_edit_ms, EXCLUDED.first_edit_ms)),
-                 last_edit_ms=EXCLUDED.last_edit_ms,
-                 last_edit_seq=EXCLUDED.last_edit_seq
-             WHERE (EXCLUDED.last_edit_ms, EXCLUDED.last_edit_seq) >
-               (pending.covered_edit_ms, pending.covered_edit_seq)
-               AND (pending.last_edit_ms IS NULL OR (EXCLUDED.last_edit_ms, EXCLUDED.last_edit_seq) >
-                    (pending.last_edit_ms, pending.last_edit_seq))",
-        )
-        .bind(workspace_id)
-        .bind(&ids)
-        .bind(&first_times)
-        .bind(&last_times)
-        .bind(&last_sequences)
-        .execute(&self.pg_pool)
+      let history_windows: Vec<_> = processing_results
+        .iter()
+        .filter(|snapshot| snapshot.content_updated)
+        .filter_map(|snapshot| {
+          let &(first, last) = history_edits.get(&snapshot.object_id)?;
+          Some((snapshot.object_id, first, last))
+        })
+        .collect();
+      self
+        .collab_cache
+        .record_document_history_edits(workspace_id, &history_windows)
         .await?;
-      }
 
       self
         .encode_and_save_snapshots(workspace_id, processing_results)

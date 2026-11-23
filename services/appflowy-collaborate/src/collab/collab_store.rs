@@ -168,6 +168,19 @@ impl CollabStoreImpl {
 
 #[async_trait]
 impl CollabStore for CollabStoreImpl {
+  async fn record_document_history_edits(
+    &self,
+    workspace_id: Uuid,
+    object_id: Uuid,
+    first_edit: Rid,
+    last_edit: Rid,
+  ) -> AppResult<()> {
+    self
+      .cache
+      .record_document_history_edits(workspace_id, &[(object_id, first_edit, last_edit)])
+      .await
+  }
+
   async fn upsert_collab(
     &self,
     workspace_id: Uuid,
