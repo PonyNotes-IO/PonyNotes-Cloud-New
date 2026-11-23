@@ -17,6 +17,11 @@ use shared_entity::response::{AppResponse, JsonAppResponse};
 use std::collections::HashSet;
 use uuid::Uuid;
 
+mod automatic;
+mod index;
+pub use automatic::run_automatic_versions;
+pub use index::index;
+
 pub const MAX_VERSION_BYTES: usize = 5 * 1024 * 1024;
 const PAGE_SIZE: i64 = 50;
 
@@ -121,25 +126,25 @@ fn version_content(data: &DocumentData) -> Result<serde_json::Value, AppError> {
 
 async fn find_existing_version(
   tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-  workspace: Uuid,
-  oid: Uuid,
-  days: i32,
+  target: &VersionTarget,
   content: &serde_json::Value,
-) -> Result<Option<(Uuid, i64)>, AppError> {
-  let mut rows = sqlx::query_as::<_, (Uuid, i64, Vec<u8>)>(
-    "SELECT snapshot_id, (EXTRACT(EPOCH FROM created_at)*1000)::BIGINT, document
+  latest_only: bool,
+) -> Result<Option<(Uuid, i64, String)>, AppError> {
+  let mut rows = sqlx::query_as::<_, (Uuid, i64, Vec<u8>, String)>(
+    "SELECT snapshot_id, (EXTRACT(EPOCH FROM created_at)*1000)::BIGINT, document, COALESCE(source, '')
      FROM af_document_version WHERE workspace_id=$1 AND oid=$2
        AND expires_at>clock_timestamp() AND created_at>=clock_timestamp()-make_interval(days=>$3)
-     ORDER BY created_at DESC, snapshot_id DESC",
+     ORDER BY created_at DESC, snapshot_id DESC LIMIT $4",
   )
-  .bind(workspace)
-  .bind(oid)
-  .bind(days)
+  .bind(target.workspace)
+  .bind(target.oid)
+  .bind(target.days)
+  .bind(latest_only.then_some(1_i64))
   .fetch(&mut **tx);
-  while let Some((id, created_at, bytes)) = rows.try_next().await? {
+  while let Some((id, created_at, bytes, source)) = rows.try_next().await? {
     let stored: DocumentData = serde_json::from_slice(&bytes)?;
     if version_content(&stored)? == *content {
-      return Ok(Some((id, created_at)));
+      return Ok(Some((id, created_at, source)));
     }
   }
   Ok(None)
@@ -151,16 +156,34 @@ pub struct HistoryQuery {
   offset: u32,
 }
 
-// Match the document's workspace before consulting object-scoped permission caches.
-async fn authorize(
-  state: &AppState,
-  user: &Uuid,
+#[derive(Deserialize)]
+pub struct SaveQuery {
+  #[serde(default)]
+  restore_backup: bool,
+}
+
+struct VersionTarget {
   workspace: Uuid,
   oid: Uuid,
-) -> Result<(i64, i64, i32), AppError> {
-  let uid = state.user_cache.get_user_uid(user).await?;
-  let owner: Option<i64> = sqlx::query_scalar(
-    "SELECT w.owner_uid FROM af_workspace w JOIN af_collab c ON c.workspace_id=w.workspace_id
+  owner: i64,
+  days: i32,
+}
+
+async fn version_target(
+  state: &AppState,
+  workspace: Uuid,
+  oid: Uuid,
+) -> Result<Option<VersionTarget>, AppError> {
+  let row = sqlx::query_as::<_, (i64, i32)>(
+    "SELECT w.owner_uid, COALESCE(plan.version_history_days, 0) FROM af_workspace w
+     JOIN af_collab c ON c.workspace_id=w.workspace_id
+     LEFT JOIN LATERAL (
+       SELECT p.version_history_days FROM af_user_subscriptions s
+       JOIN af_subscription_plans p ON p.id=s.plan_id
+       WHERE s.uid=w.owner_uid AND s.status='active'
+         AND s.start_date<=NOW() AND s.end_date>NOW()
+       ORDER BY s.end_date DESC, s.id DESC LIMIT 1
+     ) plan ON TRUE
      WHERE w.workspace_id=$1 AND c.oid=$2 AND c.partition_key=0
        AND w.deleted_at IS NULL AND c.deleted_at IS NULL",
   )
@@ -168,27 +191,35 @@ async fn authorize(
   .bind(oid)
   .fetch_optional(&state.pg_pool)
   .await?;
-  let owner = owner.ok_or(AppError::NotEnoughPermissions)?;
+  Ok(row.map(|(owner, days)| VersionTarget {
+    workspace,
+    oid,
+    owner,
+    days,
+  }))
+}
+
+// Match the document's workspace before consulting object-scoped permission caches.
+async fn authorize(
+  state: &AppState,
+  user: &Uuid,
+  workspace: Uuid,
+  oid: Uuid,
+) -> Result<(i64, VersionTarget), AppError> {
+  let uid = state.user_cache.get_user_uid(user).await?;
+  let target = version_target(state, workspace, oid)
+    .await?
+    .ok_or(AppError::NotEnoughPermissions)?;
   state
     .collab_access_control
     .enforce_action(&workspace, &uid, &oid, Action::Write)
     .await?;
-  let days: Option<i32> = sqlx::query_scalar(
-    "SELECT p.version_history_days FROM af_user_subscriptions s
-     JOIN af_subscription_plans p ON p.id=s.plan_id
-     WHERE s.uid=$1 AND s.status='active' AND s.start_date<=NOW() AND s.end_date>NOW()
-     ORDER BY s.end_date DESC, s.id DESC LIMIT 1",
-  )
-  .bind(owner)
-  .fetch_optional(&state.pg_pool)
-  .await?;
-  let days = days.unwrap_or(0);
-  if days <= 0 {
+  if target.days <= 0 {
     return Err(AppError::PlanLimitExceeded(
       "version_history_unavailable".into(),
     ));
   }
-  Ok((uid, owner, days))
+  Ok((uid, target))
 }
 
 fn permission_error(error: AppError) -> actix_web::Error {
@@ -218,11 +249,13 @@ pub async fn list(
   query: web::Query<HistoryQuery>,
 ) -> actix_web::Result<JsonAppResponse<DocumentVersionList>> {
   let (workspace, oid) = path.into_inner();
-  let (_, _, days) = authorize(&state, &user, workspace, oid)
+  let (_, target) = authorize(&state, &user, workspace, oid)
     .await
     .map_err(permission_error)?;
-  let rows: Vec<(Uuid, i64)> = sqlx::query_as(
-    "SELECT snapshot_id, (EXTRACT(EPOCH FROM created_at)*1000)::BIGINT FROM af_document_version
+  let days = target.days;
+  let rows: Vec<(Uuid, i64, String)> = sqlx::query_as(
+    "SELECT snapshot_id, (EXTRACT(EPOCH FROM created_at)*1000)::BIGINT, COALESCE(source, '')
+     FROM af_document_version
      WHERE workspace_id=$1 AND oid=$2 AND expires_at>NOW()
        AND created_at>=NOW()-make_interval(days=>$3)
      ORDER BY created_at DESC, snapshot_id DESC LIMIT $4 OFFSET $5",
@@ -237,14 +270,25 @@ pub async fn list(
   .map_err(AppError::from)
   .map_err(permission_error)?;
   let has_more = rows.len() > PAGE_SIZE as usize;
+  let storage_limited = sqlx::query_scalar::<_, bool>(
+    "SELECT storage_limited FROM af_document_version_pending WHERE workspace_id=$1 AND oid=$2",
+  )
+  .bind(workspace)
+  .bind(oid)
+  .fetch_optional(&state.pg_pool)
+  .await
+  .map_err(AppError::from)
+  .map_err(permission_error)?
+  .unwrap_or(false);
   let items = rows
     .into_iter()
     .take(PAGE_SIZE as usize)
-    .map(|(id, created_at)| DocumentVersionMeta {
+    .map(|(id, created_at, source)| DocumentVersionMeta {
       snapshot_id: id.to_string(),
       object_id: oid.to_string(),
       created_at,
       reused: false,
+      source,
     })
     .collect();
   Ok(
@@ -253,6 +297,7 @@ pub async fn list(
         items,
         has_more,
         retention_days: days,
+        storage_limited,
       })
       .into(),
   )
@@ -264,7 +309,7 @@ pub async fn get(
   path: web::Path<(Uuid, Uuid, Uuid)>,
 ) -> actix_web::Result<JsonAppResponse<DocumentVersionData>> {
   let (workspace, oid, id) = path.into_inner();
-  let (_, _, days) = authorize(&state, &user, workspace, oid)
+  let (_, target) = authorize(&state, &user, workspace, oid)
     .await
     .map_err(permission_error)?;
   let bytes: Option<Vec<u8>> = sqlx::query_scalar(
@@ -274,7 +319,7 @@ pub async fn get(
   .bind(workspace)
   .bind(oid)
   .bind(id)
-  .bind(days)
+  .bind(target.days)
   .fetch_optional(&state.pg_pool)
   .await
   .map_err(AppError::from)
@@ -298,24 +343,116 @@ pub async fn save(
   user: UserUuid,
   state: web::Data<AppState>,
   path: web::Path<(Uuid, Uuid)>,
+  query: web::Query<SaveQuery>,
   body: web::Json<DocumentVersionData>,
 ) -> actix_web::Result<JsonAppResponse<DocumentVersionMeta>> {
   let (workspace, oid) = path.into_inner();
-  let (uid, owner, days) = authorize(&state, &user, workspace, oid)
+  let (uid, target) = authorize(&state, &user, workspace, oid)
     .await
     .map_err(permission_error)?;
   let document: DocumentData = serde_json::from_value(body.into_inner().document)
     .map_err(|e| permission_error(AppError::InvalidRequest(e.to_string())))?;
-  validate_document(&document).map_err(permission_error)?;
-  let bytes = serde_json::to_vec(&document)
+  let source = if query.restore_backup {
+    "restore_backup"
+  } else {
+    "manual"
+  };
+  let coverage = if !query.restore_backup {
+    let local = version_content(&document).map_err(permission_error)?;
+    match state
+      .collab_cache
+      .get_document_history_state(&workspace, oid)
+      .await
+    {
+      Ok((rid, encoded)) => automatic::decode_document(oid, encoded)
+        .await
+        .ok()
+        .and_then(|remote| version_content(&remote).ok())
+        .filter(|remote| *remote == local)
+        .map(|_| rid),
+      Err(_) => None,
+    }
+  } else {
+    None
+  };
+  let mut tx = state
+    .pg_pool
+    .begin()
+    .await
     .map_err(AppError::from)
     .map_err(permission_error)?;
-  if bytes.len() > MAX_VERSION_BYTES {
-    return Err(permission_error(AppError::InvalidRequest(
-      "version exceeds 5 MiB".into(),
-    )));
+  if coverage.is_some() {
+    // Match the worker's lock order before taking the owner quota lock.
+    sqlx::query(
+      "INSERT INTO af_document_version_pending (workspace_id, oid)
+       VALUES ($1, $2) ON CONFLICT (workspace_id, oid) DO NOTHING",
+    )
+    .bind(workspace)
+    .bind(oid)
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::from)
+    .map_err(permission_error)?;
+    sqlx::query(
+      "SELECT 1 FROM af_document_version_pending WHERE workspace_id=$1 AND oid=$2 FOR UPDATE",
+    )
+    .bind(workspace)
+    .bind(oid)
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::from)
+    .map_err(permission_error)?;
   }
-  let content = version_content(&document).map_err(permission_error)?;
+  let version = write_version(&state, &mut tx, &target, Some(uid), document, source)
+    .await
+    .map_err(permission_error)?;
+  if let Some(rid) = coverage {
+    let latest_id = sqlx::query_scalar::<_, Uuid>(
+      "SELECT snapshot_id FROM af_document_version
+       WHERE workspace_id=$1 AND oid=$2 AND expires_at>NOW()
+         AND created_at>=NOW()-make_interval(days=>$3)
+       ORDER BY created_at DESC,snapshot_id DESC LIMIT 1",
+    )
+    .bind(workspace)
+    .bind(oid)
+    .bind(target.days)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(AppError::from)
+    .map_err(permission_error)?;
+    if latest_id.is_some_and(|id| id.to_string() == version.snapshot_id) {
+      automatic::mark_covered(&mut tx, workspace, oid, rid)
+        .await
+        .map_err(permission_error)?;
+    }
+  }
+  tx.commit()
+    .await
+    .map_err(AppError::from)
+    .map_err(permission_error)?;
+  Ok(AppResponse::Ok().with_data(version).into())
+}
+
+async fn write_version(
+  state: &AppState,
+  tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+  target: &VersionTarget,
+  uid: Option<i64>,
+  document: DocumentData,
+  source: &str,
+) -> Result<DocumentVersionMeta, AppError> {
+  let VersionTarget {
+    workspace,
+    oid,
+    owner,
+    days,
+  } = *target;
+  validate_document(&document)?;
+  let bytes = serde_json::to_vec(&document).map_err(AppError::from)?;
+  if bytes.len() > MAX_VERSION_BYTES {
+    return Err(AppError::InvalidRequest("version exceeds 5 MiB".into()));
+  }
+  let content = version_content(&document)?;
   // Validate in an isolated document; history requests never open or mutate the live collab.
   tokio::task::spawn_blocking(move || {
     let collab = Collab::new_with_options(
@@ -328,55 +465,32 @@ pub async fn save(
     Ok::<_, AppError>(())
   })
   .await
-  .map_err(|e| permission_error(AppError::Internal(e.into())))?
-  .map_err(permission_error)?;
-  let resource = get_user_resource_limit_status(&state.pg_pool, owner)
-    .await
-    .map_err(permission_error)?;
+  .map_err(|e| AppError::Internal(e.into()))??;
+  let resource = get_user_resource_limit_status(&state.pg_pool, owner).await?;
   let limit = (resource.storage_limit_mb * 1024.0 * 1024.0) as i64;
-  let mut tx = state
-    .pg_pool
-    .begin()
-    .await
-    .map_err(AppError::from)
-    .map_err(permission_error)?;
-  // Serialize manual saves across all workspaces billed to this owner.
+  // Serialize version writes across all workspaces billed to this owner.
   sqlx::query("SELECT pg_advisory_xact_lock($1)")
     .bind(owner)
-    .execute(&mut *tx)
-    .await
-    .map_err(AppError::from)
-    .map_err(permission_error)?;
-  if let Some((id, created_at)) = find_existing_version(&mut tx, workspace, oid, days, &content)
-    .await
-    .map_err(permission_error)?
+    .execute(&mut **tx)
+    .await?;
+  if let Some((id, created_at, existing_source)) =
+    find_existing_version(tx, target, &content, source == "automatic").await?
   {
-    tx.commit()
-      .await
-      .map_err(AppError::from)
-      .map_err(permission_error)?;
-    return Ok(
-      AppResponse::Ok()
-        .with_data(DocumentVersionMeta {
-          snapshot_id: id.to_string(),
-          object_id: oid.to_string(),
-          created_at,
-          reused: true,
-        })
-        .into(),
-    );
+    return Ok(DocumentVersionMeta {
+      snapshot_id: id.to_string(),
+      object_id: oid.to_string(),
+      created_at,
+      reused: true,
+      source: existing_source,
+    });
   }
-  let used = database::subscription::get_user_total_usage_bytes(&mut *tx, owner)
-    .await
-    .map_err(permission_error)?;
+  let used = database::subscription::get_user_total_usage_bytes(&mut **tx, owner).await?;
   if used.saturating_add(bytes.len() as i64) > limit {
-    return Err(permission_error(AppError::PlanLimitExceeded(
-      "cloud_storage_full".into(),
-    )));
+    return Err(AppError::PlanLimitExceeded("cloud_storage_full".into()));
   }
   let (id, created_at): (Uuid, i64) = sqlx::query_as(
-    "INSERT INTO af_document_version(workspace_id,oid,created_by,document,expires_at)
-     VALUES($1,$2,$3,$4,NOW()+make_interval(days=>$5))
+    "INSERT INTO af_document_version(workspace_id,oid,created_by,document,expires_at,source)
+     VALUES($1,$2,$3,$4,NOW()+make_interval(days=>$5),$6)
      RETURNING snapshot_id,(EXTRACT(EPOCH FROM created_at)*1000)::BIGINT",
   )
   .bind(workspace)
@@ -384,24 +498,16 @@ pub async fn save(
   .bind(uid)
   .bind(bytes)
   .bind(days)
-  .fetch_one(&mut *tx)
-  .await
-  .map_err(AppError::from)
-  .map_err(permission_error)?;
-  tx.commit()
-    .await
-    .map_err(AppError::from)
-    .map_err(permission_error)?;
-  Ok(
-    AppResponse::Ok()
-      .with_data(DocumentVersionMeta {
-        snapshot_id: id.to_string(),
-        object_id: oid.to_string(),
-        created_at,
-        reused: false,
-      })
-      .into(),
-  )
+  .bind(source)
+  .fetch_one(&mut **tx)
+  .await?;
+  Ok(DocumentVersionMeta {
+    snapshot_id: id.to_string(),
+    object_id: oid.to_string(),
+    created_at,
+    reused: false,
+    source: source.to_owned(),
+  })
 }
 
 #[cfg(test)]

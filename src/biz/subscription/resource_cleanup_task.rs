@@ -29,6 +29,10 @@ pub async fn start_resource_cleanup_task(pg_pool: PgPool) {
 pub async fn run_resource_cleanup_task(pg_pool: &PgPool) -> Result<(), AppError> {
     sqlx::query("DELETE FROM af_document_version WHERE expires_at <= NOW()")
         .execute(pg_pool).await?;
+    sqlx::query(
+        "DELETE FROM af_document_version_pending WHERE first_edit_ms IS NULL
+         AND covered_edit_ms < (EXTRACT(EPOCH FROM NOW()-INTERVAL '7 days')*1000)::bigint",
+    ).execute(pg_pool).await?;
     info!("[资源清理] 开始执行资源清理任务...");
 
     let users_needing_cleanup = database::subscription::get_users_needing_cleanup(pg_pool).await?;

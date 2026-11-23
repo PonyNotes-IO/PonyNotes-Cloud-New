@@ -389,6 +389,7 @@ pub async fn init_state(config: &Config) -> Result<AppState, Error> {
     redis_conn_manager.clone(),
   );
   let manager = CollabManager::new(
+    pg_pool.clone(),
     thread_pool.clone(),
     collab_access_control.clone(),
     workspace_access_control.clone(),
@@ -398,7 +399,16 @@ pub async fn init_state(config: &Config) -> Result<AppState, Error> {
     awareness_gossip.clone(),
     indexer_scheduler.clone(),
   );
-  let ws_server = WsServer::new(manager, pg_pool.clone()).start();
+  let ws_server = WsServer::new(manager.clone(), pg_pool.clone()).start();
+  tokio::spawn(async move {
+    for _ in 0..3 {
+      match manager.recover_pending_workspace_updates().await {
+        Ok(()) => return,
+        Err(err) => tracing::warn!(%err, "could not recover pending workspace updates"),
+      }
+      tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+    }
+  });
 
   // Initialize ChatClient for third-party AI providers
   let chat_client = Arc::new(
@@ -483,7 +493,7 @@ pub async fn init_state(config: &Config) -> Result<AppState, Error> {
   };
 
   info!("Application state initialized");
-  Ok(AppState {
+  let state = AppState {
     sub2api: crate::api::agent::Sub2ApiGateway::from_env()?,
     pg_pool,
     config: Arc::new(config.clone()),
@@ -511,7 +521,9 @@ pub async fn init_state(config: &Config) -> Result<AppState, Error> {
     ws_server,
     qiniu_client,
     qiniu_bucket_storage,
-  })
+  };
+  tokio::spawn(crate::api::history::run_automatic_versions(state.clone()));
+  Ok(state)
 }
 
 fn get_admin_client(

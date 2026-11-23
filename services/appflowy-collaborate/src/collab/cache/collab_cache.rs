@@ -386,6 +386,45 @@ impl CollabCache {
       .await
   }
 
+  pub async fn get_document_history_state(
+    &self,
+    workspace: &Uuid,
+    object_id: Uuid,
+  ) -> Result<(Rid, EncodedCollab), AppError> {
+    let query = QueryCollab::new(object_id, CollabType::Document);
+    let (base, encoded) = self.get_snapshot_collab(workspace, query).await?;
+    let updates = self
+      .get_workspace_updates(workspace, Some(&object_id), Some(base), None)
+      .await?;
+    let (current, _) = self
+      .get_snapshot_collab(workspace, QueryCollab::new(object_id, CollabType::Document))
+      .await?;
+    // Compaction may have trimmed the stream between reading the base and updates.
+    if current != base {
+      return Err(AppError::Internal(anyhow!(
+        "document compaction advanced while reading history state"
+      )));
+    }
+    let Some(last) = updates.last().map(|msg| msg.last_message_id) else {
+      return Ok((base, encoded));
+    };
+    let merged = self
+      .thread_pool
+      .install(|| {
+        replaying_updates(
+          EncoderVersion::V1,
+          object_id,
+          CollabType::Document,
+          Some(encoded),
+          updates,
+          &StateVector::default(),
+        )
+      })
+      .map_err(|err| AppError::Internal(err.into()))??
+      .ok_or_else(|| AppError::Internal(anyhow!("document history state is empty")))?;
+    Ok((last.max(base), merged))
+  }
+
   /// Batch get the encoded collab **SNAPSHOT** data from the cache.
   /// This function only returns cached/stored data and does NOT apply pending updates.
   /// Use batch_get_full_collab() if you need current state with updates applied.

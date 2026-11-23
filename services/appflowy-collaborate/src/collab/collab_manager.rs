@@ -26,8 +26,9 @@ use infra::thread_pool::ThreadPoolNoAbort;
 use itertools::Itertools;
 use rayon::prelude::*;
 use redis::aio::ConnectionManager;
-use redis::streams::{StreamTrimOptions, StreamTrimmingMode};
+use redis::streams::{StreamRangeReply, StreamTrimOptions, StreamTrimmingMode};
 use redis::AsyncCommands;
+use sqlx::PgPool;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -42,6 +43,7 @@ use yrs::updates::encoder::Encode;
 use yrs::{ReadTxn, StateVector, Update};
 
 pub struct CollabManager {
+  pg_pool: PgPool,
   collab_cache: Arc<CollabCache>,
   access_control: Arc<dyn CollabAccessControl>,
   workspace_access_control: Arc<dyn WorkspaceAccessControl>,
@@ -55,6 +57,7 @@ pub struct CollabManager {
 impl CollabManager {
   #[allow(clippy::too_many_arguments)]
   pub fn new(
+    pg_pool: PgPool,
     thread_pool: Arc<ThreadPoolNoAbort>,
     access_control: Arc<dyn CollabAccessControl>,
     workspace_access_control: Arc<dyn WorkspaceAccessControl>,
@@ -65,6 +68,7 @@ impl CollabManager {
     indexer_scheduler: Arc<IndexerScheduler>,
   ) -> Arc<Self> {
     Arc::new(Self {
+      pg_pool,
       access_control,
       workspace_access_control,
       collab_cache,
@@ -82,6 +86,37 @@ impl CollabManager {
 
   pub fn awareness(&self) -> &AwarenessGossip {
     &self.awareness_broadcast
+  }
+
+  pub async fn recover_pending_workspace_updates(&self) -> anyhow::Result<()> {
+    let mut conn = self.connection_manager.clone();
+    let mut cursor = 0_u64;
+    loop {
+      let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+        .arg(cursor)
+        .arg("MATCH")
+        .arg("af:u:*")
+        .arg("COUNT")
+        .arg(100)
+        .query_async(&mut conn)
+        .await?;
+      for key in keys {
+        let Some(workspace_id) = key.strip_prefix("af:u:").and_then(|id| id.parse().ok()) else {
+          continue;
+        };
+        let last: StreamRangeReply = conn.xrevrange_count(&key, "+", "-", 1).await?;
+        if let Some(message) = last.ids.first() {
+          let rid = Rid::from_str(&message.id).map_err(|err| anyhow!("{err}"))?;
+          if let Err(err) = self.snapshot_workspace(workspace_id, rid).await {
+            warn!(%err, %workspace_id, "could not recover workspace updates");
+          }
+        }
+      }
+      cursor = next;
+      if cursor == 0 {
+        return Ok(());
+      }
+    }
   }
 
   async fn prune_updates(&self, workspace_id: WorkspaceId, up_to: Rid) -> anyhow::Result<()> {
@@ -329,23 +364,23 @@ impl CollabManager {
     workspace_id: WorkspaceId,
     mut up_to: Rid,
   ) -> anyhow::Result<()> {
-    let all_object_updates = self
-      .collab_cache
-      .get_workspace_updates(&workspace_id, None, None, Some(up_to))
-      .await?
-      .into_iter()
-      .into_group_map_by(|msg| msg.object_id);
-
-    if all_object_updates.is_empty() {
-      trace!(
-        "no updates to snapshot for workspace {} up to rid {}",
-        workspace_id,
-        up_to
-      );
-      return Ok(());
-    }
-
     if let Some(_lease) = self.acquire_workspace_lock(workspace_id).await? {
+      let all_object_updates = self
+        .collab_cache
+        .get_workspace_updates(&workspace_id, None, None, Some(up_to))
+        .await?
+        .into_iter()
+        .into_group_map_by(|msg| msg.object_id);
+
+      if all_object_updates.is_empty() {
+        trace!(
+          "no updates to snapshot for workspace {} up to rid {}",
+          workspace_id,
+          up_to
+        );
+        return Ok(());
+      }
+
       let snapshot_start = std::time::Instant::now();
 
       // Count total updates for metrics
@@ -369,7 +404,81 @@ impl CollabManager {
         return Ok(());
       }
 
+      let history_edits: HashMap<_, _> = snapshot_tasks
+        .iter()
+        .filter(|task| task.collab_type == CollabType::Document)
+        .filter_map(|task| {
+          let mut timestamps = task
+            .updates
+            .iter()
+            .filter(|update| {
+              let bytes = update.update.as_ref();
+              match update.update_flags {
+                UpdateFlags::Lib0v1 => bytes != Update::EMPTY_V1,
+                UpdateFlags::Lib0v2 => bytes != Update::EMPTY_V2,
+              }
+            })
+            .map(|update| update.last_message_id);
+          let first = timestamps.next()?;
+          let last = timestamps.next_back().unwrap_or(first);
+          Some((task.object_id, (first.timestamp as i64, last)))
+        })
+        .collect();
       let processing_results = self.process_snapshot_tasks(snapshot_tasks)?;
+      let mut ids = Vec::new();
+      let mut first_times = Vec::new();
+      let mut last_times = Vec::new();
+      let mut last_sequences = Vec::new();
+      for snapshot in &processing_results {
+        if let Some(&(first, last)) = history_edits
+          .get(&snapshot.object_id)
+          .filter(|_| snapshot.content_updated)
+        {
+          ids.push(snapshot.object_id);
+          first_times.push(first);
+          last_times.push(last.timestamp as i64);
+          last_sequences.push(i32::from(last.seq_no));
+        }
+      }
+      if !ids.is_empty() {
+        // Record this window before trimming its Redis updates.
+        sqlx::query(
+          "INSERT INTO af_document_version_pending AS pending
+             (workspace_id, oid, first_edit_ms, last_edit_ms, last_edit_seq)
+           SELECT $1, edit.oid, edit.first_ms, edit.last_ms, edit.last_seq
+           FROM UNNEST($2::uuid[], $3::bigint[], $4::bigint[], $5::integer[])
+             AS edit(oid, first_ms, last_ms, last_seq)
+           WHERE EXISTS (
+             SELECT 1 FROM af_workspace w
+             JOIN LATERAL (
+               SELECT p.version_history_days FROM af_user_subscriptions s
+               JOIN af_subscription_plans p ON p.id=s.plan_id
+               WHERE s.uid=w.owner_uid AND s.status='active'
+                 AND s.start_date<=NOW() AND s.end_date>NOW()
+               ORDER BY s.end_date DESC, s.id DESC LIMIT 1
+             ) plan ON plan.version_history_days > 0
+             WHERE w.workspace_id=$1 AND w.deleted_at IS NULL
+           )
+           ORDER BY edit.oid
+           ON CONFLICT (workspace_id, oid) DO UPDATE
+             SET first_edit_ms=LEAST(pending.first_edit_ms,
+                   GREATEST(pending.covered_edit_ms, EXCLUDED.first_edit_ms)),
+                 last_edit_ms=EXCLUDED.last_edit_ms,
+                 last_edit_seq=EXCLUDED.last_edit_seq
+             WHERE (EXCLUDED.last_edit_ms, EXCLUDED.last_edit_seq) >
+               (pending.covered_edit_ms, pending.covered_edit_seq)
+               AND (pending.last_edit_ms IS NULL OR (EXCLUDED.last_edit_ms, EXCLUDED.last_edit_seq) >
+                    (pending.last_edit_ms, pending.last_edit_seq))",
+        )
+        .bind(workspace_id)
+        .bind(&ids)
+        .bind(&first_times)
+        .bind(&last_times)
+        .bind(&last_sequences)
+        .execute(&self.pg_pool)
+        .await?;
+      }
+
       self
         .encode_and_save_snapshots(workspace_id, processing_results)
         .await?;
@@ -471,6 +580,7 @@ impl CollabManager {
         snapshot_tasks
           .into_par_iter()
           .filter_map(|task| {
+            let previous = task.update_snapshot.clone();
             match apply_updates_to_snapshot(
               client_id,
               task.object_id,
@@ -485,6 +595,7 @@ impl CollabManager {
                 collab_type: task.collab_type,
                 user_id: task.user_id,
                 rid,
+                content_updated: full_state != previous,
                 full_state,
                 state_vector: state_vector.encode_v1().into(),
                 paragraphs,
@@ -529,7 +640,7 @@ impl CollabManager {
       // Batch insert snapshots for each user
       self
         .batch_insert_by_user(workspace_id, encoded_result.params_by_uid)
-        .await;
+        .await?;
 
       // Batch index collabs periodically
       if !indexed_collabs.is_empty() {
@@ -622,28 +733,22 @@ impl CollabManager {
     &self,
     workspace_id: WorkspaceId,
     batch_params_by_uid: HashMap<i64, Vec<CollabParams>>,
-  ) {
+  ) -> Result<(), AppError> {
     for (uid, batch_params) in batch_params_by_uid {
       if !batch_params.is_empty() {
         let batch_len = batch_params.len();
-        if let Err(err) = self
+        self
           .collab_cache
           .bulk_insert_collab(workspace_id, &uid, batch_params)
-          .await
-        {
-          warn!(
-            "Failed to batch insert {} snapshots for user {}: {}",
-            batch_len, uid, err
-          );
-        } else {
-          trace!(
-            "Successfully batch inserted {} snapshots for user {}",
-            batch_len,
-            uid
-          );
-        }
+          .await?;
+        trace!(
+          "Successfully batch inserted {} snapshots for user {}",
+          batch_len,
+          uid
+        );
       }
     }
+    Ok(())
   }
 
   /// Batch indexes collabs for search
@@ -858,6 +963,7 @@ struct SnapshotTask {
 }
 
 struct ProcessedSnapshot {
+  content_updated: bool,
   workspace_id: WorkspaceId,
   object_id: ObjectId,
   collab_type: CollabType,

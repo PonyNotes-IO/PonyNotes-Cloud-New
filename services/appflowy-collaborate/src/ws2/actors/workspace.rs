@@ -663,14 +663,12 @@ impl Handler<Snapshot> for Workspace {
     Box::pin(
       async move { store.snapshot_workspace(workspace_id, up_to).await }
         .into_actor(self)
-        .map(move |res, act, ctx| match res {
-          Ok(_) => {
-            tracing::trace!("workspace {} snapshot complete", workspace_id);
-            act.snapshot_handle = Some(ctx.notify_later(Snapshot, Self::SNAPSHOT_INTERVAL));
-          },
-          Err(err) => {
-            tracing::error!("failed to snapshot workspace {}: {}", workspace_id, err)
-          },
+        .map(move |res, act, ctx| {
+          act.snapshot_handle = Some(ctx.notify_later(Snapshot, Self::SNAPSHOT_INTERVAL));
+          match res {
+            Ok(_) => tracing::trace!("workspace {} snapshot complete", workspace_id),
+            Err(err) => tracing::error!("failed to snapshot workspace {}: {}", workspace_id, err),
+          }
         }),
     )
   }

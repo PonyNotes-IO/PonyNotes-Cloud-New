@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentVersionMeta {
@@ -9,6 +10,24 @@ pub struct DocumentVersionMeta {
   /// True when saving reused an existing, still-readable version.
   #[serde(default)]
   pub reused: bool,
+  #[serde(default)]
+  pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentHistorySummary {
+  pub workspace_id: Uuid,
+  pub document_id: Uuid,
+  pub name: String,
+  pub workspace_name: String,
+  pub path: Vec<String>,
+  pub latest_version_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentHistoryIndex {
+  pub items: Vec<DocumentHistorySummary>,
+  pub has_more: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,6 +35,8 @@ pub struct DocumentVersionList {
   pub items: Vec<DocumentVersionMeta>,
   pub has_more: bool,
   pub retention_days: i32,
+  #[serde(default)]
+  pub storage_limited: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
