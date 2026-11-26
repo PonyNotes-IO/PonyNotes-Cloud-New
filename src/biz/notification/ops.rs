@@ -4,8 +4,8 @@ use database::pg_row::AFNotificationRow;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-pub async fn create_workspace_notification(
-  pg_pool: &PgPool,
+pub async fn create_workspace_notification<'e>(
+  executor: impl sqlx::PgExecutor<'e>,
   workspace_id: &Uuid,
   notification_type: &str,
   payload_json: &serde_json::Value,
@@ -26,7 +26,7 @@ pub async fn create_workspace_notification(
     payload_json,
     recipient_uid
   )
-  .execute(pg_pool)
+  .execute(executor)
   .await
   .context("Insert notification row")?;
 

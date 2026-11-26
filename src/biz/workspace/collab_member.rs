@@ -1,17 +1,9 @@
-use access_control::collab::CollabAccessControl;
 use app_error::AppError;
-use database::workspace::{
-  insert_collab_member, select_collab_owner, select_permission, update_collab_member_permission,
-  update_collab_member_invite_permission,
-};
-use database_entity::dto::AFAccessLevel;
-use sqlx::PgPool;
-use std::ops::DerefMut;
-use std::sync::Arc;
+use database::collab::delete_collab_member_invite;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::biz::notification::ops::create_workspace_notification;
-use database::collab::{delete_collab_member, delete_collab_member_invite};
 
 fn permission_name(permission_id: i32) -> &'static str {
   match permission_id {
@@ -22,24 +14,8 @@ fn permission_name(permission_id: i32) -> &'static str {
   }
 }
 
-async fn select_shared_view_name(pg_pool: &PgPool, view_id: &Uuid, uid: i64) -> Option<String> {
-  sqlx::query_scalar(
-    r#"
-      SELECT name
-      FROM af_collab_member_invite
-      WHERE oid = $1 AND received_uid = $2
-      LIMIT 1
-    "#,
-  )
-  .bind(view_id.to_string())
-  .bind(uid)
-  .fetch_optional(pg_pool)
-  .await
-  .unwrap_or(None)
-}
-
-async fn notify_collab_permission_changed(
-  pg_pool: &PgPool,
+pub async fn notify_collab_permission_changed(
+  conn: &mut PgConnection,
   workspace_id: &Uuid,
   view_id: &Uuid,
   uid: i64,
@@ -47,7 +23,7 @@ async fn notify_collab_permission_changed(
   old_permission_id: Option<i32>,
   new_permission_id: Option<i32>,
   access_removed: bool,
-) {
+) -> Result<(), AppError> {
   let title = "文档权限已变更";
   let message = if access_removed {
     format!("您对文档「{}」的访问权限已被移除，请知悉", view_name)
@@ -82,68 +58,25 @@ async fn notify_collab_permission_changed(
     "event": if access_removed { "access_removed" } else { "permission_updated" },
   });
 
-  if let Err(err) = create_workspace_notification(
-    pg_pool,
+  create_workspace_notification(
+    conn,
     workspace_id,
     "collab_permission_changed",
     &payload,
     Some(uid),
   )
   .await
-  {
-    tracing::warn!(
-      "Failed to send permission change notification to uid={}: {:?}",
-      uid,
-      err
-    );
-  }
 }
 
-pub async fn add_collab_member(
+pub async fn notify_member_added(
   pg_pool: &PgPool,
-  access_control: Arc<dyn CollabAccessControl>,
   workspace_id: &Uuid,
   view_id: &Uuid,
   send_uid: i64,
   received_uid: i64,
   view_name: &str,
   permission_id: i32,
-) -> Result<(), AppError> {
-  let mut tx = pg_pool.begin().await?;
-
-  let owner_id = select_collab_owner(tx.deref_mut(), workspace_id, view_id).await?;
-
-  if owner_id == received_uid {
-    return Err(AppError::InvalidRequest(
-      "被邀请者不能是笔记所有者".to_string(),
-    ));
-  }
-
-  // 使用传入的 permission_id 参数，同时传递 workspace_id 以记录 owner_workspace_id
-  insert_collab_member(
-    &mut tx,
-    view_id,
-    send_uid,
-    received_uid,
-    view_name,
-    permission_id,
-    workspace_id,
-  )
-  .await?;
-
-  // 将 permission_id 转换为 AFAccessLevel
-  let access_level = match permission_id {
-    2 => AFAccessLevel::ReadAndComment,
-    3 => AFAccessLevel::ReadAndWrite,
-    4 => AFAccessLevel::FullAccess,
-    _ => AFAccessLevel::ReadOnly,
-  };
-
-  access_control
-    .update_access_level_policy(&received_uid, &view_id, access_level)
-    .await?;
-  tx.commit().await?;
-
+) {
   // 权限名称
   let perm_name = permission_name(permission_id);
 
@@ -202,150 +135,8 @@ pub async fn add_collab_member(
       err
     );
   }
-
-  Ok(())
 }
 
-pub async fn edit_collab_member_permission(
-  pg_pool: &PgPool,
-  access_control: Arc<dyn CollabAccessControl>,
-  workspace_id: &Uuid,
-  view_id: &Uuid,
-  owner_uid: i64,
-  uid: i64,
-  new_permission_id: i32,
-) -> Result<(), AppError> {
-  let owner_id = select_collab_owner(pg_pool, workspace_id, view_id).await?;
-
-  if owner_id == uid {
-    return Err(AppError::InvalidRequest(
-      "不能修改笔记所有者的权限".to_string(),
-    ));
-  }
-  
-  // 检查是否有权修改权限
-  if owner_uid != owner_id {
-    return Err(AppError::NotEnoughPermissions);
-  }
-
-  let permission = select_permission(pg_pool, new_permission_id)
-    .await?
-    .ok_or(AppError::InvalidRequest("无效的权限id".to_string()))?;
-
-  // 查询旧权限用于通知
-  let old_permission_id: Option<i32> = sqlx::query_scalar(
-    "SELECT permission_id FROM af_collab_member WHERE oid = $1 AND uid = $2",
-  )
-  .bind(view_id.to_string())
-  .bind(uid)
-  .fetch_optional(pg_pool)
-  .await
-  .unwrap_or(None);
-
-  update_collab_member_permission(pg_pool, view_id, uid, new_permission_id).await?;
-
-  // 同步更新 af_collab_member_invite 表中的权限，保持邀请记录与实际权限一致
-  update_collab_member_invite_permission(pg_pool, view_id, uid, new_permission_id).await?;
-
-  // 同步更新 Casbin 权限策略
-  access_control
-    .update_access_level_policy(&uid, &view_id, permission.access_level)
-    .await?;
-
-  // 发送权限变更通知给被修改权限的用户
-  let view_name = select_shared_view_name(pg_pool, view_id, uid).await;
-  let doc_name = view_name.as_deref().unwrap_or("未知文章");
-  notify_collab_permission_changed(
-    pg_pool,
-    workspace_id,
-    view_id,
-    uid,
-    doc_name,
-    old_permission_id,
-    Some(new_permission_id),
-    false,
-  )
-  .await;
-
-  Ok(())
-}
-
-/// 删除协作成员
-///
-/// # 参数
-/// * `pg_pool` - PostgreSQL 连接池
-/// * `access_control` - 协作访问控制
-/// * `workspace_id` - 工作区ID
-/// * `view_id` - 文档 ID
-/// * `owner_uid` - 操作者UID（必须是文档拥有者）
-/// * `uid` - 要删除的成员 UID
-/// * `oid` - 协作对象 ID
-pub async fn remove_collab_member(
-  pg_pool: &PgPool,
-  access_control: Arc<dyn CollabAccessControl>,
-  workspace_id: &Uuid,
-  view_id: &Uuid,
-  owner_uid: i64,
-  uid: i64,
-  oid: &str,
-) -> Result<(), AppError> {
-  // 1. 检查操作者是否是文档拥有者
-  let owner_id = select_collab_owner(pg_pool, workspace_id, view_id).await?;
-
-  if owner_uid != owner_id {
-    return Err(AppError::NotEnoughPermissions);
-  }
-
-  // 2. 不能删除自己
-  if owner_uid == uid {
-    return Err(AppError::InvalidRequest("不能移除自己".to_string()));
-  }
-
-  let old_permission_id: Option<i32> = sqlx::query_scalar(
-    "SELECT permission_id FROM af_collab_member WHERE oid = $1 AND uid = $2",
-  )
-  .bind(oid)
-  .bind(uid)
-  .fetch_optional(pg_pool)
-  .await
-  .unwrap_or(None);
-  let view_name = select_shared_view_name(pg_pool, view_id, uid).await;
-
-  // Remove the actual access grant. Keep af_collab_member_invite as the owner's
-  // sent-share metadata; /me/received is filtered through af_collab_member.
-  delete_collab_member(pg_pool, uid, oid).await?;
-  let doc_name = view_name.as_deref().unwrap_or("未知文章");
-
-  // Keep af_collab_member_invite as owner-side sent-share metadata.
-  access_control
-    .remove_access_level(&uid, view_id)
-    .await?;
-
-  // Marks a full access revocation (vs. a mere permission downgrade). The
-  // client uses this to drop the view from the recipient's shared list and
-  // close its open tab, while leaving other users' lists untouched.
-  notify_collab_permission_changed(
-    pg_pool,
-    workspace_id,
-    view_id,
-    uid,
-    doc_name,
-    old_permission_id,
-    None,
-    true,
-  )
-  .await;
-
-  Ok(())
-}
-
-/// 删除协作邀请（取消邀请）
-///
-/// # 参数
-/// * `pg_pool` - PostgreSQL 连接池
-/// * `send_uid` - 发送者UID（必须是邀请者）
-/// * `received_uid` - 接收者UID
-/// * `oid` - 协作对象 ID
 pub async fn remove_collab_member_invite(
   pg_pool: &PgPool,
   send_uid: i64,

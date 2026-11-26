@@ -32,10 +32,6 @@ use crate::biz::workspace::page_view::{
 };
 use crate::biz::workspace::publish::get_workspace_default_publish_view_info_meta;
 use crate::biz::workspace::publish::list_collab_publish_info;
-use database::publish::{
-  insert_received_published_collab, select_received_published_collabs,
-  select_published_collab_by_uid, select_received_published_collab_with_details,
-};
 use crate::biz::workspace::quick_note::{
   create_quick_note, delete_quick_note, list_quick_notes, update_quick_note,
 };
@@ -53,11 +49,12 @@ use app_error::{AppError, ErrorCode};
 use appflowy_collaborate::actix_ws::entities::{
   ClientGenerateEmbeddingMessage, ClientHttpStreamMessage, ClientHttpUpdateMessage,
 };
-use appflowy_collaborate::ws2::{
-  PermissionType, PermissionUpdate, RefreshWorkspaceUserPermissions, UpdateUserPermissions,
-  WorkspaceCollabInstanceCache,
-};
+use appflowy_collaborate::ws2::{RefreshWorkspaceUserPermissions, WorkspaceCollabInstanceCache};
 use database::publish::select_all_published_collab_info_global;
+use database::publish::{
+  insert_received_published_collab, select_published_collab_by_uid,
+  select_received_published_collab_with_details, select_received_published_collabs,
+};
 
 use bytes::BytesMut;
 use chrono::{DateTime, Duration, Utc};
@@ -86,13 +83,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::biz::collab::me::{get_received_collab_list, get_send_collab_list};
 use crate::biz::subscription::ops::{check_user_storage_limit, get_user_resource_limit_status};
-use crate::biz::workspace::collab_member::{
-  add_collab_member, edit_collab_member_permission, remove_collab_member,
-};
-use crate::biz::workspace::ops::get_collab_owner;
+use crate::biz::workspace::collab_member::{notify_collab_permission_changed, notify_member_added};
+use crate::biz::workspace::sharing::ShareTarget;
 use database::pg_row::AFCollabMemberInvite;
 use database::subscription::get_user_total_usage_bytes;
-use database::workspace::{select_collab_owner, update_collab_member_permission};
 use semver::Version;
 use sha2::{Digest, Sha256};
 use shared_entity::dto::publish_dto::DuplicatePublishedPageResponse;
@@ -104,6 +98,7 @@ use shared_entity::dto::workspace_dto::{SingleOrVecInvitation, *};
 use shared_entity::response::AppResponseError;
 use shared_entity::response::{AppResponse, JsonAppResponse};
 use sqlx::types::uuid;
+use sqlx::Connection;
 use std::io::Cursor;
 use std::time::Instant;
 use tokio_stream::StreamExt;
@@ -1022,14 +1017,6 @@ fn permission_id_from_access_level(access_level: AFAccessLevel) -> i32 {
     AFAccessLevel::ReadAndComment => 2,
     AFAccessLevel::ReadAndWrite => 3,
     AFAccessLevel::FullAccess => 4,
-  }
-}
-
-fn permission_type_from_permission_id(permission_id: i32) -> PermissionType {
-  match permission_id {
-    3 | 4 => PermissionType::Write,
-    1 | 2 => PermissionType::Read,
-    _ => PermissionType::NoAccess,
   }
 }
 
@@ -3822,590 +3809,303 @@ async fn post_workspace_invite_code_handler(
       .await?;
   Ok(Json(AppResponse::Ok().with_data(workspace_invite_link)))
 }
-/// 添加协作成员到笔记
-///
-/// 业务逻辑：
-/// 创建邀请链接时调用
-/// 在 af_collab_member_invite 表中创建一条记录，用于生成分享链接
-/// 这样被邀请者点击链接后就可以直接加入协作了
+#[derive(sqlx::FromRow)]
+struct ShareInvite {
+  send_uid: i64,
+  name: String,
+  permission_id: i32,
+  view_layout: i32,
+}
+
+async fn new_share_invite(
+  state: &AppState,
+  target: &ShareTarget,
+  uid: i64,
+  permission_id: i32,
+) -> Result<ShareInvite, AppError> {
+  if !(1..=4).contains(&permission_id) {
+    return Err(AppError::InvalidRequest("无效的权限 ID".into()));
+  }
+  let folder = state.ws_server.get_folder(target.workspace_id).await?;
+  let view = folder.get_view(&target.view_id.to_string(), uid);
+  Ok(ShareInvite {
+    send_uid: uid,
+    permission_id,
+    name: view
+      .as_ref()
+      .map(|v| v.name.clone())
+      .unwrap_or_else(|| format!("共享文档 {}", target.view_id)),
+    view_layout: view.map(|v| v.layout.clone() as i32).unwrap_or_default(),
+  })
+}
+
 #[tracing::instrument(skip_all, err)]
 async fn create_share_link_invite_handler(
   user_uuid: UserUuid,
-  path_param: web::Path<(Uuid, Uuid)>,
+  path: web::Path<(Uuid, Uuid)>,
   state: Data<AppState>,
   params: Json<AddCollabMemberParams>,
 ) -> Result<JsonAppResponse<()>> {
-  let (workspace_id, view_id) = path_param.into_inner();
-  let params = params.into_inner();
-  
-  tracing::info!(
-    "create_share_link_invite: workspace_id={}, view_id={}, permission_id={}",
-    workspace_id,
-    view_id,
-    params.permission_id,
-  );
-
-  // 获取当前用户ID
+  let (workspace_id, view_id) = path.into_inner();
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
-  tracing::info!("current user uid: {}", uid);
-
-  // 获取视图名称和布局类型
-  let folder = state.ws_server.get_folder(workspace_id).await?;
-  let view_info = folder.get_view(&view_id.to_string(), uid);
-  let view_name = view_info
-    .as_ref()
-    .map(|v| v.name.clone())
-    .unwrap_or_else(|| format!("共享文档 {}", &view_id.to_string()[..8]));
-  let view_layout: i32 = view_info
-    .as_ref()
-    .map(|v| v.layout.clone() as i32)
-    .unwrap_or(0);
-
-  // 检查是否已存在邀请记录（使用运行时查询避免 sqlx 宏缓存列不匹配问题）
-  let existing_count: i64 = sqlx::query_scalar(
-    "SELECT COUNT(*) FROM af_collab_member_invite WHERE oid = $1 AND send_uid = $2 AND received_uid IS NULL",
+  let target = ShareTarget::load(&state, workspace_id, view_id).await?;
+  let invite = new_share_invite(&state, &target, uid, params.permission_id).await?;
+  let mut conn = target.lock(&state.pg_pool).await?;
+  target.require_invite_access(&mut conn, uid).await?;
+  sqlx::query(
+    "INSERT INTO af_collab_member_invite
+      (oid, send_uid, name, permission_id, view_layout, owner_workspace_id, database_oid)
+      VALUES ($1,$2,$3,$4,$5,$6,$7)
+      ON CONFLICT (oid, send_uid) WHERE received_uid IS NULL DO UPDATE SET
+        name = EXCLUDED.name, permission_id = EXCLUDED.permission_id, view_layout = EXCLUDED.view_layout,
+        owner_workspace_id = EXCLUDED.owner_workspace_id, database_oid = EXCLUDED.database_oid",
   )
-  .bind(view_id.to_string())
-  .bind(uid)
-  .fetch_one(&state.pg_pool)
-  .await
-  .unwrap_or(0);
-
-  if existing_count > 0 {
-    // 更新现有记录的权限、视图布局和 owner_workspace_id（使用运行时查询，避免 sqlx 离线缓存限制）
-    sqlx::query(
-      r#"
-        UPDATE af_collab_member_invite
-        SET permission_id = $1, view_layout = $2, owner_workspace_id = $3
-        WHERE oid = $4 AND send_uid = $5 AND received_uid IS NULL
-      "#,
-    )
-    .bind(params.permission_id)
-    .bind(view_layout)
-    .bind(workspace_id)
     .bind(view_id.to_string())
     .bind(uid)
-    .execute(&state.pg_pool)
-    .await
-    .map_err(AppError::from)?;
-    
-    tracing::info!("updated existing invite record, view_layout={}, owner_workspace_id={}", view_layout, workspace_id);
-  } else {
-    // 创建新的邀请记录（received_uid 为 NULL 表示待接受），使用运行时查询包含 owner_workspace_id
-    sqlx::query(
-      r#"
-        INSERT INTO af_collab_member_invite (oid, send_uid, name, permission_id, view_layout, owner_workspace_id)
-        VALUES ($1, $2, $3, $4, $5, $6)
-      "#,
-    )
-    .bind(view_id.to_string())
-    .bind(uid)
-    .bind(view_name)
-    .bind(params.permission_id)
-    .bind(view_layout)
+    .bind(invite.name)
+    .bind(invite.permission_id)
+    .bind(invite.view_layout)
     .bind(workspace_id)
-    .execute(&state.pg_pool)
+    .bind(target.database_id())
+    .execute(&mut *conn)
     .await
     .map_err(AppError::from)?;
-    
-    tracing::info!("created new invite record, view_layout={}, owner_workspace_id={}", view_layout, workspace_id);
-  }
-
   Ok(Json(AppResponse::Ok()))
 }
 
-/// 1. 将被邀请者添加到工作区（这样协作者才能同步文档）
-/// 2. 将被邀请者添加到文档协作成员列表
-/// 3. 设置权限（默认只读，可通过permission_id参数指定）
-///
 #[tracing::instrument(skip_all, err)]
 async fn add_collab_member_handler(
   user_uuid: UserUuid,
-  path_param: web::Path<(Uuid, Uuid, Uuid)>,
+  path: web::Path<(Uuid, Uuid, Uuid)>,
   state: Data<AppState>,
   params: Json<AddCollabMemberParams>,
 ) -> Result<JsonAppResponse<()>> {
-  // 检查是否是自己的笔记
-  // 不能是添加自己
-  // 用户必须存在
-  // 添加到 zf_collab_member
-  // 添加到分享表
-  let (workspace_id, view_id, received_uid) = path_param.into_inner();
-  let params = params.into_inner();
-
-  tracing::info!(
-    "add_collab_member request: workspace_id={}, view_id={}, received_uid={}, permission_id={}",
-    workspace_id,
-    view_id,
-    received_uid,
-    params.permission_id
-  );
-
-  // 找到这个笔记的拥有者
+  let (workspace_id, view_id, recipient_uuid) = path.into_inner();
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
-  tracing::info!("current user uid: {}", uid);
-
-  let received_uid = state.user_cache.get_user_uid(&received_uid).await?;
-  tracing::info!("received user uid: {}", received_uid);
-
-  // 如果是自己点击自己的分享链接（接收者点击链接访问自己的文档）
-  // 需要向 af_collab_member_invite 表中插入一条新记录，记录接收者信息
-  // 而不是更新现有的邀请记录（received_uid = NULL 的记录是邀请模板）
-  if uid == received_uid {
-    tracing::info!("user {} is accessing their own share link, will insert new invite record for this receiver", uid);
-    
-    // 查询 af_collab_member_invite 表中是否有待接受的邀请模板（received_uid IS NULL）
-    // 使用运行时查询（无!宏）以获取 view_layout 和 owner_workspace_id 字段
-    #[derive(sqlx::FromRow)]
-    struct InviteTemplate {
-      send_uid: i64,
-      permission_id: i32,
-      name: String,
-      view_layout: i32,
-      owner_workspace_id: Option<Uuid>,
-    }
-    let existing_invite = sqlx::query_as::<_, InviteTemplate>(
-      r#"
-        SELECT send_uid, permission_id, name, view_layout, owner_workspace_id
-        FROM af_collab_member_invite
-        WHERE oid = $1 AND received_uid IS NULL
-      "#,
-    )
+  let recipient = state.user_cache.get_user_uid(&recipient_uuid).await?;
+  let target = ShareTarget::load(&state, workspace_id, view_id).await?;
+  let direct_invite = if uid == recipient {
+    None
+  } else {
+    Some(new_share_invite(&state, &target, uid, params.permission_id).await?)
+  };
+  let mut conn = target.lock(&state.pg_pool).await?;
+  let invite = match direct_invite {
+    Some(invite) => {
+      target.require_invite_access(&mut conn, uid).await?;
+      invite
+    },
+    None => {
+      let template = sqlx::query_as::<_, ShareInvite>(
+        "SELECT send_uid, name, permission_id, view_layout FROM af_collab_member_invite
+         WHERE oid = $1 AND received_uid IS NULL AND (owner_workspace_id IS NULL OR owner_workspace_id = $2)
+         ORDER BY created_at DESC LIMIT 1"
+      )
     .bind(view_id.to_string())
-    .fetch_optional(&state.pg_pool)
+    .bind(workspace_id)
+    .fetch_optional(&mut *conn)
     .await
     .map_err(AppError::from)?;
-    
-    if let Some(invite) = existing_invite {
-      // 新插入一条记录，记录接收者信息（含 view_layout 和 owner_workspace_id）
-      // 注意：不是更新现有的邀请记录（邀请模板），而是新插入一条记录
-      // 这样每个接收者都有一条独立的记录
-      // owner_workspace_id: 优先使用模板中的值，若模板没有则使用请求中的 workspace_id（链接中的 workspace_id）
-      let effective_owner_workspace_id = invite.owner_workspace_id.unwrap_or(workspace_id);
-      sqlx::query(
-        r#"
-          INSERT INTO af_collab_member_invite (oid, send_uid, received_uid, name, permission_id, view_layout, owner_workspace_id)
-          VALUES ($1, $2, $3, $4, $5, $6, $7)
-          ON CONFLICT (oid, send_uid, received_uid) WHERE received_uid IS NOT NULL DO UPDATE
-          SET permission_id = EXCLUDED.permission_id,
-              view_layout = EXCLUDED.view_layout,
-              owner_workspace_id = EXCLUDED.owner_workspace_id
-        "#,
-      )
+      // Opening an expired link or the owner's own link is idempotent.
+      let Some(invite) = template else {
+        return Ok(Json(AppResponse::Ok()));
+      };
+      if recipient == target.owner {
+        return Ok(Json(AppResponse::Ok()));
+      }
+      invite
+    },
+  };
+  let mut tx = conn.begin().await.map_err(AppError::from)?;
+  let existing: Option<i32> =
+    sqlx::query_scalar("SELECT permission_id FROM af_collab_member WHERE uid = $1 AND oid = $2")
+      .bind(recipient)
       .bind(view_id.to_string())
-      .bind(invite.send_uid)
-      .bind(received_uid)
-      .bind(&invite.name)
-      .bind(invite.permission_id)
-      .bind(invite.view_layout)
-      .bind(effective_owner_workspace_id)
-      .execute(&state.pg_pool)
+      .fetch_optional(&mut *tx)
       .await
       .map_err(AppError::from)?;
-      
-      tracing::info!("inserted/updated invite record for receiver: oid={}, send_uid={}, received_uid={}, permission_id={}, view_layout={}, owner_workspace_id={}", 
-        view_id, invite.send_uid, received_uid, invite.permission_id, invite.view_layout, effective_owner_workspace_id);
-      
-      // 检查 af_collab_member 表中是否已有记录，如果没有则添加
-      let existing_member_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM af_collab_member WHERE oid = $1 AND uid = $2",
-      )
-      .bind(view_id.to_string())
-      .bind(received_uid)
-      .fetch_one(&state.pg_pool)
+  let permission = existing.unwrap_or(invite.permission_id);
+  sqlx::query(
+    "INSERT INTO af_collab_member_invite
+      (oid, send_uid, received_uid, name, permission_id, view_layout, owner_workspace_id, database_oid)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+      ON CONFLICT (oid, send_uid, received_uid) WHERE received_uid IS NOT NULL DO UPDATE SET
+        name = EXCLUDED.name, permission_id = EXCLUDED.permission_id, view_layout = EXCLUDED.view_layout,
+        owner_workspace_id = EXCLUDED.owner_workspace_id, database_oid = EXCLUDED.database_oid",
+  )
+    .bind(view_id.to_string())
+    .bind(invite.send_uid)
+    .bind(recipient)
+    .bind(&invite.name)
+    .bind(permission)
+    .bind(invite.view_layout)
+    .bind(workspace_id)
+    .bind(target.database_id())
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::from)?;
+  let policies = target
+    .set_member(&mut tx, recipient, Some(permission))
+    .await?;
+  // A failed policy publication can be retried from the committed grant.
+  tx.commit().await.map_err(AppError::from)?;
+  target.publish(&state, recipient, policies).await?;
+  drop(conn);
+
+  if uid != recipient {
+    notify_member_added(
+      &state.pg_pool,
+      &workspace_id,
+      &view_id,
+      uid,
+      recipient,
+      &invite.name,
+      permission,
+    )
+    .await;
+  } else {
+    // 通知分享者（A）：B 刚刚打开了分享链接
+    let opener_name = database::user::select_name_from_uid(&state.pg_pool, uid)
       .await
-      .unwrap_or(0);
-      
-      if existing_member_count == 0 {
-        // 添加到 af_collab_member 表
-        sqlx::query(
-          "INSERT INTO af_collab_member (uid, oid, permission_id) VALUES ($1, $2, $3)",
-        )
-        .bind(received_uid)
-        .bind(view_id.to_string())
-        .bind(invite.permission_id)
-        .execute(&state.pg_pool)
-        .await
-        .map_err(AppError::from)?;
-        
-        tracing::info!("added collab member: oid={}, uid={}, permission_id={}", 
-          view_id, received_uid, invite.permission_id);
-      }
-      
-      // 【关键修复】无论 af_collab_member 是否是新插入的，都必须更新 Casbin 内存策略。
-      let access_level = match invite.permission_id {
-        2 => AFAccessLevel::ReadAndComment,
-        3 => AFAccessLevel::ReadAndWrite,
-        4 => AFAccessLevel::FullAccess,
-        _ => AFAccessLevel::ReadOnly,
-      };
-      if let Err(e) = state.collab_access_control
-        .update_access_level_policy(&received_uid, &view_id, access_level)
-        .await
-      {
-        tracing::error!(
-          "failed to update casbin access level policy for uid={}, oid={}: {}",
-          received_uid, view_id, e
-        );
-      } else {
-        tracing::info!(
-          "updated casbin policy: uid={}, oid={}, permission_id={}",
-          received_uid, view_id, invite.permission_id
-        );
-      }
-
-      // 【关键修复】如果是数据库类视图，还需要授予 database_id 的访问权限
-      // 使用邀请模板中存储的 view_layout 来判断（更可靠，不依赖 Folder 加载）
-      // view_layout: 0=Document, 1=Grid, 2=Board, 3=Calendar, 4=Chat
-      let is_database_view = invite.view_layout > 0;
-      tracing::info!("self-access: view_layout={}, is_database_view={}", invite.view_layout, is_database_view);
-      if is_database_view {
-        tracing::info!("self-access: view is a database view, resolving database_id");
-        match resolve_database_id_for_shared_view(&state, &effective_owner_workspace_id, &view_id).await {
-          Ok(database_id) => {
-            let db_uuid = Uuid::parse_str(&database_id).unwrap_or(view_id);
-            // 持久化：在 af_collab_member 中注册 database_id，确保服务重启后权限可重建
-            let _ = sqlx::query(
-              "INSERT INTO af_collab_member (uid, oid, permission_id) VALUES ($1, $2, $3) ON CONFLICT (uid, oid) DO NOTHING",
-            )
-            .bind(received_uid)
-            .bind(&database_id)
-            .bind(invite.permission_id)
-            .execute(&state.pg_pool)
-            .await
-            .map_err(|e| tracing::warn!("self-access: failed to persist database_id member: {}", e));
-            if let Err(e) = state.collab_access_control
-              .update_access_level_policy(&received_uid, &db_uuid, access_level)
-              .await
-            {
-              tracing::error!("failed to grant database_id permission: {}", e);
-            } else {
-              tracing::info!("granted database_id permission: database_id={}", database_id);
-            }
-          },
-          Err(e) => {
-            tracing::warn!("self-access: failed to resolve database_id for view {}: {}", view_id, e);
-          }
-        }
-      }
-      
-      // 通知分享者（A）：B 刚刚打开了分享链接
-      let opener_name = database::user::select_name_from_uid(&state.pg_pool, uid)
-        .await
-        .unwrap_or_else(|_| "用户".to_string());
-      let note_name = invite.name.clone();
-      let perm_name_str = match invite.permission_id {
-        2 => "评论",
-        3 => "编辑",
-        4 => "完全访问",
-        _ => "查看",
-      };
-      let link_open_payload = serde_json::json!({
-        "view_id": view_id.to_string(),
-        "view_name": note_name,
-        "opened_by": uid,
-        "opened_by_name": opener_name,
-        "title": "有人打开了你的分享笔记",
-        "message": format!("【{}】通过链接打开了你分享的笔记「{}」", opener_name, note_name),
-      });
-      if let Err(err) = crate::biz::notification::ops::create_workspace_notification(
-        &state.pg_pool,
-        &workspace_id,
-        "collab_share_link_opened",
-        &link_open_payload,
-        Some(invite.send_uid),
-      ).await {
-        tracing::warn!("Failed to send share link opened notification: {:?}", err);
-      }
-
-      // 通知接收者（B）：成功获取分享笔记的访问权限
-      let sender_name = database::user::select_name_from_uid(&state.pg_pool, invite.send_uid)
-        .await
-        .unwrap_or_else(|_| "用户".to_string());
-      let link_recv_payload = serde_json::json!({
-        "view_id": view_id.to_string(),
-        "view_name": note_name,
-        "shared_by": invite.send_uid,
-        "shared_by_name": sender_name,
-        "permission": perm_name_str,
-        "title": "已获取分享笔记",
-        "message": format!("你已获取【{}】分享的笔记「{}」访问权限，赋予「{}」权限", sender_name, note_name, perm_name_str),
-      });
-      if let Err(err) = crate::biz::notification::ops::create_workspace_notification(
-        &state.pg_pool,
-        &workspace_id,
-        "collab_share_link_self_received",
-        &link_recv_payload,
-        Some(uid),
-      ).await {
-        tracing::warn!("Failed to send share link self received notification to uid={}: {:?}", uid, err);
-      }
-
-      state.ws_server.do_send(UpdateUserPermissions {
-        workspace_id,
-        uid: received_uid,
-        updates: vec![PermissionUpdate {
-          object_id: view_id,
-          permission_type: permission_type_from_permission_id(invite.permission_id),
-        }],
-      });
-
-      return Ok(Json(AppResponse::Ok()));
-    }
-
-    tracing::info!("no pending invite found, skipping");
-    return Ok(Json(AppResponse::Ok()));
-  }
-
-  // 获取视图名称和布局类型
-  let folder = state.ws_server.get_folder(workspace_id).await?;
-  tracing::info!("got folder for workspace: {}", workspace_id);
-
-  let view_info = folder.get_view(&view_id.to_string(), uid);
-  let view_name = view_info
-    .as_ref()
-    .map(|v| {
-      tracing::info!("found view: {}, layout: {:?}", v.name, v.layout);
-      v.name.clone()
-    })
-    .unwrap_or_else(|| {
-      tracing::warn!("view not found in folder: {}", view_id);
-      format!("共享文档 {}", &view_id.to_string()[..8])
+      .unwrap_or_else(|_| "用户".to_string());
+    let note_name = invite.name.clone();
+    let perm_name_str = match permission {
+      2 => "评论",
+      3 => "编辑",
+      4 => "完全访问",
+      _ => "查看",
+    };
+    let link_open_payload = serde_json::json!({
+      "view_id": view_id.to_string(),
+      "view_name": note_name,
+      "opened_by": uid,
+      "opened_by_name": opener_name,
+      "title": "有人打开了你的分享笔记",
+      "message": format!("【{}】通过链接打开了你分享的笔记「{}」", opener_name, note_name),
     });
-  let view_layout: i32 = view_info
-    .as_ref()
-    .map(|v| v.layout.clone() as i32)
-    .unwrap_or(0);
-  let is_database_view = view_info
-    .as_ref()
-    .map(|v| v.layout.is_database())
-    .unwrap_or(false);
+    if let Err(err) = crate::biz::notification::ops::create_workspace_notification(
+      &state.pg_pool,
+      &workspace_id,
+      "collab_share_link_opened",
+      &link_open_payload,
+      Some(invite.send_uid),
+    )
+    .await
+    {
+      tracing::warn!("Failed to send share link opened notification: {:?}", err);
+    }
 
-  // Step 1: 将被邀请者添加到文档协作成员列表
-  tracing::info!("adding collab member: workspace_id={}, view_id={}, received_uid={}, permission_id={}, view_layout={}", 
-    workspace_id, view_id, received_uid, params.permission_id, view_layout);
-  add_collab_member(
-    &state.pg_pool,
-    state.collab_access_control.clone(),
-    &workspace_id,
-    &view_id,
-    uid,
-    received_uid,
-    &view_name,
-    params.permission_id,
-  )
-  .await?;
-  tracing::info!("add_collab_member success!");
-
-  state.ws_server.do_send(UpdateUserPermissions {
-    workspace_id,
-    uid: received_uid,
-    updates: vec![PermissionUpdate {
-      object_id: view_id,
-      permission_type: permission_type_from_permission_id(params.permission_id),
-    }],
-  });
-
-  // Step 2: 【关键修复】如果是数据库类视图(Grid/Board/Calendar)，还需要授予 database_id 的访问权限
-  // 因为数据库视图的 collab 对象 ID 是 database_id，不同于 view_id
-  if is_database_view {
-    tracing::info!("view is a database view, resolving database_id for permission grant");
-    match resolve_database_id_for_shared_view(&state, &workspace_id, &view_id).await {
-      Ok(database_id) => {
-        let access_level = match params.permission_id {
-          2 => database_entity::dto::AFAccessLevel::ReadAndComment,
-          3 => database_entity::dto::AFAccessLevel::ReadAndWrite,
-          4 => database_entity::dto::AFAccessLevel::FullAccess,
-          _ => database_entity::dto::AFAccessLevel::ReadOnly,
-        };
-        let db_uuid = Uuid::parse_str(&database_id).unwrap_or(view_id);
-        // 持久化：在 af_collab_member 中注册 database_id，确保服务重启后权限可重建
-        let _ = sqlx::query(
-          "INSERT INTO af_collab_member (uid, oid, permission_id) VALUES ($1, $2, $3) ON CONFLICT (uid, oid) DO NOTHING",
-        )
-        .bind(received_uid)
-        .bind(&database_id)
-        .bind(params.permission_id)
-        .execute(&state.pg_pool)
-        .await
-        .map_err(|e| tracing::warn!("failed to persist database_id member: {}", e));
-        if let Err(e) = state.collab_access_control
-          .update_access_level_policy(&received_uid, &db_uuid, access_level)
-          .await
-        {
-          tracing::error!("failed to grant database_id permission: database_id={}, err={}", database_id, e);
-        } else {
-          tracing::info!("granted database_id permission: database_id={}, uid={}", database_id, received_uid);
-        }
-      },
-      Err(e) => {
-        tracing::warn!("failed to resolve database_id for view {}: {}", view_id, e);
-      }
+    // 通知接收者（B）：成功获取分享笔记的访问权限
+    let sender_name = database::user::select_name_from_uid(&state.pg_pool, invite.send_uid)
+      .await
+      .unwrap_or_else(|_| "用户".to_string());
+    let link_recv_payload = serde_json::json!({
+      "view_id": view_id.to_string(),
+      "view_name": note_name,
+      "shared_by": invite.send_uid,
+      "shared_by_name": sender_name,
+      "permission": perm_name_str,
+      "title": "已获取分享笔记",
+      "message": format!("你已获取【{}】分享的笔记「{}」访问权限，赋予「{}」权限", sender_name, note_name, perm_name_str),
+    });
+    if let Err(err) = crate::biz::notification::ops::create_workspace_notification(
+      &state.pg_pool,
+      &workspace_id,
+      "collab_share_link_self_received",
+      &link_recv_payload,
+      Some(uid),
+    )
+    .await
+    {
+      tracing::warn!(
+        "Failed to send share link self received notification to uid={}: {:?}",
+        uid,
+        err
+      );
     }
   }
-
-  // Step 3: 更新邀请记录中的 view_layout 和 owner_workspace_id（使用运行时查询）
-  let _ = sqlx::query(
-    "UPDATE af_collab_member_invite SET view_layout = $1, owner_workspace_id = $2 WHERE oid = $3 AND received_uid = $4",
-  )
-  .bind(view_layout)
-  .bind(workspace_id)
-  .bind(view_id.to_string())
-  .bind(received_uid)
-  .execute(&state.pg_pool)
-  .await;
-
   Ok(Json(AppResponse::Ok()))
 }
 
-/// 更新协作成员权限，这个需要检查权限的。暂定为，只能笔记拥有者有修改权
 async fn update_collab_member_permission_handler(
   user_uuid: UserUuid,
-  path_param: web::Path<(Uuid, Uuid, Uuid)>,
+  path: web::Path<(Uuid, Uuid, Uuid)>,
   state: Data<AppState>,
   data: Json<EditCollabMemberParams>,
 ) -> Result<JsonAppResponse<()>> {
-  // 检查笔记是否是自己的
-  // 用户必须存在
-  // 不能是变更自己的权限
-  let data = data.into_inner();
-  let permission_id = data.permission_id;
-  let (workspace_id, view_id, opt_uid) = path_param.into_inner();
-  let edit_uid = state.user_cache.get_user_uid(&opt_uid).await?;
-  let user_uid = state.user_cache.get_user_uid(&user_uuid).await?;
-  edit_collab_member_permission(
-    &state.pg_pool,
-    state.collab_access_control.clone(),
+  let (workspace_id, view_id, member_uuid) = path.into_inner();
+  let uid = state.user_cache.get_user_uid(&user_uuid).await?;
+  let member = state.user_cache.get_user_uid(&member_uuid).await?;
+  let target = ShareTarget::load(&state, workspace_id, view_id).await?;
+  target.require_owner(uid)?;
+  let id = data.permission_id;
+  if !(1..=4).contains(&id) {
+    return Err(AppError::InvalidRequest("无效的权限 ID".into()).into());
+  }
+  let mut conn = target.lock(&state.pg_pool).await?;
+  let mut tx = conn.begin().await.map_err(AppError::from)?;
+  let old: i32 =
+    sqlx::query_scalar("SELECT permission_id FROM af_collab_member WHERE uid = $1 AND oid = $2")
+      .bind(member)
+      .bind(view_id.to_string())
+      .fetch_one(&mut *tx)
+      .await
+      .map_err(AppError::from)?;
+  let name: Option<String> = sqlx::query_scalar(
+    "UPDATE af_collab_member_invite SET permission_id = $1, database_oid = $2
+      WHERE oid = $3 AND received_uid = $4 RETURNING name",
+  )
+  .bind(id)
+  .bind(target.database_id())
+  .bind(view_id.to_string())
+  .bind(member)
+  .fetch_optional(&mut *tx)
+  .await
+  .map_err(AppError::from)?;
+  let policies = target.set_member(&mut tx, member, Some(id)).await?;
+  notify_collab_permission_changed(
+    &mut tx,
     &workspace_id,
     &view_id,
-    user_uid,
-    edit_uid,
-    permission_id,
+    member,
+    name.as_deref().unwrap_or("未知文章"),
+    Some(old),
+    Some(id),
+    false,
   )
   .await?;
-  state.ws_server.do_send(UpdateUserPermissions {
-    workspace_id,
-    uid: edit_uid,
-    updates: vec![PermissionUpdate {
-      object_id: view_id,
-      permission_type: permission_type_from_permission_id(permission_id),
-    }],
-  });
-  // 变更权限
+  target.publish(&state, member, policies).await?;
+  tx.commit().await.map_err(AppError::from)?;
   Ok(Json(AppResponse::Ok()))
 }
 
-/// 删除协作成员
-///
-/// 业务逻辑：
-/// 1. 检查操作者是否是文档拥有者
-/// 2. 不能删除自己
-/// 3. 从 af_collab_member 表中删除成员
-/// 4. 删除 Casbin 访问控制策略
 async fn remove_collab_member_handler(
   user_uuid: UserUuid,
-  path_param: web::Path<(Uuid, Uuid, Uuid)>,
+  path: web::Path<(Uuid, Uuid, Uuid)>,
   state: Data<AppState>,
 ) -> Result<JsonAppResponse<()>> {
-  let (workspace_id, view_id, remove_uid_uuid) = path_param.into_inner();
-
-  // 1. 获取当前用户和要删除的用户的 uid
-  let user_uid = state.user_cache.get_user_uid(&user_uuid).await?;
-  let remove_uid = state.user_cache.get_user_uid(&remove_uid_uuid).await?;
-
-  // 2. 获取文档拥有者
-  let collab_owner = workspace::ops::get_collab_owner(&state.pg_pool, &workspace_id, &view_id)
-    .await
-    .map_err(|e| AppResponseError::new(ErrorCode::Internal, e.to_string()))?;
-
-  // 3. 只有文档拥有者可以删除成员
-  if user_uid != collab_owner.uid {
-    return Err(AppResponseError::new(
-      ErrorCode::NotEnoughPermissions,
-      "只有文档拥有者可以删除成员".to_string(),
-    ).into());
+  let (workspace_id, view_id, member_uuid) = path.into_inner();
+  let member = state.user_cache.get_user_uid(&member_uuid).await?;
+  let uid = state.user_cache.get_user_uid(&user_uuid).await?;
+  let target = ShareTarget::load(&state, workspace_id, view_id).await?;
+  target.require_owner(uid)?;
+  if member == target.owner {
+    return Err(AppError::InvalidRequest("不能移除自己".into()).into());
   }
-
-  // 4. 不能删除自己
-  if user_uid == remove_uid {
-    return Err(AppResponseError::new(
-      ErrorCode::InvalidRequest,
-      "不能删除自己".to_string(),
-    ).into());
-  }
-
-  // 6. 删除协作成员权限
-  workspace::collab_member::remove_collab_member(
-    &state.pg_pool,
-    state.collab_access_control.clone(),
-    &workspace_id,
-    &view_id,
-    user_uid, // 操作者 uid
-    remove_uid,
-    &view_id.to_string(),
-  )
-  .await?;
-
-  // 7. 通知被移除用户实时丢弃本地协作状态
-  state.ws_server.do_send(UpdateUserPermissions {
-    workspace_id,
-    uid: remove_uid,
-    updates: vec![PermissionUpdate {
-      object_id: view_id,
-      permission_type: PermissionType::NoAccess,
-    }],
-  });
-
+  target.revoke(&state, Some(member)).await?;
   Ok(Json(AppResponse::Ok()))
 }
 
-/// Stop sharing a document, including outstanding links and accepted invitations.
 async fn stop_collab_sharing_handler(
   user_uuid: UserUuid,
-  path_param: web::Path<(Uuid, Uuid)>,
+  path: web::Path<(Uuid, Uuid)>,
   state: Data<AppState>,
 ) -> Result<JsonAppResponse<()>> {
-  let (workspace_id, view_id) = path_param.into_inner();
-  let owner_uid = state.user_cache.get_user_uid(&user_uuid).await?;
-  let actual_owner = select_collab_owner(&state.pg_pool, &workspace_id, &view_id).await?;
-  if owner_uid != actual_owner {
-    return Err(AppError::NotEnoughPermissions.into());
-  }
-
-  // Disable new link lookups before removing existing members.
-  sqlx::query("DELETE FROM af_collab_member_invite WHERE oid = $1 AND received_uid IS NULL")
-    .bind(view_id.to_string())
-    .execute(&state.pg_pool)
-    .await
-    .map_err(AppError::from)?;
-
-  let members = workspace::ops::get_collab_members(&state.pg_pool, &view_id).await?;
-  for member in members.into_iter().filter(|member| member.uid != owner_uid) {
-    workspace::collab_member::remove_collab_member(
-      &state.pg_pool,
-      state.collab_access_control.clone(),
-      &workspace_id,
-      &view_id,
-      owner_uid,
-      member.uid,
-      &view_id.to_string(),
-    )
-    .await?;
-    state.ws_server.do_send(UpdateUserPermissions {
-      workspace_id,
-      uid: member.uid,
-      updates: vec![PermissionUpdate {
-        object_id: view_id,
-        permission_type: PermissionType::NoAccess,
-      }],
-    });
-  }
-
-  sqlx::query("DELETE FROM af_collab_member_invite WHERE oid = $1")
-    .bind(view_id.to_string())
-    .execute(&state.pg_pool)
-    .await
-    .map_err(AppError::from)?;
+  let (workspace_id, view_id) = path.into_inner();
+  let uid = state.user_cache.get_user_uid(&user_uuid).await?;
+  let target = ShareTarget::load(&state, workspace_id, view_id).await?;
+  target.require_owner(uid)?;
+  target.revoke(&state, None).await?;
   Ok(Json(AppResponse::Ok()))
 }
 
@@ -4501,40 +4201,6 @@ async fn get_collab_share_info_handler(
     },
     None => Err(AppError::RecordNotFound(format!("No invite template for view_id: {}", query.view_id)).into()),
   }
-}
-
-/// 辅助函数：解析数据库视图的 database_id
-/// 当分享数据库类视图(Grid/Board/Calendar)时，需要同时授予 database_id 的权限
-async fn resolve_database_id_for_shared_view(
-  state: &Data<AppState>,
-  workspace_id: &Uuid,
-  view_id: &Uuid,
-) -> Result<String, AppError> {
-  let ws_db_oid =
-    database::collab::select_workspace_database_oid(&state.pg_pool, workspace_id)
-      .await
-      .map_err(|e| AppError::Internal(anyhow!("Failed to get workspace database oid: {}", e)))?;
-  let ws_db_collab = crate::biz::collab::utils::get_latest_collab(
-    &state.collab_storage,
-    database::collab::GetCollabOrigin::Server,
-    *workspace_id,
-    ws_db_oid,
-    CollabType::WorkspaceDatabase,
-    default_client_id(),
-  )
-  .await?;
-  let ws_db =
-    collab_database::workspace_database::WorkspaceDatabase::open(ws_db_collab).map_err(|err| {
-      AppError::Internal(anyhow!("Failed to open workspace database: {}", err))
-    })?;
-  let database_id = ws_db
-    .get_database_meta_with_view_id(&view_id.to_string())
-    .ok_or(AppError::RecordNotFound(format!(
-      "Database for view {} not found in workspace {}",
-      view_id, workspace_id
-    )))?
-    .database_id;
-  Ok(database_id)
 }
 
 #[derive(Debug, Clone, Validate, Serialize, Deserialize)]

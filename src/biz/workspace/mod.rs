@@ -9,3 +9,4 @@ pub mod quick_note;
 pub mod subscription_plan_limits;
 
 pub mod collab_member;
+pub mod sharing;
