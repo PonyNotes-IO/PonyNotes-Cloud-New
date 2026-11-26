@@ -10,7 +10,7 @@ use actix_web::{
   HttpRequest, ResponseError, Scope,
 };
 use actix_web::{HttpResponse, Result};
-use app_error::AppError;
+use app_error::{AppError, ErrorCode};
 
 use chrono::DateTime;
 use database::file::BlobKey;
@@ -24,7 +24,7 @@ use crate::biz::authentication::jwt::UserUuid;
 use crate::biz::data_import::LimitedPayload;
 use crate::biz::workspace::subscription_plan_limits::PlanLimits;
 use crate::biz::subscription::ops::{check_user_storage_limit, get_user_resource_limit_status};
-use database::subscription::{get_user_total_storage_usage, get_user_total_usage_bytes};
+use database::subscription::get_user_total_usage_bytes;
 use crate::state::AppState;
 use anyhow::anyhow;
 use appflowy_ai_client::client::AppFlowyAIClient;
@@ -32,7 +32,6 @@ use aws_sdk_s3::primitives::ByteStream;
 use collab_importer::util::FileId;
 use database::pg_row::{AFBlobSource, AFBlobStatus};
 use serde::Deserialize;
-use shared_entity::dto::billing_dto::SubscriptionPlan;
 use shared_entity::dto::file_dto::PutFileResponse;
 use shared_entity::dto::workspace_dto::{BlobMetadata, RepeatedBlobMetaData, WorkspaceSpaceUsage};
 use shared_entity::response::{AppResponse, AppResponseError, JsonAppResponse};
@@ -127,61 +126,7 @@ async fn create_upload(
     req.parent_dir
   );
 
-  // 协作区场景：文件上传消耗workspace owner的云空间配额
-  // 获取workspace owner的uid来检查存储限制
-  let workspace = database::workspace::select_workspace(&state.pg_pool, &workspace_id).await?;
-  let owner_uid = workspace.owner_uid.ok_or_else(|| {
-    AppError::Internal(anyhow!("Workspace owner_uid is missing for workspace {}", workspace_id))
-  })?;
-
-  info!(
-    "📦 [分片上传] 资源消耗归属 - workspace_id: {}, owner_uid: {}, uploading_user_uid: {}",
-    workspace_id, owner_uid, uid
-  );
-
-  // 使用用户真实订阅的 plan_code 检查单文件大小限制
-  let resource_status = get_user_resource_limit_status(&state.pg_pool, owner_uid).await?;
-  let single_limit_bytes = PlanLimits::from_plan_code(&resource_status.plan_code).single_upload_limit;
-
-  if file_size as i64 > single_limit_bytes {
-    log::warn!(
-      "[FILE_UPLOAD_DEBUG] File size {} exceeds single upload limit {} bytes for {} plan",
-      file_size,
-      single_limit_bytes,
-      resource_status.plan_code
-    );
-    return Err(
-      AppError::PlanLimitExceeded(format!(
-        "File size {:.1}MB exceeds single upload limit {:.0}MB for {} plan.",
-        file_size as f64 / (1024.0 * 1024.0),
-        single_limit_bytes as f64 / (1024.0 * 1024.0),
-        resource_status.plan_code
-      ))
-      .into(),
-    );
-  }
-
-  // 检查总存储配额（使用workspace owner的存储使用量）
-  let current_total_usage = get_user_total_usage_bytes(&state.pg_pool, owner_uid)
-    .await? as i64;
-  let total_limit_bytes = (resource_status.storage_limit_mb * 1024.0 * 1024.0) as i64;
-
-  if current_total_usage + file_size as i64 > total_limit_bytes {
-    log::warn!(
-      "[FILE_UPLOAD_DEBUG] Total storage limit exceeded. Current: {} bytes, Limit: {} bytes, Upload: {} bytes for {} plan",
-      current_total_usage, total_limit_bytes, file_size, resource_status.plan_code
-    );
-    return Err(
-      AppError::PlanLimitExceeded(format!(
-        "Total storage limit exceeded. Current: {:.1}MB, Limit: {:.0}MB, Upload: {:.1}MB for {} plan.",
-        current_total_usage as f64 / (1024.0 * 1024.0),
-        total_limit_bytes as f64 / (1024.0 * 1024.0),
-        file_size as f64 / (1024.0 * 1024.0),
-        resource_status.plan_code
-      ))
-      .into(),
-    );
-  }
+  check_workspace_file_upload(&state, &workspace_id, file_size).await?;
 
   let key = BlobPathV1 {
     workspace_id,
@@ -196,6 +141,72 @@ async fn create_upload(
     .map_err(AppResponseError::from)?;
 
   Ok(AppResponse::Ok().with_data(resp).into())
+}
+
+async fn check_workspace_file_upload(
+  state: &AppState,
+  workspace_id: &Uuid,
+  file_size: u64,
+) -> Result<(), AppResponseError> {
+  let workspace = database::workspace::select_workspace(&state.pg_pool, workspace_id).await?;
+  let owner_uid = workspace.owner_uid.ok_or_else(|| {
+    AppError::Internal(anyhow!("Workspace owner_uid is missing for workspace {workspace_id}"))
+  })?;
+  let resources = get_user_resource_limit_status(&state.pg_pool, owner_uid).await?;
+  let used = get_user_total_usage_bytes(&state.pg_pool, owner_uid).await?;
+  let total = (resources.storage_limit_mb * 1024.0 * 1024.0) as i64;
+  let single = PlanLimits::from_plan_code(&resources.plan_code).single_upload_limit as u64;
+  let remaining = total.saturating_sub(used).max(0) as u64;
+  let result = check_file_upload_limits(file_size, single, remaining);
+  if let Err(err) = &result {
+    log::warn!(
+      "[FILE_UPLOAD_DEBUG] workspace_id: {workspace_id}, owner_uid: {owner_uid}, plan: {}, used: {used}, total: {total}, upload: {file_size}, error: {err}",
+      resources.plan_code
+    );
+  }
+  result
+}
+
+fn check_file_upload_limits(
+  file_size: u64,
+  single_limit: u64,
+  remaining: u64,
+) -> Result<(), AppResponseError> {
+  if file_size > remaining {
+    return Err(AppResponseError::new(
+      ErrorCode::FileStorageLimitExceeded,
+      format!("Total storage limit exceeded. Workspace owner has {remaining} bytes available; the file is {file_size} bytes."),
+    ));
+  }
+  if file_size > single_limit {
+    return Err(AppResponseError::new(
+      ErrorCode::SingleUploadLimitExceeded,
+      format!("File size {file_size} bytes exceeds single upload limit {single_limit} bytes."),
+    ));
+  }
+  Ok(())
+}
+
+#[cfg(test)]
+mod upload_limit_tests {
+  use super::*;
+
+  #[test]
+  fn quota_and_single_file_size_have_distinct_errors() {
+    let file = 300 * 1024 * 1024;
+    assert_eq!(
+      check_file_upload_limits(file, 3 * 1024 * 1024 * 1024, file - 1).unwrap_err().code,
+      ErrorCode::FileStorageLimitExceeded
+    );
+    assert_eq!(
+      check_file_upload_limits(file + 1, file, file).unwrap_err().code,
+      ErrorCode::FileStorageLimitExceeded
+    );
+    let too_large = check_file_upload_limits(file + 1, file, file + 1).unwrap_err();
+    assert_eq!(too_large.code, ErrorCode::SingleUploadLimitExceeded);
+    assert!(too_large.message.contains("314572800 bytes"));
+    assert!(check_file_upload_limits(file, file, file).is_ok());
+  }
 }
 
 #[derive(Deserialize)]
@@ -672,53 +683,7 @@ async fn put_blob_handler_v1(
   let content_length = content_length.into_inner().into_inner();
   let content_type = content_type.into_inner().to_string();
 
-  // 协作区场景：文件上传消耗workspace owner的云空间配额
-  // 获取workspace owner的uid来检查存储限制
-  let workspace = database::workspace::select_workspace(&state.pg_pool, &path.workspace_id).await?;
-  let owner_uid = workspace.owner_uid.ok_or_else(|| {
-    AppError::Internal(anyhow!("Workspace owner_uid is missing for workspace {}", path.workspace_id))
-  })?;
-
-  info!(
-    "📦 [文件上传] 资源消耗归属 - workspace_id: {}, owner_uid: {}, uploading_user_uid: {}",
-    path.workspace_id, owner_uid, uid
-  );
-
-  // Check subscription plan limits for file upload (使用workspace owner的订阅配额)
-  let resource_status = get_user_resource_limit_status(&state.pg_pool, owner_uid).await?;
-
-  // 使用用户真实订阅的 plan_code 检查单文件大小限制
-  let single_limit_bytes = PlanLimits::from_plan_code(&resource_status.plan_code).single_upload_limit;
-
-  if content_length as i64 > single_limit_bytes {
-    return Err(
-      AppError::PlanLimitExceeded(format!(
-        "File size {:.1}MB exceeds single upload limit {:.0}MB for {} plan.",
-        content_length as f64 / (1024.0 * 1024.0),
-        single_limit_bytes as f64 / (1024.0 * 1024.0),
-        resource_status.plan_code
-      ))
-      .into(),
-    );
-  }
-
-  // Check total storage limit (使用workspace owner的存储使用量)
-  let current_total_usage = get_user_total_usage_bytes(&state.pg_pool, owner_uid)
-    .await? as i64;
-  let total_limit_bytes = (resource_status.storage_limit_mb * 1024.0 * 1024.0) as i64;
-
-  if current_total_usage + content_length as i64 > total_limit_bytes {
-    return Err(
-      AppError::PlanLimitExceeded(format!(
-        "Total storage limit exceeded. Current: {:.1}MB, Limit: {:.0}MB, Upload: {:.1}MB for {} plan.",
-        current_total_usage as f64 / (1024.0 * 1024.0),
-        total_limit_bytes as f64 / (1024.0 * 1024.0),
-        content_length as f64 / (1024.0 * 1024.0),
-        resource_status.plan_code
-      ))
-      .into(),
-    );
-  }
+  check_workspace_file_upload(&state, &path.workspace_id, content_length as u64).await?;
 
   let mut content = Vec::with_capacity(content_length);
   if content.try_reserve_exact(content_length).is_err() {
