@@ -11,6 +11,12 @@ use sqlx::postgres::{PgAdvisoryLock, PgAdvisoryLockGuard};
 use sqlx::{Connection, PgConnection, PgPool, Postgres};
 use uuid::Uuid;
 
+pub enum RevokeScope {
+  All,
+  Member(i64),
+  Sender(i64),
+}
+
 /// All sharing mutations of linked views serialize on their underlying database.
 /// The session lock also covers policy updates on either side of a SQL commit.
 pub struct ShareTarget {
@@ -87,12 +93,11 @@ impl ShareTarget {
     (self.view_id != self.object_id).then_some(self.object_id)
   }
 
-  /// A single removal keeps sent-share metadata. Stopping the share also
-  /// invalidates its link and removes all invitations. Both keep the recipient
-  /// list recoverable until policy, realtime and notification updates succeed.
-  pub async fn revoke(&self, state: &AppState, recipient: Option<i64>) -> Result<(), AppError> {
+  /// Member removal retains invitation history. Stopping sharing also removes
+  /// the invitation records and link templates within the requested scope.
+  pub async fn revoke(&self, state: &AppState, scope: RevokeScope) -> Result<(), AppError> {
     self
-      .revoke_with(&state.pg_pool, recipient, |uid, policies| {
+      .revoke_with(&state.pg_pool, scope, |uid, policies| {
         self.publish(state, uid, policies)
       })
       .await
@@ -101,7 +106,7 @@ impl ShareTarget {
   async fn revoke_with<Fut>(
     &self,
     pool: &PgPool,
-    recipient: Option<i64>,
+    scope: RevokeScope,
     mut publish: impl FnMut(i64, Vec<(Uuid, Option<i32>)>) -> Fut,
   ) -> Result<(), AppError>
   where
@@ -110,25 +115,53 @@ impl ShareTarget {
     let mut conn = self.lock(pool).await?;
     let mut tx = conn.begin().await?;
     let oid = self.view_id.to_string();
-    let members: Vec<(i64, Option<i32>, Option<String>)> = sqlx::query_as(
+    let (recipient, sender) = match scope {
+      RevokeScope::Member(uid) => (Some(uid), None),
+      RevokeScope::All => (None, None),
+      RevokeScope::Sender(uid) => {
+        // Check the same invitation records that populate "shared by me", under
+        // the same lock used to create and accept invitations.
+        let sent: bool = sqlx::query_scalar(
+          "SELECT EXISTS(SELECT FROM af_collab_member_invite WHERE oid = $1 AND send_uid = $2)",
+        )
+        .bind(&oid)
+        .bind(uid)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !sent {
+          return Err(AppError::NotEnoughPermissions);
+        }
+        (None, Some(uid))
+      },
+    };
+    let members: Vec<(i64, Option<i32>, Option<String>, Option<i32>)> = sqlx::query_as(
       "WITH recipients AS (
-         SELECT uid FROM af_collab_member WHERE oid = $1
-         UNION SELECT received_uid FROM af_collab_member_invite WHERE oid = $1 AND received_uid IS NOT NULL
+         SELECT uid FROM af_collab_member WHERE oid = $1 AND $4::bigint IS NULL
+         UNION SELECT received_uid FROM af_collab_member_invite WHERE oid = $1
+           AND received_uid IS NOT NULL AND ($4 IS NULL OR send_uid = $4)
        )
        SELECT r.uid, m.permission_id, (SELECT i.name FROM af_collab_member_invite i
-         WHERE i.oid = $1 AND i.received_uid = r.uid ORDER BY i.created_at DESC LIMIT 1)
+         WHERE i.oid = $1 AND i.received_uid = r.uid ORDER BY i.created_at DESC LIMIT 1),
+         (SELECT MAX(i.permission_id) FROM af_collab_member_invite i
+          WHERE i.oid = $1 AND i.received_uid = r.uid AND i.send_uid <> $4)
        FROM recipients r LEFT JOIN af_collab_member m ON m.oid = $1 AND m.uid = r.uid
-       WHERE r.uid <> $2 AND ($3::bigint IS NULL OR r.uid = $3) ORDER BY r.uid"
+       WHERE r.uid <> $2 AND ($3::bigint IS NULL OR r.uid = $3)
+         AND r.uid IS DISTINCT FROM $4 ORDER BY r.uid",
     )
     .bind(&oid)
     .bind(self.owner)
     .bind(recipient)
+    .bind(sender)
     .fetch_all(&mut *tx)
     .await?;
-    for (uid, old_permission, name) in members {
-      let policies = self.set_member(&mut tx, uid, None).await?;
+    for (uid, old_permission, name, other_grant) in members {
+      // A historical invitation must never restore or elevate a revoked grant.
+      let remaining = old_permission
+        .zip(other_grant)
+        .map(|(old, other)| old.min(other));
+      let policies = self.set_member(&mut tx, uid, remaining).await?;
       publish(uid, policies).await?;
-      if old_permission.is_some() {
+      if old_permission != remaining {
         notify_collab_permission_changed(
           &mut tx,
           &self.workspace_id,
@@ -136,15 +169,16 @@ impl ShareTarget {
           uid,
           name.as_deref().unwrap_or("未知文章"),
           old_permission,
-          None,
-          true,
+          remaining,
+          remaining.is_none(),
         )
         .await?;
       }
     }
     if recipient.is_none() {
-      sqlx::query("DELETE FROM af_collab_member_invite WHERE oid = $1")
+      sqlx::query("DELETE FROM af_collab_member_invite WHERE oid = $1 AND ($2::bigint IS NULL OR send_uid = $2)")
         .bind(oid)
+        .bind(sender)
         .execute(&mut *tx)
         .await?;
     }
@@ -277,7 +311,7 @@ mod tests {
     sqlx::raw_sql(
       "CREATE TABLE af_collab_member (
       uid bigint, oid text, permission_id integer, PRIMARY KEY (uid, oid));
-      CREATE TABLE af_collab_member_invite (oid text, received_uid bigint, name text, created_at timestamptz);
+      CREATE TABLE af_collab_member_invite (oid text, send_uid bigint, received_uid bigint, name text, permission_id integer, created_at timestamptz);
       CREATE TABLE af_notification (workspace_id uuid, notification_type text, payload jsonb, recipient_uid bigint);",
     )
     .execute(&mut *conn)
@@ -320,7 +354,7 @@ mod tests {
     write_grant(&mut conn, uid, database, Some(3)).await?;
     drop(conn);
     let first_attempt = target
-      .revoke_with(&pool, None, |member, policies| {
+      .revoke_with(&pool, RevokeScope::All, |member, policies| {
         assert_eq!(member, uid);
         assert_eq!(policies, vec![(first, None), (database, Some(1))]);
         std::future::ready(Err(AppError::Unhandled("injected realtime failure".into())))
@@ -334,7 +368,7 @@ mod tests {
     assert_eq!(rows, 3);
     let mut retried = Vec::new();
     target
-      .revoke_with(&pool, None, |member, policies| {
+      .revoke_with(&pool, RevokeScope::All, |member, policies| {
         retried.push((member, policies));
         std::future::ready(Ok(()))
       })
@@ -348,7 +382,7 @@ mod tests {
       ..target
     };
     last
-      .revoke_with(&pool, None, |_, policies| {
+      .revoke_with(&pool, RevokeScope::All, |_, policies| {
         assert_eq!(policies, vec![(second, None), (database, None)]);
         std::future::ready(Ok(()))
       })
@@ -364,6 +398,59 @@ mod tests {
         .fetch_one(&pool)
         .await?;
     assert_eq!(notifications, 2);
+    Ok(())
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn sender_can_withdraw_only_their_own_grants(pool: PgPool) -> Result<(), AppError> {
+    setup(&pool).await?;
+    let doc = Uuid::new_v4();
+    let target = ShareTarget {
+      workspace_id: Uuid::new_v4(),
+      view_id: doc,
+      object_id: doc,
+      owner: 1,
+      lock: PgAdvisoryLock::new(doc.to_string()),
+      linked_views: Vec::new(),
+    };
+    let mut conn = pool.acquire().await?;
+    sqlx::query(
+      "INSERT INTO af_collab_member_invite (oid,send_uid,received_uid,permission_id)
+       VALUES ($1,2,NULL,3), ($1,2,3,3), ($1,2,4,3), ($1,2,2,4),
+              ($1,1,NULL,1), ($1,1,4,1), ($1,1,5,1), ($1,2,6,3), ($1,1,6,1)",
+    )
+    .bind(doc.to_string())
+    .execute(&mut *conn)
+    .await?;
+    for (uid, permission) in [(2, 4), (3, 3), (4, 3), (5, 1), (7, 2)] {
+      write_grant(&mut conn, uid, doc, Some(permission)).await?;
+    }
+    drop(conn);
+    let rejected = target
+      .revoke_with(&pool, RevokeScope::Sender(5), |_, _| async {
+        panic!("a recipient cannot withdraw another sender's invitations")
+      })
+      .await;
+    assert!(matches!(rejected, Err(AppError::NotEnoughPermissions)));
+    target
+      .revoke_with(&pool, RevokeScope::Sender(2), |_, _| {
+        std::future::ready(Ok(()))
+      })
+      .await?;
+    let grants: Vec<(i64, i32)> =
+      sqlx::query_as("SELECT uid,permission_id FROM af_collab_member ORDER BY uid")
+        .fetch_all(&pool)
+        .await?;
+    assert_eq!(grants, vec![(2, 4), (4, 1), (5, 1), (7, 2)]);
+    let invites: Vec<(i64, Option<i64>)> = sqlx::query_as(
+      "SELECT send_uid,received_uid FROM af_collab_member_invite ORDER BY received_uid NULLS FIRST",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+      invites,
+      vec![(1, None), (1, Some(4)), (1, Some(5)), (1, Some(6))]
+    );
     Ok(())
   }
 
@@ -384,7 +471,7 @@ mod tests {
       .bind(doc.to_string())
       .execute(&mut *accepting)
       .await?;
-    let stopping = target.revoke_with(&pool, None, |uid, policies| {
+    let stopping = target.revoke_with(&pool, RevokeScope::All, |uid, policies| {
       assert_eq!(uid, 2);
       assert_eq!(policies, vec![(doc, None)]);
       std::future::ready(Ok(()))

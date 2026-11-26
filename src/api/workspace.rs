@@ -84,7 +84,7 @@ use serde::{Deserialize, Serialize};
 use crate::biz::collab::me::{get_received_collab_list, get_send_collab_list};
 use crate::biz::subscription::ops::{check_user_storage_limit, get_user_resource_limit_status};
 use crate::biz::workspace::collab_member::{notify_collab_permission_changed, notify_member_added};
-use crate::biz::workspace::sharing::ShareTarget;
+use crate::biz::workspace::sharing::{RevokeScope, ShareTarget};
 use database::pg_row::AFCollabMemberInvite;
 use database::subscription::get_user_total_usage_bytes;
 use semver::Version;
@@ -3937,7 +3937,7 @@ async fn add_collab_member_handler(
     .bind(invite.send_uid)
     .bind(recipient)
     .bind(&invite.name)
-    .bind(permission)
+    .bind(permission.min(invite.permission_id))
     .bind(invite.view_layout)
     .bind(workspace_id)
     .bind(target.database_id())
@@ -4092,7 +4092,7 @@ async fn remove_collab_member_handler(
   if member == target.owner {
     return Err(AppError::InvalidRequest("不能移除自己".into()).into());
   }
-  target.revoke(&state, Some(member)).await?;
+  target.revoke(&state, RevokeScope::Member(member)).await?;
   Ok(Json(AppResponse::Ok()))
 }
 
@@ -4104,8 +4104,12 @@ async fn stop_collab_sharing_handler(
   let (workspace_id, view_id) = path.into_inner();
   let uid = state.user_cache.get_user_uid(&user_uuid).await?;
   let target = ShareTarget::load(&state, workspace_id, view_id).await?;
-  target.require_owner(uid)?;
-  target.revoke(&state, None).await?;
+  let scope = if uid == target.owner {
+    RevokeScope::All
+  } else {
+    RevokeScope::Sender(uid)
+  };
+  target.revoke(&state, scope).await?;
   Ok(Json(AppResponse::Ok()))
 }
 
